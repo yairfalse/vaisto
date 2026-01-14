@@ -1,0 +1,25 @@
+# Elixir/Mix
+/_build/
+/cover/
+/deps/
+/doc/
+/.fetch
+erl_crash.dump
+*.ez
+*.beam
+*.plt
+.elixir_ls/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+
+# Vaisto compiled output
+*.va.beam

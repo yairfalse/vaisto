@@ -1,0 +1,110 @@
+# Vaisto
+
+**Finnish for "intuition"** — a statically-typed Scheme for the BEAM.
+
+## What is this?
+
+Vaisto is a programming language that combines:
+- **Scheme** — minimal s-expression syntax
+- **ML/Rust** — Hindley-Milner type inference
+- **Erlang** — BEAM runtime, OTP patterns
+
+The insight: Rust's type system without ownership. BEAM's process isolation makes the borrow checker unnecessary. You get safety through the runtime, not the compiler fighting you.
+
+## The Pitch
+
+```scheme
+; A typed process - seven lines
+(process counter 0
+  :increment (+ state 1)
+  :get state)
+
+; Supervision as syntax - three lines
+(supervise :one_for_one
+  (counter 0))
+```
+
+That's it. Fault-tolerant, typed, distributed-ready.
+
+In Elixir, this would be ~50 lines across multiple modules. In Kubernetes, add YAML. In Vaisto, it's the code above.
+
+## Status
+
+**Very early.** This is a working skeleton:
+- ✅ Parser (s-expressions → AST)
+- ✅ Type checker (basic inference)
+- ✅ Core Erlang emitter (AST → BEAM)
+- 🚧 Full Hindley-Milner inference
+- 🚧 Complete OTP mapping
+- 🚧 REPL
+
+## Installation
+
+```bash
+git clone <repo>
+cd vaisto
+mix deps.get
+mix test
+```
+
+## Usage
+
+```elixir
+# In iex
+iex> Vaisto.Parser.parse("(+ 1 2)")
+{:call, :+, [1, 2]}
+
+iex> Vaisto.Parser.parse("(+ 1 (* 2 3))")
+{:call, :+, [1, {:call, :*, [2, 3]}]}
+```
+
+## Compilation Pipeline
+
+```
+Vaisto source → AST → Type checker → Typed AST → Core Erlang → BEAM bytecode
+```
+
+1. **Parser**: text → AST
+2. **Type checker**: AST → Typed AST (or error)
+3. **Core Emitter**: Typed AST → Core Erlang
+4. **Erlang compiler**: Core Erlang → BEAM bytecode
+
+## Why?
+
+Modern distributed systems need fault tolerance, but the languages that offer it (Erlang, Elixir) don't give you compile-time guarantees about your data shapes. You find out at runtime.
+
+Meanwhile, the typed languages (Rust, Haskell) make concurrency hard.
+
+Vaisto says: why not both?
+
+## Design Principles
+
+1. **Types without annotations** — inference handles it
+2. **Supervision as syntax** — fault tolerance isn't a library
+3. **Contracts across services** — if message types don't match, fail at compile time
+4. **BEAM native** — processes, distribution, hot code reload
+
+## The Vision
+
+| Layer | Tool | Purpose |
+|-------|------|---------|
+| Language | Vaisto | Type-checked services |
+| Runtime | Korva | Simple orchestration |
+| Observability | AHTI | Causality correlation |
+| Deployment | SYKLI | CI that understands |
+
+## Related Work
+
+- **LFE** — Lisp on BEAM, untyped
+- **Gleam** — Typed on BEAM, not Lisp
+- **Typed Racket** — Typed Scheme, not BEAM
+
+Vaisto fills the gap: typed + Lisp + BEAM.
+
+## Origin
+
+Conceived January 2026, 3am Berlin, while waiting for family to fly home. Started as "learn Elixir methodically," became a language design through following intuition.
+
+## License
+
+MIT

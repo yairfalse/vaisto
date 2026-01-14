@@ -1,0 +1,16 @@
+; Vaisto Example: Counter with Supervision
+; The "First Light" of a new language
+;
+; This file demonstrates Vaisto's core thesis:
+; Infrastructure as syntax, not configuration.
+
+; A typed process with Int state
+; Handles two messages: :increment and :get
+(process counter 0
+  :increment (+ state 1)
+  :get state)
+
+; Supervision as syntax
+; If counter crashes, restart it with initial state
+(supervise :one_for_one
+  (counter 0))
