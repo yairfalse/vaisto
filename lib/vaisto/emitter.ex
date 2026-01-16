@@ -26,11 +26,32 @@ defmodule Vaisto.Emitter do
   def to_elixir({:lit, :float, f}), do: f
   def to_elixir({:lit, :bool, b}), do: b
   def to_elixir({:lit, :atom, a}), do: a
+  def to_elixir({:lit, :string, s}), do: s
+
+  # List literal
+  def to_elixir({:list, elements, _type}) do
+    Enum.map(elements, &to_elixir/1)
+  end
 
   # Variables become Elixir variables
   # Using Macro.var ensures proper hygiene in quote blocks
   def to_elixir({:var, name, _type}) do
     Macro.var(name, nil)
+  end
+
+  # If expression → Elixir if
+  def to_elixir({:if, condition, then_branch, else_branch, _type}) do
+    cond_ast = to_elixir(condition)
+    then_ast = to_elixir(then_branch)
+    else_ast = to_elixir(else_branch)
+
+    quote do
+      if unquote(cond_ast) do
+        unquote(then_ast)
+      else
+        unquote(else_ast)
+      end
+    end
   end
 
   # Match expression → Elixir case
@@ -101,6 +122,18 @@ defmodule Vaisto.Emitter do
     nil
   end
 
+  # Function definition → Elixir def
+  def to_elixir({:defn, name, params, body, _type}) do
+    param_vars = Enum.map(params, &Macro.var(&1, nil))
+    body_ast = to_elixir(body)
+
+    quote do
+      def unquote(name)(unquote_splicing(param_vars)) do
+        unquote(body_ast)
+      end
+    end
+  end
+
   # Record construction → tagged tuple {:record_name, field1, field2, ...}
   def to_elixir({:call, name, args, {:record, name, _fields}}) do
     typed_args = Enum.map(args, &to_elixir/1)
@@ -143,14 +176,59 @@ defmodule Vaisto.Emitter do
   def compile(typed_ast, module_name \\ :vaisto_module)
 
   # Module compilation - produces multiple modules (processes, supervisors)
-  def compile({:module, _forms} = module_ast, _module_name) do
+  # or a single module with user-defined functions + main
+  def compile({:module, _forms} = module_ast, module_name) do
     elixir_asts = to_elixir(module_ast)
 
+    # Separate standalone modules (GenServers, Supervisors) from function defs
+    {standalone_modules, fn_defs_and_exprs} = Enum.split_with(elixir_asts, fn ast ->
+      match?({:defmodule, _, _}, ast)
+    end)
+
     try do
-      results = Enum.flat_map(elixir_asts, fn ast ->
+      # Compile standalone modules first
+      standalone_results = Enum.flat_map(standalone_modules, fn ast ->
         Code.compile_quoted(ast)
       end)
-      {:ok, :module, results}
+
+      # If there are function defs or expressions, wrap them in a module
+      main_results = case fn_defs_and_exprs do
+        [] -> []
+        items ->
+          # Separate defn-generated defs from expression results
+          {defs, exprs} = Enum.split_with(items, fn
+            {:def, _, _} -> true
+            _ -> false
+          end)
+
+          # Build main function from expressions (if any)
+          main_def = case exprs do
+            [] -> []
+            [single] ->
+              [quote do
+                def main do
+                  unquote(single)
+                end
+              end]
+            multiple ->
+              # Combine multiple expressions into a block, return last
+              [quote do
+                def main do
+                  unquote_splicing(multiple)
+                end
+              end]
+          end
+
+          module_ast = quote do
+            defmodule unquote(module_name) do
+              unquote_splicing(defs ++ main_def)
+            end
+          end
+
+          Code.compile_quoted(module_ast)
+      end
+
+      {:ok, module_name, main_results ++ standalone_results}
     rescue
       e -> {:error, Exception.message(e)}
     end

@@ -44,6 +44,26 @@ defmodule Vaisto.TypeChecker do
   def check(f, _env) when is_float(f), do: {:ok, :float, {:lit, :float, f}}
   def check(true, _env), do: {:ok, :bool, {:lit, :bool, true}}
   def check(false, _env), do: {:ok, :bool, {:lit, :bool, false}}
+  def check({:string, s}, _env), do: {:ok, :string, {:lit, :string, s}}
+
+  # List literal: (list 1 2 3) → homogeneous list
+  def check({:list, []}, _env), do: {:ok, {:list, :any}, {:list, [], {:list, :any}}}
+  def check({:list, elements}, env) do
+    case check_args(elements, env) do
+      {:ok, types, typed_elements} ->
+        # Infer element type from first element (lists are homogeneous)
+        elem_type = hd(types)
+        # Verify all elements have the same type
+        case Enum.find(types, &(not types_match?(elem_type, &1))) do
+          nil ->
+            list_type = {:list, elem_type}
+            {:ok, list_type, {:list, typed_elements, list_type}}
+          mismatched ->
+            {:error, "List elements must have the same type: expected #{inspect(elem_type)}, got #{inspect(mismatched)}"}
+        end
+      error -> error
+    end
+  end
 
   # Atoms - could be message types OR variable references
   # If it's in the env (like :state in a handler), it's a variable
@@ -104,6 +124,17 @@ defmodule Vaisto.TypeChecker do
     end
   end
 
+  # If expression: (if cond then else)
+  def check({:if, condition, then_branch, else_branch}, env) do
+    with {:ok, cond_type, typed_cond} <- check(condition, env),
+         :ok <- expect_bool(cond_type),
+         {:ok, then_type, typed_then} <- check(then_branch, env),
+         {:ok, else_type, typed_else} <- check(else_branch, env),
+         :ok <- expect_same_type(then_type, else_type) do
+      {:ok, then_type, {:if, typed_cond, typed_then, typed_else, then_type}}
+    end
+  end
+
   # Match expression: (match expr [pattern body] ...)
   def check({:match, expr, clauses}, env) do
     with {:ok, expr_type, typed_expr} <- check(expr, env),
@@ -157,6 +188,25 @@ defmodule Vaisto.TypeChecker do
   def check({:deftype, name, fields}, _env) do
     record_type = {:record, name, fields}
     {:ok, record_type, {:deftype, name, fields, record_type}}
+  end
+
+  # Function definition: (defn add [x y] (+ x y))
+  # For now, parameters are typed as :any until we add type annotations
+  def check({:defn, name, params, body}, env) do
+    # Create env with parameters bound to :any
+    param_types = Enum.map(params, fn _ -> :any end)
+    param_env = Enum.zip(params, param_types) |> Map.new()
+
+    # Add the function itself to env for recursion (with :any return type initially)
+    self_type = {:fn, param_types, :any}
+    extended_env = env |> Map.merge(param_env) |> Map.put(name, self_type)
+
+    case check(body, extended_env) do
+      {:ok, ret_type, typed_body} ->
+        func_type = {:fn, param_types, ret_type}
+        {:ok, func_type, {:defn, name, params, typed_body, func_type}}
+      error -> error
+    end
   end
 
   # Record construction: (point 1 2) when point is a record type
@@ -296,6 +346,15 @@ defmodule Vaisto.TypeChecker do
   defp types_match?(t, t), do: true
   defp types_match?(_, _), do: false
 
+  defp expect_bool(:bool), do: :ok
+  defp expect_bool(:any), do: :ok
+  defp expect_bool(other), do: {:error, "Expected bool in condition, got #{inspect(other)}"}
+
+  defp expect_same_type(t, t), do: :ok
+  defp expect_same_type(:any, _), do: :ok
+  defp expect_same_type(_, :any), do: :ok
+  defp expect_same_type(t1, t2), do: {:error, "Branch types must match: #{inspect(t1)} vs #{inspect(t2)}"}
+
   defp check_handlers(handlers, state_type, env) do
     handler_env = Map.put(env, :state, state_type)
     
@@ -327,30 +386,73 @@ defmodule Vaisto.TypeChecker do
   end
 
   # Check a module (list of top-level forms)
-  # Processes get added to env so supervise can reference them
+  # Two-pass approach for mutual recursion:
+  # 1. First pass: register all function/type signatures
+  # 2. Second pass: type-check all bodies with full environment
   defp check_module([], _env, acc) do
     {:ok, :module, {:module, Enum.reverse(acc)}}
   end
 
-  defp check_module([form | rest], env, acc) do
+  defp check_module(forms, env, acc) when is_list(forms) and acc == [] do
+    # First pass: collect all signatures
+    env_with_signatures = Enum.reduce(forms, env, fn form, acc_env ->
+      case form do
+        {:defn, name, params, _body} ->
+          param_types = Enum.map(params, fn _ -> :any end)
+          func_type = {:fn, param_types, :any}
+          Map.put(acc_env, name, func_type)
+
+        {:deftype, name, fields} ->
+          field_types = Enum.map(fields, fn _ -> :any end)
+          record_type = {:record, name, fields}
+          constructor_type = {:fn, field_types, record_type}
+          Map.put(acc_env, name, constructor_type)
+
+        {:process, name, initial_state, handlers} ->
+          # Infer process type from handlers
+          msg_types = Enum.map(handlers, fn {msg, _body} -> msg end)
+          # Rough state type from initial_state
+          state_type = case initial_state do
+            n when is_integer(n) -> :int
+            f when is_float(f) -> :float
+            _ -> :any
+          end
+          process_type = {:process, state_type, msg_types}
+          Map.put(acc_env, name, process_type)
+
+        _ ->
+          acc_env
+      end
+    end)
+
+    # Second pass: type-check each form with full environment
+    check_module_forms(forms, env_with_signatures, [])
+  end
+
+  defp check_module_forms([], _env, acc) do
+    {:ok, :module, {:module, Enum.reverse(acc)}}
+  end
+
+  defp check_module_forms([form | rest], env, acc) do
     case check(form, env) do
       {:ok, _type, typed_form} ->
-        # Add definitions to env for later forms to reference
+        # Update env with more precise types after checking
         new_env = case typed_form do
           {:process, name, _init, _handlers, process_type} ->
             Map.put(env, name, process_type)
 
           {:deftype, name, fields, record_type} ->
-            # Register constructor: point → fn([any, any], {:record, :point, [:x, :y]})
-            # For now, fields are untyped (any)
             field_types = Enum.map(fields, fn _ -> :any end)
             constructor_type = {:fn, field_types, record_type}
             Map.put(env, name, constructor_type)
 
+          {:defn, name, _params, _body, func_type} ->
+            Map.put(env, name, func_type)
+
           _ ->
             env
         end
-        check_module(rest, new_env, [typed_form | acc])
+        check_module_forms(rest, new_env, [typed_form | acc])
 
       {:error, _} = err ->
         err

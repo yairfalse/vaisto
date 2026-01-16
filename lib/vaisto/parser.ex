@@ -16,14 +16,45 @@ defmodule Vaisto.Parser do
   end
 
   # Tokenizer: Split by parens/brackets and whitespace, strip comments
+  # Preserves quoted strings as single tokens
   defp tokenize(code) do
     code
     |> strip_comments()
-    |> String.replace("(", " ( ")
-    |> String.replace(")", " ) ")
-    |> String.replace("[", " [ ")
-    |> String.replace("]", " ] ")
-    |> String.split()
+    |> extract_strings([])
+    |> then(fn {code_with_placeholders, strings} ->
+      tokens = code_with_placeholders
+        |> String.replace("(", " ( ")
+        |> String.replace(")", " ) ")
+        |> String.replace("[", " [ ")
+        |> String.replace("]", " ] ")
+        |> String.split()
+
+      # Restore strings in their placeholder positions
+      restore_strings(tokens, strings)
+    end)
+  end
+
+  # Extract quoted strings and replace with placeholders
+  defp extract_strings(code, acc) do
+    case Regex.run(~r/"([^"\\]|\\.)*"/, code, return: :index) do
+      [{start, len} | _] ->
+        string = String.slice(code, start, len)
+        placeholder = "__STRING_#{length(acc)}__"
+        new_code = String.slice(code, 0, start) <> placeholder <> String.slice(code, start + len, String.length(code))
+        extract_strings(new_code, acc ++ [string])
+      nil ->
+        {code, acc}
+    end
+  end
+
+  # Restore strings from placeholders
+  defp restore_strings(tokens, strings) do
+    Enum.map(tokens, fn token ->
+      case Regex.run(~r/^__STRING_(\d+)__$/, token) do
+        [_, idx] -> Enum.at(strings, String.to_integer(idx))
+        nil -> token
+      end
+    end)
   end
 
   # Remove ; comments (everything from ; to end of line)
@@ -57,12 +88,16 @@ defmodule Vaisto.Parser do
   defp parse_list([")" | tail], acc) do
     ast = case acc do
       # Special forms
+      [:if | rest] -> parse_if(rest)
       [:let | rest] -> parse_let(rest)
       [:match | rest] -> parse_match(rest)
       [:process | rest] -> parse_process(rest)
       [:supervise | rest] -> parse_supervise(rest)
       [:def | rest] -> parse_def(rest)
+      [:defn | rest] -> parse_defn(rest)
       [:deftype | rest] -> parse_deftype(rest)
+      # List literal: (list 1 2 3) → {:list, [1, 2, 3]}
+      [:list | elements] -> {:list, elements}
       # Regular function call
       [func | args] -> {:call, func, args}
       [] -> {:unit}
@@ -98,6 +133,11 @@ defmodule Vaisto.Parser do
 
   # Special form parsers
 
+  # (if cond then else) → {:if, cond, then, else}
+  defp parse_if([condition, then_branch, else_branch]) do
+    {:if, condition, then_branch, else_branch}
+  end
+
   # (let [x 1 y 2] body) → {:let, [{:x, 1}, {:y, 2}], body}
   defp parse_let([{:bracket, bindings}, body]) do
     pairs = bindings
@@ -126,6 +166,11 @@ defmodule Vaisto.Parser do
     {:def, name, args, body}
   end
 
+  # (defn add [x y] (+ x y)) → {:defn, :add, [:x, :y], body}
+  defp parse_defn([name, {:bracket, params}, body]) do
+    {:defn, name, params, body}
+  end
+
   defp parse_deftype([name | fields]) do
     {:deftype, name, fields}
   end
@@ -139,11 +184,27 @@ defmodule Vaisto.Parser do
   # Token conversion
   defp parse_token(token) do
     cond do
+      # String literal: "hello" → {:string, "hello"}
+      String.starts_with?(token, "\"") ->
+        # Remove surrounding quotes and unescape
+        token
+        |> String.slice(1..-2//1)
+        |> unescape_string()
+        |> then(&{:string, &1})
       token =~ ~r/^-?\d+$/ -> String.to_integer(token)
       token =~ ~r/^-?\d+\.\d+$/ -> String.to_float(token)
-      String.starts_with?(token, ":") -> 
+      String.starts_with?(token, ":") ->
         token |> String.trim_leading(":") |> String.to_atom()
       true -> String.to_atom(token)
     end
+  end
+
+  # Handle common escape sequences in strings
+  defp unescape_string(s) do
+    s
+    |> String.replace("\\n", "\n")
+    |> String.replace("\\t", "\t")
+    |> String.replace("\\\"", "\"")
+    |> String.replace("\\\\", "\\")
   end
 end
