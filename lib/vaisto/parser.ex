@@ -15,12 +15,14 @@ defmodule Vaisto.Parser do
     |> do_parse([])
   end
 
-  # Tokenizer: Split by parens and whitespace, strip comments
+  # Tokenizer: Split by parens/brackets and whitespace, strip comments
   defp tokenize(code) do
     code
     |> strip_comments()
     |> String.replace("(", " ( ")
     |> String.replace(")", " ) ")
+    |> String.replace("[", " [ ")
+    |> String.replace("]", " ] ")
     |> String.split()
   end
 
@@ -55,6 +57,7 @@ defmodule Vaisto.Parser do
   defp parse_list([")" | tail], acc) do
     ast = case acc do
       # Special forms
+      [:let | rest] -> parse_let(rest)
       [:process | rest] -> parse_process(rest)
       [:supervise | rest] -> parse_supervise(rest)
       [:def | rest] -> parse_def(rest)
@@ -71,8 +74,25 @@ defmodule Vaisto.Parser do
     parse_list(rest, acc ++ [nested])
   end
 
+  defp parse_list(["[" | tail], acc) do
+    {rest, bracket_contents} = parse_bracket(tail, [])
+    parse_list(rest, acc ++ [{:bracket, bracket_contents}])
+  end
+
   defp parse_list([token | tail], acc) do
     parse_list(tail, acc ++ [parse_token(token)])
+  end
+
+  # Parse bracket contents [...] - used for let bindings
+  defp parse_bracket(["]" | tail], acc), do: {tail, acc}
+
+  defp parse_bracket(["(" | tail], acc) do
+    {rest, nested} = parse_list(tail, [])
+    parse_bracket(rest, acc ++ [nested])
+  end
+
+  defp parse_bracket([token | tail], acc) do
+    parse_bracket(tail, acc ++ [parse_token(token)])
   end
 
   # Special form parsers

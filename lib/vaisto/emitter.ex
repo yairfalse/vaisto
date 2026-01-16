@@ -43,6 +43,29 @@ defmodule Vaisto.Emitter do
     {op, [], [to_elixir(left), to_elixir(right)]}
   end
 
+  # spawn: start a GenServer and return its PID
+  # (spawn counter 0) → Counter.start_link(0) |> elem(1)
+  def to_elixir({:call, :spawn, [process_name, init_arg], _pid_type}) do
+    module = camelize(process_name)
+    init = to_elixir(init_arg)
+
+    quote do
+      {:ok, pid} = unquote(module).start_link(unquote(init))
+      pid
+    end
+  end
+
+  # send (!): call the GenServer with a message
+  # (! pid :increment) → GenServer.call(pid, :increment)
+  def to_elixir({:call, :"!", [pid_expr, msg_expr], _type}) do
+    pid = to_elixir(pid_expr)
+    msg = to_elixir(msg_expr)
+
+    quote do
+      GenServer.call(unquote(pid), unquote(msg))
+    end
+  end
+
   # Generic function call
   def to_elixir({:call, func, args, _type}) do
     {func, [], Enum.map(args, &to_elixir/1)}
@@ -85,6 +108,19 @@ defmodule Vaisto.Emitter do
         Code.compile_quoted(ast)
       end)
       {:ok, :module, results}
+    rescue
+      e -> {:error, Exception.message(e)}
+    end
+  end
+
+  # Process definition - compile directly to GenServer module
+  def compile({:process, name, _init, _handlers, _type} = process_ast, _module_name) do
+    elixir_ast = to_elixir(process_ast)
+    module = camelize(name)
+
+    try do
+      [{^module, bytecode}] = Code.compile_quoted(elixir_ast)
+      {:ok, module, bytecode}
     rescue
       e -> {:error, Exception.message(e)}
     end
