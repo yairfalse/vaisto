@@ -657,5 +657,75 @@ defmodule Vaisto.EmitterTest do
       # [1,2,3,4,5] -> [2,4,6,8,10] -> [6,8,10]
       assert ChainAnonE2E.main() == [6, 8, 10]
     end
+
+    # --- Extern function tests ---
+
+    test "extern erlang:hd" do
+      code = """
+      (extern erlang:hd [:any] :any)
+      (erlang:hd (list 1 2 3))
+      """
+
+      ast = Vaisto.Parser.parse(code)
+      {:ok, :module, typed_ast} = Vaisto.TypeChecker.check(ast)
+      {:ok, ExternHdE2E, _} = Emitter.compile(typed_ast, ExternHdE2E)
+
+      assert ExternHdE2E.main() == 1
+    end
+
+    test "extern erlang:tl" do
+      code = """
+      (extern erlang:tl [:any] :any)
+      (erlang:tl (list 1 2 3))
+      """
+
+      ast = Vaisto.Parser.parse(code)
+      {:ok, :module, typed_ast} = Vaisto.TypeChecker.check(ast)
+      {:ok, ExternTlE2E, _} = Emitter.compile(typed_ast, ExternTlE2E)
+
+      assert ExternTlE2E.main() == [2, 3]
+    end
+
+    test "extern erlang:length" do
+      code = """
+      (extern erlang:length [:any] :int)
+      (erlang:length (list 1 2 3 4 5))
+      """
+
+      ast = Vaisto.Parser.parse(code)
+      {:ok, :module, typed_ast} = Vaisto.TypeChecker.check(ast)
+      {:ok, ExternLengthE2E, _} = Emitter.compile(typed_ast, ExternLengthE2E)
+
+      assert ExternLengthE2E.main() == 5
+    end
+
+    test "chained extern calls" do
+      code = """
+      (extern erlang:hd [:any] :any)
+      (extern erlang:tl [:any] :any)
+      (erlang:hd (erlang:tl (erlang:tl (list 1 2 3 4))))
+      """
+
+      ast = Vaisto.Parser.parse(code)
+      {:ok, :module, typed_ast} = Vaisto.TypeChecker.check(ast)
+      {:ok, ChainedExternE2E, _} = Emitter.compile(typed_ast, ChainedExternE2E)
+
+      # tl [1,2,3,4] = [2,3,4], tl [2,3,4] = [3,4], hd [3,4] = 3
+      assert ChainedExternE2E.main() == 3
+    end
+
+    test "extern with user function" do
+      code = """
+      (extern erlang:abs [:int] :int)
+      (defn my-abs [x] (erlang:abs x))
+      (my-abs -42)
+      """
+
+      ast = Vaisto.Parser.parse(code)
+      {:ok, :module, typed_ast} = Vaisto.TypeChecker.check(ast)
+      {:ok, ExternInFnE2E, _} = Emitter.compile(typed_ast, ExternInFnE2E)
+
+      assert ExternInFnE2E.main() == 42
+    end
   end
 end

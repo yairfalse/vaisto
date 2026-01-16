@@ -97,6 +97,7 @@ defmodule Vaisto.Parser do
       [:defn | rest] -> parse_defn(rest)
       [:deftype | rest] -> parse_deftype(rest)
       [:fn | rest] -> parse_fn(rest)
+      [:extern | rest] -> parse_extern(rest)
       # List literal: (list 1 2 3) → {:list, [1, 2, 3]}
       [:list | elements] -> {:list, elements}
       # Regular function call
@@ -266,6 +267,11 @@ defmodule Vaisto.Parser do
     {:deftype, name, field_pairs}
   end
 
+  # (extern erlang:hd [(List :any)] :any) → {:extern, :erlang, :hd, [type_expr], ret_type}
+  defp parse_extern([{:qualified, mod, func}, {:bracket, arg_types}, ret_type]) do
+    {:extern, mod, func, arg_types, ret_type}
+  end
+
   defp parse_handlers(handlers) do
     handlers
     |> Enum.chunk_every(2)
@@ -284,8 +290,14 @@ defmodule Vaisto.Parser do
         |> then(&{:string, &1})
       token =~ ~r/^-?\d+$/ -> String.to_integer(token)
       token =~ ~r/^-?\d+\.\d+$/ -> String.to_float(token)
+      # Type atom: :int → :int
       String.starts_with?(token, ":") ->
         token |> String.trim_leading(":") |> String.to_atom()
+      # Qualified name: erlang:hd → {:qualified, :erlang, :hd}
+      # Must contain : but not start with :
+      String.contains?(token, ":") ->
+        [mod, func] = String.split(token, ":", parts: 2)
+        {:qualified, String.to_atom(mod), String.to_atom(func)}
       true -> String.to_atom(token)
     end
   end

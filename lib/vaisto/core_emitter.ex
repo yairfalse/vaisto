@@ -57,6 +57,7 @@ defmodule Vaisto.CoreEmitter do
       {:defn, _, _, _, _} -> true
       {:defn_multi, _, _, _} -> true
       {:deftype, _, _, _} -> true  # Skip deftypes (compile-time only)
+      {:extern, _, _, _} -> true   # Skip externs (compile-time only)
       _ -> false
     end)
 
@@ -452,6 +453,16 @@ defmodule Vaisto.CoreEmitter do
   defp to_core_expr({:call, name, args, {:record, name, _fields}}, user_fns) do
     elements = [:cerl.c_atom(name) | Enum.map(args, &to_core_expr(&1, user_fns))]
     :cerl.c_tuple(elements)
+  end
+
+  # Qualified call: (erlang:hd xs) → :cerl.c_call(:erlang, :hd, args)
+  defp to_core_expr({:call, {:qualified, mod, func}, args, _type}, user_fns) do
+    arg_cores = Enum.map(args, &to_core_expr(&1, user_fns))
+    :cerl.c_call(
+      :cerl.c_atom(mod),
+      :cerl.c_atom(func),
+      arg_cores
+    )
   end
 
   # User-defined function call → local apply

@@ -384,6 +384,24 @@ defmodule Vaisto.TypeChecker do
     end
   end
 
+  # Qualified call: (erlang:hd xs)
+  # Must come before generic function call to match first
+  def check({:call, {:qualified, mod, func}, args}, env) do
+    # Look up the extern in environment using "mod:func" key
+    extern_name = :"#{mod}:#{func}"
+    case Map.get(env, extern_name) do
+      nil ->
+        {:error, "Unknown extern: #{mod}:#{func}"}
+      {:fn, _param_types, ret_type} ->
+        with {:ok, _arg_types, typed_args} <- check_args(args, env) do
+          # Note: we're not enforcing arg type checking for externs yet
+          {:ok, ret_type, {:call, {:qualified, mod, func}, typed_args, ret_type}}
+        end
+      other ->
+        {:error, "#{mod}:#{func} is not a function, got: #{inspect(other)}"}
+    end
+  end
+
   # Function call (general case)
   def check({:call, func, args}, env) do
     with {:ok, func_type} <- lookup_function(func, env),
@@ -503,10 +521,28 @@ defmodule Vaisto.TypeChecker do
   # Record construction: (point 1 2) when point is a record type
   # Handled in function call - lookup_function returns the constructor type
 
+  # Extern declaration: (extern erlang:hd [:any] :any)
+  # Registers the function signature in the environment
+  def check({:extern, mod, func, arg_types, ret_type}, _env) do
+    # Parse type expressions (e.g., {:call, :List, [:any]} → {:list, :any})
+    parsed_arg_types = Enum.map(arg_types, &parse_type_expr/1)
+    parsed_ret_type = parse_type_expr(ret_type)
+    func_type = {:fn, parsed_arg_types, parsed_ret_type}
+    {:ok, :extern, {:extern, mod, func, func_type}}
+  end
+
   # Fallback
   def check(other, _env) do
     {:error, "Unknown expression: #{inspect(other)}"}
   end
+
+  # Parse type expressions from extern declarations
+  # Simple types: :int, :any, :string
+  defp parse_type_expr(t) when is_atom(t), do: t
+  # List type: {:call, :List, [:any]} → {:list, :any}
+  defp parse_type_expr({:call, :List, [elem_type]}), do: {:list, parse_type_expr(elem_type)}
+  # Fallback
+  defp parse_type_expr(other), do: other
 
   # Helper functions
 
@@ -820,6 +856,14 @@ defmodule Vaisto.TypeChecker do
           process_type = {:process, state_type, msg_types}
           Map.put(acc_env, name, process_type)
 
+        {:extern, mod, func, arg_types, ret_type} ->
+          # Register extern function under "mod:func" key
+          extern_name = :"#{mod}:#{func}"
+          parsed_arg_types = Enum.map(arg_types, &parse_type_expr/1)
+          parsed_ret_type = parse_type_expr(ret_type)
+          func_type = {:fn, parsed_arg_types, parsed_ret_type}
+          Map.put(acc_env, extern_name, func_type)
+
         _ ->
           acc_env
       end
@@ -852,6 +896,11 @@ defmodule Vaisto.TypeChecker do
 
           {:defn_multi, name, _arity, _clauses, func_type} ->
             Map.put(env, name, func_type)
+
+          {:extern, mod, func, func_type} ->
+            # Extern already registered in first pass, but keep in typed forms
+            extern_name = :"#{mod}:#{func}"
+            Map.put(env, extern_name, func_type)
 
           _ ->
             env

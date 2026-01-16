@@ -274,6 +274,17 @@ defmodule Vaisto.Emitter do
     {:{}, [], [name | typed_args]}
   end
 
+  # Qualified call: (erlang:hd xs) → :erlang.hd(xs)
+  def to_elixir({:call, {:qualified, mod, func}, args, _type}) do
+    typed_args = Enum.map(args, &to_elixir/1)
+    {{:., [], [mod, func]}, [], typed_args}
+  end
+
+  # Extern declaration - no runtime code, just type information
+  def to_elixir({:extern, _mod, _func, _func_type}) do
+    nil
+  end
+
   # Generic function call
   def to_elixir({:call, func, args, _type}) do
     {func, [], Enum.map(args, &to_elixir/1)}
