@@ -125,9 +125,20 @@ defmodule Vaisto.Emitter do
     quote do: length(unquote(list_ast))
   end
 
+  # --- Anonymous functions ---
+
+  # Anonymous function: (fn [x] body) → Elixir fn
+  def to_elixir({:fn, params, body, _type}) do
+    param_vars = Enum.map(params, &Macro.var(&1, nil))
+    body_ast = to_elixir(body)
+
+    {:fn, [],
+      [{:->, [], [param_vars, body_ast]}]}
+  end
+
   # --- Higher-order list functions ---
 
-  # map: apply function to each element
+  # map: apply function to each element (named function)
   def to_elixir({:call, :map, [func_name, list_expr], _type}) when is_atom(func_name) do
     list_ast = to_elixir(list_expr)
     # Build: Enum.map(list, fn x -> func_name(x) end)
@@ -138,7 +149,16 @@ defmodule Vaisto.Emitter do
     end
   end
 
-  # filter: keep elements where predicate is true
+  # map with anonymous function
+  def to_elixir({:call, :map, [{:fn, _, _, _} = fn_ast, list_expr], _type}) do
+    list_ast = to_elixir(list_expr)
+    fn_elixir = to_elixir(fn_ast)
+    quote do
+      Enum.map(unquote(list_ast), unquote(fn_elixir))
+    end
+  end
+
+  # filter: keep elements where predicate is true (named function)
   def to_elixir({:call, :filter, [func_name, list_expr], _type}) when is_atom(func_name) do
     list_ast = to_elixir(list_expr)
     # Build: Enum.filter(list, fn x -> predicate(x) end)
@@ -149,7 +169,16 @@ defmodule Vaisto.Emitter do
     end
   end
 
-  # fold: left fold with accumulator
+  # filter with anonymous function
+  def to_elixir({:call, :filter, [{:fn, _, _, _} = fn_ast, list_expr], _type}) do
+    list_ast = to_elixir(list_expr)
+    fn_elixir = to_elixir(fn_ast)
+    quote do
+      Enum.filter(unquote(list_ast), unquote(fn_elixir))
+    end
+  end
+
+  # fold: left fold with accumulator (named function)
   def to_elixir({:call, :fold, [func_name, init_expr, list_expr], _type}) when is_atom(func_name) do
     init_ast = to_elixir(init_expr)
     list_ast = to_elixir(list_expr)
@@ -159,6 +188,21 @@ defmodule Vaisto.Emitter do
     call_ast = {func_name, [], [acc_var, elem_var]}
     quote do
       Enum.reduce(unquote(list_ast), unquote(init_ast), fn unquote(elem_var), unquote(acc_var) -> unquote(call_ast) end)
+    end
+  end
+
+  # fold with anonymous function
+  # Note: anonymous fn params are (acc, elem) - need to swap for Enum.reduce which uses (elem, acc)
+  def to_elixir({:call, :fold, [{:fn, params, body, fn_type}, init_expr, list_expr], _type}) do
+    init_ast = to_elixir(init_expr)
+    list_ast = to_elixir(list_expr)
+    # User writes (fn [acc elem] body) but Enum.reduce calls with (elem, acc)
+    # So we swap the params in the wrapper
+    [acc_param, elem_param] = params
+    swapped_fn = {:fn, [elem_param, acc_param], body, fn_type}
+    fn_elixir = to_elixir(swapped_fn)
+    quote do
+      Enum.reduce(unquote(list_ast), unquote(init_ast), unquote(fn_elixir))
     end
   end
 
@@ -202,6 +246,26 @@ defmodule Vaisto.Emitter do
         unquote(body_ast)
       end
     end
+  end
+
+  # Multi-clause function definition → multiple Elixir def clauses
+  # (defn len [[] 0] [[h | t] (+ 1 (len t))]) → def len([]), do: 0; def len([h | t]), do: 1 + len(t)
+  # Note: typed AST has arity inserted: {:defn_multi, name, arity, clauses, type}
+  def to_elixir({:defn_multi, name, _arity, clauses, _type}) do
+    # Generate multiple def clauses, one per pattern
+    clause_defs = Enum.map(clauses, fn {pattern, body, _body_type} ->
+      pattern_ast = emit_fn_pattern(pattern)
+      body_ast = to_elixir(body)
+
+      quote do
+        def unquote(name)(unquote(pattern_ast)) do
+          unquote(body_ast)
+        end
+      end
+    end)
+
+    # Return a block of all defs
+    {:__block__, [], clause_defs}
   end
 
   # Record construction → tagged tuple {:record_name, field1, field2, ...}
@@ -265,8 +329,14 @@ defmodule Vaisto.Emitter do
       main_results = case fn_defs_and_exprs do
         [] -> []
         items ->
+          # Flatten any __block__ wrappers from defn_multi
+          flattened = Enum.flat_map(items, fn
+            {:__block__, [], block_items} -> block_items
+            other -> [other]
+          end)
+
           # Separate defn-generated defs from expression results
-          {defs, exprs} = Enum.split_with(items, fn
+          {defs, exprs} = Enum.split_with(flattened, fn
             {:def, _, _} -> true
             _ -> false
           end)
@@ -391,6 +461,39 @@ defmodule Vaisto.Emitter do
   defp emit_pattern({:lit, :atom, a}), do: a
   defp emit_pattern(a) when is_atom(a), do: a
   defp emit_pattern(n) when is_integer(n), do: n
+
+  # Function head patterns (for multi-clause functions)
+  # These patterns are used directly as function arguments
+
+  # Empty list pattern: [] → []
+  defp emit_fn_pattern({:list, [], _type}), do: []
+
+  # List with cons pattern: [h | t] → [h | t]
+  defp emit_fn_pattern({:list, elements, _type}) do
+    Enum.map(elements, &emit_fn_pattern/1)
+  end
+
+  # Cons pattern from typed AST: {:cons, head, tail}
+  defp emit_fn_pattern({:cons, head, tail, _type}) do
+    head_ast = emit_fn_pattern(head)
+    tail_ast = emit_fn_pattern(tail)
+    [{:|, [], [head_ast, tail_ast]}]
+  end
+
+  # Variable in pattern
+  defp emit_fn_pattern({:var, name, _type}) do
+    Macro.var(name, nil)
+  end
+
+  # Literals in patterns
+  defp emit_fn_pattern({:lit, :int, n}), do: n
+  defp emit_fn_pattern({:lit, :atom, a}), do: a
+  defp emit_fn_pattern({:lit, :bool, b}), do: b
+
+  # Untyped atoms (underscore, etc)
+  defp emit_fn_pattern(:_), do: Macro.var(:_, nil)
+  defp emit_fn_pattern(a) when is_atom(a), do: Macro.var(a, nil)
+  defp emit_fn_pattern(n) when is_integer(n), do: n
 
   defp emit_supervisor(strategy, children) do
     # Build child specs at compile time

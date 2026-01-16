@@ -185,6 +185,7 @@ defmodule Vaisto.TypeChecker do
 
   # map: (a → b) → (list a) → (list b)
   # (map func list) - applies func to each element
+  # Named function version
   def check({:call, :map, [func_name, list_expr]}, env) when is_atom(func_name) do
     with {:ok, func_type} <- lookup_function(func_name, env),
          {:ok, list_type, typed_list} <- check(list_expr, env) do
@@ -207,8 +208,28 @@ defmodule Vaisto.TypeChecker do
     end
   end
 
+  # map with anonymous function
+  def check({:call, :map, [{:fn, _, _} = fn_expr, list_expr]}, env) do
+    with {:ok, func_type, typed_fn} <- check(fn_expr, env),
+         {:ok, list_type, typed_list} <- check(list_expr, env) do
+      case {func_type, list_type} do
+        {{:fn, [_arg_type], ret_type}, {:list, _elem_type}} ->
+          result_type = {:list, ret_type}
+          {:ok, result_type, {:call, :map, [typed_fn, typed_list], result_type}}
+        {{:fn, [_], ret_type}, :any} ->
+          result_type = {:list, ret_type}
+          {:ok, result_type, {:call, :map, [typed_fn, typed_list], result_type}}
+        {{:fn, args, _}, _} when length(args) != 1 ->
+          {:error, "map function must take exactly 1 argument, got #{length(args)}"}
+        {_, other} ->
+          {:error, "map expects a list as second argument, got #{inspect(other)}"}
+      end
+    end
+  end
+
   # filter: (a → bool) → (list a) → (list a)
   # (filter predicate list) - keeps elements where predicate returns true
+  # Named function version
   def check({:call, :filter, [func_name, list_expr]}, env) when is_atom(func_name) do
     with {:ok, func_type} <- lookup_function(func_name, env),
          {:ok, list_type, typed_list} <- check(list_expr, env) do
@@ -233,8 +254,30 @@ defmodule Vaisto.TypeChecker do
     end
   end
 
+  # filter with anonymous function
+  def check({:call, :filter, [{:fn, _, _} = fn_expr, list_expr]}, env) do
+    with {:ok, func_type, typed_fn} <- check(fn_expr, env),
+         {:ok, list_type, typed_list} <- check(list_expr, env) do
+      case {func_type, list_type} do
+        {{:fn, [_arg_type], :bool}, {:list, elem_type}} ->
+          {:ok, list_type, {:call, :filter, [typed_fn, typed_list], {:list, elem_type}}}
+        {{:fn, [_arg_type], :any}, {:list, elem_type}} ->
+          {:ok, list_type, {:call, :filter, [typed_fn, typed_list], {:list, elem_type}}}
+        {{:fn, [_], :bool}, :any} ->
+          {:ok, {:list, :any}, {:call, :filter, [typed_fn, typed_list], {:list, :any}}}
+        {{:fn, [_], ret_type}, _} when ret_type not in [:bool, :any] ->
+          {:error, "filter predicate must return bool, got #{inspect(ret_type)}"}
+        {{:fn, args, _}, _} when length(args) != 1 ->
+          {:error, "filter predicate must take exactly 1 argument, got #{length(args)}"}
+        {_, other} ->
+          {:error, "filter expects a list as second argument, got #{inspect(other)}"}
+      end
+    end
+  end
+
   # fold: (b → a → b) → b → (list a) → b
   # (fold func init list) - left fold
+  # Named function version
   def check({:call, :fold, [func_name, init_expr, list_expr]}, env) when is_atom(func_name) do
     with {:ok, func_type} <- lookup_function(func_name, env),
          {:ok, init_type, typed_init} <- check(init_expr, env),
@@ -250,6 +293,28 @@ defmodule Vaisto.TypeChecker do
           {:ok, init_type, {:call, :fold, [func_name, typed_init, typed_list], init_type}}
         {_, :any} ->
           {:ok, init_type, {:call, :fold, [func_name, typed_init, typed_list], init_type}}
+        {_, other} ->
+          {:error, "fold expects a list as third argument, got #{inspect(other)}"}
+      end
+    end
+  end
+
+  # fold with anonymous function
+  def check({:call, :fold, [{:fn, _, _} = fn_expr, init_expr, list_expr]}, env) do
+    with {:ok, func_type, typed_fn} <- check(fn_expr, env),
+         {:ok, init_type, typed_init} <- check(init_expr, env),
+         {:ok, list_type, typed_list} <- check(list_expr, env) do
+      case {func_type, list_type} do
+        {{:fn, [_acc_type, _elem_type], ret_type}, {:list, _}} ->
+          {:ok, ret_type, {:call, :fold, [typed_fn, typed_init, typed_list], ret_type}}
+        {{:fn, [_, _], ret_type}, :any} ->
+          {:ok, ret_type, {:call, :fold, [typed_fn, typed_init, typed_list], ret_type}}
+        {{:fn, args, _}, _} when length(args) != 2 ->
+          {:error, "fold function must take exactly 2 arguments (acc, elem), got #{length(args)}"}
+        {_, {:list, _}} ->
+          {:ok, init_type, {:call, :fold, [typed_fn, typed_init, typed_list], init_type}}
+        {_, :any} ->
+          {:ok, init_type, {:call, :fold, [typed_fn, typed_init, typed_list], init_type}}
         {_, other} ->
           {:error, "fold expects a list as third argument, got #{inspect(other)}"}
       end
@@ -353,12 +418,13 @@ defmodule Vaisto.TypeChecker do
     {:ok, record_type, {:deftype, name, fields, record_type}}
   end
 
-  # Function definition: (defn add [x y] (+ x y))
-  # For now, parameters are typed as :any until we add type annotations
+  # Function definition: (defn add [x :int y :int] (+ x y))
+  # Params are now [{:x, :int}, {:y, :int}] tuples with types
   def check({:defn, name, params, body}, env) do
-    # Create env with parameters bound to :any
-    param_types = Enum.map(params, fn _ -> :any end)
-    param_env = Enum.zip(params, param_types) |> Map.new()
+    # Extract param names and types
+    param_names = Enum.map(params, fn {n, _t} -> n end)
+    param_types = Enum.map(params, fn {_n, t} -> t end)
+    param_env = Map.new(params)
 
     # Add the function itself to env for recursion (with :any return type initially)
     self_type = {:fn, param_types, :any}
@@ -367,7 +433,66 @@ defmodule Vaisto.TypeChecker do
     case check(body, extended_env) do
       {:ok, ret_type, typed_body} ->
         func_type = {:fn, param_types, ret_type}
-        {:ok, func_type, {:defn, name, params, typed_body, func_type}}
+        {:ok, func_type, {:defn, name, param_names, typed_body, func_type}}
+      error -> error
+    end
+  end
+
+  # Anonymous function: (fn [x] (* x 2))
+  def check({:fn, params, body}, env) do
+    # Create env with parameters bound to :any
+    param_types = Enum.map(params, fn _ -> :any end)
+    param_env = Enum.zip(params, param_types) |> Map.new()
+    extended_env = Map.merge(env, param_env)
+
+    case check(body, extended_env) do
+      {:ok, ret_type, typed_body} ->
+        func_type = {:fn, param_types, ret_type}
+        {:ok, func_type, {:fn, params, typed_body, func_type}}
+      error -> error
+    end
+  end
+
+  # Multi-clause function definition
+  # (defn len [[] 0] [[h | t] (+ 1 (len t))])
+  def check({:defn_multi, name, clauses}, env) do
+    # Determine arity from first clause pattern
+    {first_pattern, _} = hd(clauses)
+    arity = case first_pattern do
+      {:list, elems} -> length(elems)
+      {:call, _, args} -> length(args)
+      _ when is_list(first_pattern) -> length(first_pattern)
+      _ -> 1
+    end
+
+    # Add function to env for recursion
+    param_types = List.duplicate(:any, arity)
+    self_type = {:fn, param_types, :any}
+    extended_env = Map.put(env, name, self_type)
+
+    # Type check each clause
+    typed_clauses_result = Enum.reduce_while(clauses, {:ok, []}, fn {pattern, body}, {:ok, acc} ->
+      # Extract bindings from pattern
+      bindings = extract_multi_pattern_bindings(pattern)
+      clause_env = Enum.reduce(bindings, extended_env, fn {var, type}, e ->
+        Map.put(e, var, type)
+      end)
+
+      case check(body, clause_env) do
+        {:ok, body_type, typed_body} ->
+          typed_pattern = type_multi_pattern(pattern, env)
+          {:cont, {:ok, [{typed_pattern, typed_body, body_type} | acc]}}
+        error ->
+          {:halt, error}
+      end
+    end)
+
+    case typed_clauses_result do
+      {:ok, typed_clauses} ->
+        # Use first clause's return type (should unify, but simplified for now)
+        [{_, _, ret_type} | _] = typed_clauses
+        func_type = {:fn, param_types, ret_type}
+        {:ok, func_type, {:defn_multi, name, arity, Enum.reverse(typed_clauses), func_type}}
       error -> error
     end
   end
@@ -512,6 +637,38 @@ defmodule Vaisto.TypeChecker do
     lit
   end
 
+  # --- Multi-clause function helpers ---
+
+  # Extract bindings from patterns in multi-clause functions
+  defp extract_multi_pattern_bindings({:list, elements}) do
+    Enum.flat_map(elements, &extract_multi_pattern_bindings/1)
+  end
+  defp extract_multi_pattern_bindings({:call, _name, args}) do
+    Enum.flat_map(args, &extract_multi_pattern_bindings/1)
+  end
+  defp extract_multi_pattern_bindings(var) when is_atom(var) and var not in [:_, true, false] do
+    [{var, :any}]
+  end
+  defp extract_multi_pattern_bindings(_), do: []
+
+  # Type a pattern for multi-clause function
+  defp type_multi_pattern({:list, []}, _env) do
+    {:list, [], {:list, :any}}
+  end
+  defp type_multi_pattern({:list, elements}, env) do
+    typed_elements = Enum.map(elements, &type_multi_pattern(&1, env))
+    {:list, typed_elements, {:list, :any}}
+  end
+  defp type_multi_pattern({:call, name, args}, env) do
+    typed_args = Enum.map(args, &type_multi_pattern(&1, env))
+    {:pattern, name, typed_args, :any}
+  end
+  defp type_multi_pattern(var, _env) when is_atom(var) and var not in [:_, true, false] do
+    {:var, var, :any}
+  end
+  defp type_multi_pattern(lit, _env) when is_integer(lit), do: {:lit, :int, lit}
+  defp type_multi_pattern(lit, _env) when is_atom(lit), do: {:lit, :atom, lit}
+
   defp check_args(args, env) do
     results = Enum.map(args, &check(&1, env))
     
@@ -598,7 +755,21 @@ defmodule Vaisto.TypeChecker do
     env_with_signatures = Enum.reduce(forms, env, fn form, acc_env ->
       case form do
         {:defn, name, params, _body} ->
-          param_types = Enum.map(params, fn _ -> :any end)
+          # Params are now [{:x, :int}, {:y, :int}] tuples
+          param_types = Enum.map(params, fn {_name, type} -> type end)
+          func_type = {:fn, param_types, :any}
+          Map.put(acc_env, name, func_type)
+
+        {:defn_multi, name, clauses} ->
+          # Determine arity from first clause
+          {first_pattern, _} = hd(clauses)
+          arity = case first_pattern do
+            {:list, elems} -> length(elems)
+            {:call, _, args} -> length(args)
+            _ when is_list(first_pattern) -> length(first_pattern)
+            _ -> 1
+          end
+          param_types = List.duplicate(:any, arity)
           func_type = {:fn, param_types, :any}
           Map.put(acc_env, name, func_type)
 
@@ -649,6 +820,9 @@ defmodule Vaisto.TypeChecker do
             Map.put(env, name, constructor_type)
 
           {:defn, name, _params, _body, func_type} ->
+            Map.put(env, name, func_type)
+
+          {:defn_multi, name, _arity, _clauses, func_type} ->
             Map.put(env, name, func_type)
 
           _ ->

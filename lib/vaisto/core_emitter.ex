@@ -55,23 +55,54 @@ defmodule Vaisto.CoreEmitter do
     # Separate defn forms from other expressions
     {defns, exprs} = Enum.split_with(forms, fn
       {:defn, _, _, _, _} -> true
+      {:defn_multi, _, _, _} -> true
       {:deftype, _, _, _} -> true  # Skip deftypes (compile-time only)
       _ -> false
     end)
 
-    # Filter out deftypes, keep only defns
-    defns = Enum.filter(defns, &match?({:defn, _, _, _, _}, &1))
+    # Filter out deftypes, keep only defns and defn_multi
+    # Note: defn_multi from type checker has 5 elements: {:defn_multi, name, arity, clauses, type}
+    defns = Enum.filter(defns, fn
+      {:defn, _, _, _, _} -> true
+      {:defn_multi, _, _, _, _} -> true
+      _ -> false
+    end)
 
     # Track user-defined function names for local calls
-    user_fns = MapSet.new(defns, fn {:defn, name, params, _, _} -> {name, length(params)} end)
+    # defn_multi now has arity as 3rd element from type checker
+    user_fns = defns
+      |> Enum.map(fn
+        {:defn, name, params, _, _} -> {name, length(params)}
+        {:defn_multi, name, arity, _clauses, _type} -> {name, arity}
+      end)
+      |> MapSet.new()
 
     # Build function definitions
-    fun_defs = Enum.map(defns, fn {:defn, name, params, body, _type} ->
-      param_vars = Enum.map(params, &:cerl.c_var/1)
-      body_core = to_core_expr(body, user_fns)
-      fun = :cerl.c_fun(param_vars, body_core)
-      fname = :cerl.c_fname(name, length(params))
-      {fname, fun}
+    fun_defs = Enum.map(defns, fn
+      {:defn, name, params, body, _type} ->
+        param_vars = Enum.map(params, &:cerl.c_var/1)
+        body_core = to_core_expr(body, user_fns)
+        fun = :cerl.c_fun(param_vars, body_core)
+        fname = :cerl.c_fname(name, length(params))
+        {fname, fun}
+
+      {:defn_multi, name, arity, clauses, _type} ->
+        # Multi-clause function: single function with case over argument
+        # Create a single argument variable to match on
+        arg_var = :cerl.c_var(:__arg__)
+        param_vars = [arg_var]
+
+        # Build case clauses from patterns
+        case_clauses = Enum.map(clauses, fn {pattern, body, _body_type} ->
+          pattern_core = to_core_multi_pattern(pattern)
+          body_core = to_core_expr(body, user_fns)
+          :cerl.c_clause([pattern_core], :cerl.c_atom(true), body_core)
+        end)
+
+        fun_body = :cerl.c_case(arg_var, case_clauses)
+        fun = :cerl.c_fun(param_vars, fun_body)
+        fname = :cerl.c_fname(name, arity)
+        {fname, fun}
     end)
 
     # Build main/0 from remaining expressions (if any)
@@ -321,9 +352,18 @@ defmodule Vaisto.CoreEmitter do
     )
   end
 
+  # --- Anonymous functions ---
+
+  # Anonymous function → Core Erlang fun
+  defp to_core_expr({:fn, params, body, _type}, user_fns) do
+    param_vars = Enum.map(params, &:cerl.c_var/1)
+    body_core = to_core_expr(body, user_fns)
+    :cerl.c_fun(param_vars, body_core)
+  end
+
   # --- Higher-order list functions ---
 
-  # map: lists:map/2 with function reference
+  # map: lists:map/2 with function reference (named function)
   defp to_core_expr({:call, :map, [func_name, list_expr], _type}, user_fns) when is_atom(func_name) do
     list_core = to_core_expr(list_expr, user_fns)
     func_ref = :cerl.c_fname(func_name, 1)
@@ -338,7 +378,18 @@ defmodule Vaisto.CoreEmitter do
     )
   end
 
-  # filter: lists:filter/2 with predicate reference
+  # map with anonymous function
+  defp to_core_expr({:call, :map, [{:fn, _, _, _} = fn_ast, list_expr], _type}, user_fns) do
+    list_core = to_core_expr(list_expr, user_fns)
+    fn_core = to_core_expr(fn_ast, user_fns)
+    :cerl.c_call(
+      :cerl.c_atom(:lists),
+      :cerl.c_atom(:map),
+      [fn_core, list_core]
+    )
+  end
+
+  # filter: lists:filter/2 with predicate reference (named function)
   defp to_core_expr({:call, :filter, [func_name, list_expr], _type}, user_fns) when is_atom(func_name) do
     list_core = to_core_expr(list_expr, user_fns)
     func_ref = :cerl.c_fname(func_name, 1)
@@ -352,7 +403,18 @@ defmodule Vaisto.CoreEmitter do
     )
   end
 
-  # fold: lists:foldl/3 with folder function
+  # filter with anonymous function
+  defp to_core_expr({:call, :filter, [{:fn, _, _, _} = fn_ast, list_expr], _type}, user_fns) do
+    list_core = to_core_expr(list_expr, user_fns)
+    fn_core = to_core_expr(fn_ast, user_fns)
+    :cerl.c_call(
+      :cerl.c_atom(:lists),
+      :cerl.c_atom(:filter),
+      [fn_core, list_core]
+    )
+  end
+
+  # fold: lists:foldl/3 with folder function (named function)
   defp to_core_expr({:call, :fold, [func_name, init_expr, list_expr], _type}, user_fns) when is_atom(func_name) do
     init_core = to_core_expr(init_expr, user_fns)
     list_core = to_core_expr(list_expr, user_fns)
@@ -367,6 +429,22 @@ defmodule Vaisto.CoreEmitter do
       :cerl.c_atom(:lists),
       :cerl.c_atom(:foldl),
       [fold_fun, init_core, list_core]
+    )
+  end
+
+  # fold with anonymous function
+  # User writes (fn [acc elem] body) but foldl expects (elem, acc)
+  defp to_core_expr({:call, :fold, [{:fn, params, body, fn_type}, init_expr, list_expr], _type}, user_fns) do
+    init_core = to_core_expr(init_expr, user_fns)
+    list_core = to_core_expr(list_expr, user_fns)
+    # Swap params to match foldl convention
+    [acc_param, elem_param] = params
+    swapped_fn = {:fn, [elem_param, acc_param], body, fn_type}
+    fn_core = to_core_expr(swapped_fn, user_fns)
+    :cerl.c_call(
+      :cerl.c_atom(:lists),
+      :cerl.c_atom(:foldl),
+      [fn_core, init_core, list_core]
     )
   end
 
@@ -413,6 +491,38 @@ defmodule Vaisto.CoreEmitter do
 
   defp to_core_pattern(n) when is_integer(n), do: :cerl.c_int(n)
   defp to_core_pattern(a) when is_atom(a), do: :cerl.c_atom(a)
+
+  # --- Multi-clause function helpers ---
+
+  # Convert multi-clause patterns to Core Erlang
+  # Empty list: [] → []
+  defp to_core_multi_pattern({:list, [], _type}), do: :cerl.c_nil()
+
+  # List with elements
+  defp to_core_multi_pattern({:list, elements, _type}) do
+    elements
+    |> Enum.map(&to_core_multi_pattern/1)
+    |> Enum.reverse()
+    |> Enum.reduce(:cerl.c_nil(), fn elem, acc -> :cerl.c_cons(elem, acc) end)
+  end
+
+  # Cons pattern: [h | t] → cons(h, t)
+  defp to_core_multi_pattern({:cons, head, tail, _type}) do
+    :cerl.c_cons(to_core_multi_pattern(head), to_core_multi_pattern(tail))
+  end
+
+  # Variable in pattern
+  defp to_core_multi_pattern({:var, name, _type}), do: :cerl.c_var(name)
+
+  # Literals
+  defp to_core_multi_pattern({:lit, :int, n}), do: :cerl.c_int(n)
+  defp to_core_multi_pattern({:lit, :atom, a}), do: :cerl.c_atom(a)
+  defp to_core_multi_pattern({:lit, :bool, b}), do: :cerl.c_atom(b)
+
+  # Underscore (wildcard)
+  defp to_core_multi_pattern(:_), do: :cerl.c_var(:_)
+  defp to_core_multi_pattern(a) when is_atom(a), do: :cerl.c_var(a)
+  defp to_core_multi_pattern(n) when is_integer(n), do: :cerl.c_int(n)
 
   # --- String helpers ---
 

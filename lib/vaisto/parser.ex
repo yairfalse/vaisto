@@ -96,6 +96,7 @@ defmodule Vaisto.Parser do
       [:def | rest] -> parse_def(rest)
       [:defn | rest] -> parse_defn(rest)
       [:deftype | rest] -> parse_deftype(rest)
+      [:fn | rest] -> parse_fn(rest)
       # List literal: (list 1 2 3) → {:list, [1, 2, 3]}
       [:list | elements] -> {:list, elements}
       # Regular function call
@@ -166,9 +167,54 @@ defmodule Vaisto.Parser do
     {:def, name, args, body}
   end
 
-  # (defn add [x y] (+ x y)) → {:defn, :add, [:x, :y], body}
+  # (defn add [x y] (+ x y)) → {:defn, :add, [{:x, :any}, {:y, :any}], body}
+  # (defn add [x :int y :int] (+ x y)) → {:defn, :add, [{:x, :int}, {:y, :int}], body}
   defp parse_defn([name, {:bracket, params}, body]) do
-    {:defn, name, params, body}
+    # Check if params look like typed (name :type pairs) or untyped (just names)
+    typed_params = if looks_typed?(params) do
+      # Parse as pairs: [x :int y :int] → [{:x, :int}, {:y, :int}]
+      params
+      |> Enum.chunk_every(2)
+      |> Enum.map(fn [param_name, type] -> {param_name, type} end)
+    else
+      # Untyped params: [x y] → [{:x, :any}, {:y, :any}]
+      Enum.map(params, fn p -> {p, :any} end)
+    end
+    {:defn, name, typed_params, body}
+  end
+
+  # Multi-clause function definition
+  # (defn len
+  #   [[] 0]
+  #   [[h | t] (+ 1 (len t))])
+  defp parse_defn([name | clauses]) when is_list(clauses) and length(clauses) > 0 do
+    # Check if this is multi-clause style (list of bracket clauses)
+    case clauses do
+      [{:bracket, _} | _] ->
+        # Multi-clause function
+        parsed_clauses = Enum.map(clauses, fn {:bracket, [pattern, body]} ->
+          {pattern, body}
+        end)
+        {:defn_multi, name, parsed_clauses}
+      _ ->
+        # Fallback - shouldn't happen with well-formed input
+        {:error, "Invalid defn syntax"}
+    end
+  end
+
+  # Check if params list looks like typed pairs (alternating atoms and types)
+  defp looks_typed?(params) when length(params) >= 2 do
+    # If second element is a type atom (starts with : in original syntax), it's typed
+    params
+    |> Enum.drop(1)
+    |> Enum.take_every(2)
+    |> Enum.all?(fn p -> is_atom(p) and p in [:int, :float, :string, :bool, :any, :atom] end)
+  end
+  defp looks_typed?(_), do: false
+
+  # (fn [x] (* x 2)) → {:fn, [:x], body}
+  defp parse_fn([{:bracket, params}, body]) do
+    {:fn, params, body}
   end
 
   # (deftype point [x :int y :int]) → {:deftype, :point, [{:x, :int}, {:y, :int}]}
