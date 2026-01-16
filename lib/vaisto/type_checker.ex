@@ -69,6 +69,12 @@ defmodule Vaisto.TypeChecker do
     end
   end
 
+  # Atom literal from parser: {:atom, :foo} → :foo
+  # This is always a literal, never a variable lookup
+  def check({:atom, a}, _env) when is_atom(a) do
+    {:ok, {:atom, a}, {:lit, :atom, a}}
+  end
+
   # Atoms - could be message types OR variable references
   # If it's in the env (like :state in a handler), it's a variable
   def check(a, env) when is_atom(a) do
@@ -370,6 +376,15 @@ defmodule Vaisto.TypeChecker do
     end
   end
 
+  # Receive expression: (receive [pattern body] ...)
+  # Blocks until a message matching one of the patterns arrives
+  # Patterns are typed as :any (full typed PIDs would constrain this)
+  def check({:receive, clauses}, env) do
+    with {:ok, result_type, typed_clauses} <- check_receive_clauses(clauses, env) do
+      {:ok, result_type, {:receive, typed_clauses, result_type}}
+    end
+  end
+
   # Let binding: (let [x 1 y 2] body)
   # Each binding extends the env for subsequent bindings and body
   def check({:let, bindings, body}, env) do
@@ -430,10 +445,14 @@ defmodule Vaisto.TypeChecker do
 
   # Type definition: (deftype point [x :int y :int])
   # Registers a constructor function and a record type
-  # Fields are now [{:x, :int}, {:y, :int}] tuples with types
+  # Fields are now [{:x, {:atom, :int}}, {:y, {:atom, :int}}] tuples with types
   def check({:deftype, name, fields}, _env) do
-    record_type = {:record, name, fields}
-    {:ok, record_type, {:deftype, name, fields, record_type}}
+    # Normalize field types
+    normalized_fields = Enum.map(fields, fn {field_name, type} ->
+      {field_name, parse_type_expr(type)}
+    end)
+    record_type = {:record, name, normalized_fields}
+    {:ok, record_type, {:deftype, name, normalized_fields, record_type}}
   end
 
   # Function definition: (defn add [x :int y :int] (+ x y))
@@ -536,7 +555,9 @@ defmodule Vaisto.TypeChecker do
     {:error, "Unknown expression: #{inspect(other)}"}
   end
 
-  # Parse type expressions from extern declarations
+  # Parse type expressions from extern declarations and type annotations
+  # Atom-wrapped type from parser: {:atom, :int} → :int
+  defp parse_type_expr({:atom, t}) when is_atom(t), do: t
   # Simple types: :int, :any, :string
   defp parse_type_expr(t) when is_atom(t), do: t
   # List type: {:call, :List, [:any]} → {:list, :any}
@@ -607,6 +628,40 @@ defmodule Vaisto.TypeChecker do
     end
   end
 
+  # Check receive clauses - patterns receive messages typed as :any
+  defp check_receive_clauses(clauses, env) do
+    results = Enum.map(clauses, fn {pattern, body} ->
+      check_receive_clause(pattern, body, env)
+    end)
+
+    case Enum.find(results, &match?({:error, _}, &1)) do
+      {:error, _} = err -> err
+      nil ->
+        typed_clauses = Enum.map(results, fn {:ok, clause} -> clause end)
+        # All clauses must have the same result type - use the first one
+        [{_pattern, _body, result_type} | _] = typed_clauses
+        {:ok, result_type, typed_clauses}
+    end
+  end
+
+  defp check_receive_clause(pattern, body, env) do
+    # Receive patterns match messages of type :any
+    # Extract bindings from pattern - variables get :any type
+    bindings = extract_pattern_bindings(pattern, :any, env)
+    extended_env = Enum.reduce(bindings, env, fn {name, type}, acc ->
+      Map.put(acc, name, type)
+    end)
+
+    # Type the pattern itself
+    typed_pattern = type_pattern(pattern, :any, env)
+
+    case check(body, extended_env) do
+      {:ok, body_type, typed_body} ->
+        {:ok, {typed_pattern, typed_body, body_type}}
+      error -> error
+    end
+  end
+
   # Extract variable bindings from a pattern with proper types
   # (point x y) matching against {:record, :point, [{:x, :int}, {:y, :int}]}
   # gives [{:x, :int}, {:y, :int}]
@@ -666,6 +721,11 @@ defmodule Vaisto.TypeChecker do
         end)
         {:pattern, record_name, typed_args, :any}
     end
+  end
+
+  # Atom literal pattern: {:atom, :foo} → {:lit, :atom, :foo}
+  defp type_pattern({:atom, a}, _type, _env) when is_atom(a) do
+    {:lit, :atom, a}
   end
 
   defp type_pattern(var, type, _env) when is_atom(var) and var not in [:_, true, false] do
@@ -793,13 +853,19 @@ defmodule Vaisto.TypeChecker do
   end
 
   defp handler_types(handlers) do
-    Enum.map(handlers, fn {msg, _} -> msg end)
+    Enum.map(handlers, fn
+      {{:atom, msg}, _} -> msg
+      {msg, _} -> msg
+    end)
   end
 
+  defp validate_strategy({:atom, strategy}) when strategy in [:one_for_one, :all_for_one, :rest_for_one] do
+    :ok
+  end
   defp validate_strategy(strategy) when strategy in [:one_for_one, :all_for_one, :rest_for_one] do
     :ok
   end
-  defp validate_strategy(strategy), do: {:error, "Unknown supervision strategy: #{strategy}"}
+  defp validate_strategy(strategy), do: {:error, "Unknown supervision strategy: #{inspect(strategy)}"}
 
   defp check_children(children, _env) do
     # For now, just validate they're well-formed
@@ -838,15 +904,23 @@ defmodule Vaisto.TypeChecker do
           Map.put(acc_env, name, func_type)
 
         {:deftype, name, fields} ->
-          # Fields are now [{:x, :int}, {:y, :int}] tuples
-          field_types = Enum.map(fields, fn {_name, type} -> type end)
-          record_type = {:record, name, fields}
+          # Fields are now [{:x, {:atom, :int}}, {:y, {:atom, :int}}] tuples
+          # Normalize field types using parse_type_expr
+          normalized_fields = Enum.map(fields, fn {field_name, type} ->
+            {field_name, parse_type_expr(type)}
+          end)
+          field_types = Enum.map(normalized_fields, fn {_name, type} -> type end)
+          record_type = {:record, name, normalized_fields}
           constructor_type = {:fn, field_types, record_type}
           Map.put(acc_env, name, constructor_type)
 
         {:process, name, initial_state, handlers} ->
           # Infer process type from handlers
-          msg_types = Enum.map(handlers, fn {msg, _body} -> msg end)
+          # Unwrap {:atom, msg} if present
+          msg_types = Enum.map(handlers, fn
+            {{:atom, msg}, _body} -> msg
+            {msg, _body} -> msg
+          end)
           # Rough state type from initial_state
           state_type = case initial_state do
             n when is_integer(n) -> :int

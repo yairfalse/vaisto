@@ -106,7 +106,8 @@ defmodule Vaisto.TypeCheckerTest do
     test "parser creates typed field tuples from bracket syntax" do
       code = "(deftype point [x :int y :int])"
       ast = Vaisto.Parser.parse(code)
-      assert {:deftype, :point, [{:x, :int}, {:y, :int}]} = ast
+      # Atoms are now wrapped by parser
+      assert {:deftype, :point, [{:x, {:atom, :int}}, {:y, {:atom, :int}}]} = ast
     end
 
     test "parser converts legacy untyped syntax to :any fields" do

@@ -66,6 +66,18 @@ defmodule Vaisto.Emitter do
     {:case, [], [expr_ast, [do: clause_asts]]}
   end
 
+  # Receive expression → Elixir receive
+  # (receive [:inc x] [:dec y]) → receive do :inc -> x; :dec -> y end
+  def to_elixir({:receive, clauses, _type}) do
+    clause_asts = Enum.map(clauses, fn {pattern, body, _body_type} ->
+      pattern_ast = emit_pattern(pattern)
+      body_ast = to_elixir(body)
+      {:->, [], [[pattern_ast], body_ast]}
+    end)
+
+    {:receive, [], [[do: clause_asts]]}
+  end
+
   # Let bindings → nested assignments using Elixir's block
   # (let [x 1 y 2] (+ x y)) → (x = 1; y = 2; x + y)
   def to_elixir({:let, bindings, body, _type}) do

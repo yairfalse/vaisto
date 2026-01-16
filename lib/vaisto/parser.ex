@@ -91,6 +91,7 @@ defmodule Vaisto.Parser do
       [:if | rest] -> parse_if(rest)
       [:let | rest] -> parse_let(rest)
       [:match | rest] -> parse_match(rest)
+      [:receive | rest] -> parse_receive(rest)
       [:process | rest] -> parse_process(rest)
       [:supervise | rest] -> parse_supervise(rest)
       [:def | rest] -> parse_def(rest)
@@ -176,6 +177,15 @@ defmodule Vaisto.Parser do
       {pattern, body}
     end)
     {:match, expr, parsed_clauses}
+  end
+
+  # (receive [pattern1 body1] [pattern2 body2] ...) → {:receive, [{pattern, body}, ...]}
+  # Blocks until a message matching one of the patterns arrives
+  defp parse_receive(clauses) do
+    parsed_clauses = Enum.map(clauses, fn {:bracket, [pattern, body]} ->
+      {pattern, body}
+    end)
+    {:receive, parsed_clauses}
   end
 
   defp parse_process([name, initial_state | handlers]) do
@@ -290,9 +300,10 @@ defmodule Vaisto.Parser do
         |> then(&{:string, &1})
       token =~ ~r/^-?\d+$/ -> String.to_integer(token)
       token =~ ~r/^-?\d+\.\d+$/ -> String.to_float(token)
-      # Type atom: :int → :int
+      # Atom literal: :foo → {:atom, :foo}
+      # This distinguishes atoms from variable names in the AST
       String.starts_with?(token, ":") ->
-        token |> String.trim_leading(":") |> String.to_atom()
+        {:atom, token |> String.trim_leading(":") |> String.to_atom()}
       # Qualified name: erlang:hd → {:qualified, :erlang, :hd}
       # Must contain : but not start with :
       String.contains?(token, ":") ->

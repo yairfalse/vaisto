@@ -191,8 +191,13 @@ defmodule Vaisto.CoreEmitter do
   end
 
   defp to_core_handler_clause(module_name, msg, body, state_var, from_var) do
+    # Unwrap {:atom, value} if present
+    msg_atom = case msg do
+      {:atom, a} -> a
+      a when is_atom(a) -> a
+    end
     # Pattern: {msg, From}
-    pattern = :cerl.c_tuple([:cerl.c_atom(msg), from_var])
+    pattern = :cerl.c_tuple([:cerl.c_atom(msg_atom), from_var])
 
     # Body expression (may reference state)
     body_expr = to_core_expr_with_state(body, state_var)
@@ -268,6 +273,19 @@ defmodule Vaisto.CoreEmitter do
       :cerl.c_clause([pattern_core], :cerl.c_atom(true), body_core)
     end)
     :cerl.c_case(expr_core, clause_cores)
+  end
+
+  # Receive expression → Core Erlang receive
+  # (receive [pattern body] ...) → receive pattern -> body end
+  defp to_core_expr({:receive, clauses, _type}, user_fns) do
+    clause_cores = Enum.map(clauses, fn {pattern, body, _body_type} ->
+      pattern_core = to_core_pattern(pattern)
+      body_core = to_core_expr(body, user_fns)
+      :cerl.c_clause([pattern_core], :cerl.c_atom(true), body_core)
+    end)
+    # c_receive(clauses, timeout_expr, timeout_body)
+    # infinity timeout, timeout body never executes
+    :cerl.c_receive(clause_cores, :cerl.c_atom(:infinity), :cerl.c_atom(:timeout))
   end
 
   # Let bindings: nest each binding as Core Erlang let

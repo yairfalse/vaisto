@@ -727,5 +727,60 @@ defmodule Vaisto.EmitterTest do
 
       assert ExternInFnE2E.main() == 42
     end
+
+    # --- Receive tests ---
+
+    test "receive parses and type checks" do
+      code = "(receive [:ping 1] [:pong 2])"
+
+      ast = Vaisto.Parser.parse(code)
+      assert {:receive, [ping_clause, pong_clause]} = ast
+      # Parser now wraps atoms in {:atom, value} to distinguish from variables
+      assert {{:atom, :ping}, 1} = ping_clause
+      assert {{:atom, :pong}, 2} = pong_clause
+
+      {:ok, :int, typed_ast} = Vaisto.TypeChecker.check(ast)
+      assert {:receive, typed_clauses, :int} = typed_ast
+      assert length(typed_clauses) == 2
+    end
+
+    test "receive with variable binding" do
+      # Use a simple variable pattern (receives any message and binds to x)
+      code = "(receive [x x])"
+
+      ast = Vaisto.Parser.parse(code)
+      {:ok, :any, typed_ast} = Vaisto.TypeChecker.check(ast)
+
+      assert {:receive, [{_pattern, _body, :any}], :any} = typed_ast
+    end
+
+    test "receive emits to elixir receive expression" do
+      code = "(receive [:ping 42])"
+
+      ast = Vaisto.Parser.parse(code)
+      {:ok, :int, typed_ast} = Vaisto.TypeChecker.check(ast)
+      elixir_ast = Emitter.to_elixir(typed_ast)
+
+      # Should produce: receive do :ping -> 42 end
+      assert {:receive, [], [[do: _clauses]]} = elixir_ast
+    end
+
+    test "receive end-to-end with message in mailbox" do
+      # Test receive by manually sending a message before calling main
+      # This demonstrates that the receive expression compiles correctly
+      code = "(receive [:ping 42] [:pong 99])"
+
+      ast = Vaisto.Parser.parse(code)
+      {:ok, :int, typed_ast} = Vaisto.TypeChecker.check(ast)
+      {:ok, ReceiveE2E, _} = Emitter.compile(typed_ast, ReceiveE2E)
+
+      # Send :ping to self before calling main which blocks on receive
+      send(self(), :ping)
+      assert ReceiveE2E.main() == 42
+
+      # Test the other pattern too
+      send(self(), :pong)
+      assert ReceiveE2E.main() == 99
+    end
   end
 end

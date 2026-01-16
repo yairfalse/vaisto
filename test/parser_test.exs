@@ -16,7 +16,8 @@ defmodule Vaisto.ParserTest do
     end
 
     test "parses atoms with colon" do
-      assert Parser.parse(":ok") == :ok
+      # Atoms are now wrapped in {:atom, value} to distinguish from variables
+      assert Parser.parse(":ok") == {:atom, :ok}
     end
   end
 
@@ -24,16 +25,18 @@ defmodule Vaisto.ParserTest do
     test "parses process definition" do
       code = "(process counter 0 :increment (+ state 1))"
       result = Parser.parse(code)
-      
+
       assert {:process, :counter, 0, handlers} = result
-      assert [{:increment, {:call, :+, [:state, 1]}}] = handlers
+      # Atom handler names are now wrapped
+      assert [{{:atom, :increment}, {:call, :+, [:state, 1]}}] = handlers
     end
 
     test "parses supervision tree" do
       code = "(supervise :one_for_one (counter 0))"
       result = Parser.parse(code)
-      
-      assert {:supervise, :one_for_one, children} = result
+
+      # Atom strategy is now wrapped
+      assert {:supervise, {:atom, :one_for_one}, children} = result
       assert [{:call, :counter, [0]}] = children
     end
   end
