@@ -4,7 +4,7 @@ defmodule Vaisto.ParserTest do
 
   describe "basic expressions" do
     test "parses integers" do
-      assert Parser.parse("42") == [42]
+      assert Parser.parse("42") == 42
     end
 
     test "parses simple call" do
@@ -16,7 +16,7 @@ defmodule Vaisto.ParserTest do
     end
 
     test "parses atoms with colon" do
-      assert Parser.parse(":ok") == [:ok]
+      assert Parser.parse(":ok") == :ok
     end
   end
 

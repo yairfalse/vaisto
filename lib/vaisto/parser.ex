@@ -15,12 +15,26 @@ defmodule Vaisto.Parser do
     |> do_parse([])
   end
 
-  # Tokenizer: Split by parens and whitespace
+  # Tokenizer: Split by parens and whitespace, strip comments
   defp tokenize(code) do
     code
+    |> strip_comments()
     |> String.replace("(", " ( ")
     |> String.replace(")", " ) ")
     |> String.split()
+  end
+
+  # Remove ; comments (everything from ; to end of line)
+  defp strip_comments(code) do
+    code
+    |> String.split("\n")
+    |> Enum.map(fn line ->
+      case String.split(line, ";", parts: 2) do
+        [before, _comment] -> before
+        [line] -> line
+      end
+    end)
+    |> Enum.join("\n")
   end
 
   # Recursive descent parser

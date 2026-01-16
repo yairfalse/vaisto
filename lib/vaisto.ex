@@ -21,11 +21,13 @@ defmodule Vaisto do
   @doc """
   Compile a Vaisto source string.
   """
-  def compile_string(source) do
-    source
-    |> Parser.parse()
-    |> TypeChecker.check!()
-    |> CoreEmitter.emit()
+  def compile_string(source, module_name \\ :VaistoModule) do
+    typed_ast =
+      source
+      |> Parser.parse()
+      |> TypeChecker.check!()
+
+    CoreEmitter.compile(typed_ast, module_name)
   end
 
   @doc """

@@ -1,0 +1,18 @@
+; Vaisto Example: Typed PIDs
+; Demonstrates compile-time safety for message passing
+
+; A counter process - accepts :increment and :get messages
+(process counter 0
+  :increment (+ state 1)
+  :get state)
+
+; A logger process - accepts :log messages
+(process logger []
+  :log state)
+
+; This should TYPE CHECK:
+; (spawn counter 0)     → returns Pid<Counter>
+; (! counter_pid :increment)  → valid message for Counter
+
+; This should FAIL at compile time:
+; (! counter_pid :log)  → Counter doesn't handle :log!

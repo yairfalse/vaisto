@@ -8,13 +8,12 @@ defmodule Vaisto.TypeChecker do
   """
 
   # Built-in type environment
+  # Note: spawn and send (!) are handled specially for typed PIDs
   @primitives %{
     :+ => {:fn, [:int, :int], :int},
     :- => {:fn, [:int, :int], :int},
     :* => {:fn, [:int, :int], :int},
     :/ => {:fn, [:int, :int], :int},
-    :! => {:fn, [:pid, :any], :ok},
-    :? => {:fn, [:pid, :any], :any},
     :== => {:fn, [:any, :any], :bool},
     :< => {:fn, [:int, :int], :bool},
     :> => {:fn, [:int, :int], :bool}
@@ -25,7 +24,7 @@ defmodule Vaisto.TypeChecker do
   """
   def check!(ast, env \\ @primitives) do
     case check(ast, env) do
-      {:ok, type, typed_ast} -> typed_ast
+      {:ok, _type, typed_ast} -> typed_ast
       {:error, msg} -> raise "TypeError: #{msg}"
     end
   end
@@ -35,15 +34,24 @@ defmodule Vaisto.TypeChecker do
   """
   def check(ast, env \\ @primitives)
 
+  # Module: list of top-level forms (process, supervise, def)
+  def check(forms, env) when is_list(forms) do
+    check_module(forms, env, [])
+  end
+
   # Literals
   def check(n, _env) when is_integer(n), do: {:ok, :int, {:lit, :int, n}}
   def check(f, _env) when is_float(f), do: {:ok, :float, {:lit, :float, f}}
   def check(true, _env), do: {:ok, :bool, {:lit, :bool, true}}
   def check(false, _env), do: {:ok, :bool, {:lit, :bool, false}}
 
-  # Atoms (as message types)
-  def check(a, _env) when is_atom(a) do
-    {:ok, {:atom, a}, {:lit, :atom, a}}
+  # Atoms - could be message types OR variable references
+  # If it's in the env (like :state in a handler), it's a variable
+  def check(a, env) when is_atom(a) do
+    case Map.get(env, a) do
+      nil -> {:ok, {:atom, a}, {:lit, :atom, a}}
+      type -> {:ok, type, {:var, a, type}}
+    end
   end
 
   # Variable lookup
@@ -54,7 +62,49 @@ defmodule Vaisto.TypeChecker do
     end
   end
 
-  # Function call
+  # Special form: spawn - returns a typed PID
+  # (spawn process_name initial_state) → Pid<ProcessName>
+  def check({:call, :spawn, [process_name, init_state]}, env) do
+    with {:ok, process_type} <- lookup_process(process_name, env),
+         {:ok, _init_type, typed_init} <- check(init_state, env) do
+      # Create typed PID that knows what messages this process accepts
+      {:process, _state_type, accepted_msgs} = process_type
+      pid_type = {:pid, process_name, accepted_msgs}
+      {:ok, pid_type, {:call, :spawn, [process_name, typed_init], pid_type}}
+    end
+  end
+
+  # Special form: send (!) - validates message against typed PID
+  # (! pid message) → :ok, but only if message is valid for that PID
+  def check({:call, :"!", [pid_expr, msg_expr]}, env) do
+    with {:ok, pid_type, typed_pid} <- check(pid_expr, env),
+         {:ok, msg_type, typed_msg} <- check(msg_expr, env) do
+      case pid_type do
+        {:pid, process_name, accepted_msgs} ->
+          # Extract the message atom from the type
+          msg_atom = case msg_type do
+            {:atom, a} -> a
+            _ -> nil
+          end
+
+          if msg_atom in accepted_msgs do
+            {:ok, :ok, {:call, :"!", [typed_pid, typed_msg], :ok}}
+          else
+            {:error, "Process #{process_name} does not accept message :#{msg_atom}. " <>
+                     "Valid messages: #{inspect(accepted_msgs)}"}
+          end
+
+        :pid ->
+          # Untyped PID - allow any message (backward compat)
+          {:ok, :ok, {:call, :"!", [typed_pid, typed_msg], :ok}}
+
+        other ->
+          {:error, "Expected a PID, got #{inspect(other)}"}
+      end
+    end
+  end
+
+  # Function call (general case)
   def check({:call, func, args}, env) do
     with {:ok, func_type} <- lookup_function(func, env),
          {:ok, arg_types, typed_args} <- check_args(args, env),
@@ -91,6 +141,14 @@ defmodule Vaisto.TypeChecker do
     case Map.get(env, name) do
       nil -> {:error, "Unknown function: #{name}"}
       type -> {:ok, type}
+    end
+  end
+
+  defp lookup_process(name, env) when is_atom(name) do
+    case Map.get(env, name) do
+      {:process, _, _} = process_type -> {:ok, process_type}
+      nil -> {:error, "Unknown process: #{name}"}
+      other -> {:error, "#{name} is not a process, got: #{inspect(other)}"}
     end
   end
 
@@ -153,8 +211,31 @@ defmodule Vaisto.TypeChecker do
   end
   defp validate_strategy(strategy), do: {:error, "Unknown supervision strategy: #{strategy}"}
 
-  defp check_children(children, env) do
+  defp check_children(children, _env) do
     # For now, just validate they're well-formed
     {:ok, children}
+  end
+
+  # Check a module (list of top-level forms)
+  # Processes get added to env so supervise can reference them
+  defp check_module([], _env, acc) do
+    {:ok, :module, {:module, Enum.reverse(acc)}}
+  end
+
+  defp check_module([form | rest], env, acc) do
+    case check(form, env) do
+      {:ok, _type, typed_form} ->
+        # Add process definitions to env so supervise can find them
+        new_env = case typed_form do
+          {:process, name, _init, _handlers, process_type} ->
+            Map.put(env, name, process_type)
+          _ ->
+            env
+        end
+        check_module(rest, new_env, [typed_form | acc])
+
+      {:error, _} = err ->
+        err
+    end
   end
 end

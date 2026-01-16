@@ -1,0 +1,9 @@
+; Valid use of typed PIDs - should compile successfully
+
+(process counter 0
+  :increment (+ state 1)
+  :get state)
+
+; Spawn returns Pid<counter> - knows it accepts :increment, :get
+; Then send :increment - valid!
+(! (spawn counter 0) :increment)

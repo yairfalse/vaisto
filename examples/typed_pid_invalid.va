@@ -1,0 +1,9 @@
+; Invalid use of typed PIDs - should FAIL at compile time!
+
+(process counter 0
+  :increment (+ state 1)
+  :get state)
+
+; Spawn returns Pid<counter> - knows it accepts :increment, :get
+; Then send :reset - INVALID! Counter doesn't handle :reset
+(! (spawn counter 0) :reset)

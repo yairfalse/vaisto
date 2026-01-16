@@ -8,8 +8,13 @@ defmodule Vaisto.MixProject do
       elixir: "~> 1.15",
       start_permanent: Mix.env() == :prod,
       deps: deps(),
-      description: "A statically-typed Scheme for the BEAM"
+      escript: escript(),
+      description: "A statically-typed language for distributed systems on BEAM"
     ]
+  end
+
+  defp escript do
+    [main_module: Vaisto.CLI, name: "vaistoc"]
   end
 
   def application do

@@ -280,6 +280,32 @@ For now: shared types by convention, or accept runtime risk at service boundarie
 
 ---
 
+## Tooling Output
+
+**Vaisto speaks Vaisto. No JSON. No YAML.**
+
+Context export for AI/tooling:
+
+```bash
+vaisto context
+```
+
+```scheme
+(context
+  (types
+    (User {:name String :age Int}))
+  (processes
+    (counter
+      (state Int)
+      (messages :increment {:add Int} :get)))
+  (functions
+    (math:add [Int Int] Int)))
+```
+
+This exports the full type universe of a project as S-expressions. Feed it to an LLM's system prompt — now it knows every contract in your system.
+
+---
+
 ## What Vaisto Is Not
 
 - A Lisp for Lisp purists (no macros, no homoiconicity worship)
@@ -323,3 +349,4 @@ A focused tool for building distributed services where:
 
 - **2026-01-14**: Initial design session. Core decisions locked in.
 - **2026-01-14**: Added typed PIDs, actionable error hints.
+- **2026-01-15**: Added S-expression context export for tooling.
