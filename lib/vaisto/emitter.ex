@@ -33,6 +33,34 @@ defmodule Vaisto.Emitter do
     Macro.var(name, nil)
   end
 
+  # Match expression → Elixir case
+  def to_elixir({:match, expr, clauses, _type}) do
+    expr_ast = to_elixir(expr)
+    clause_asts = Enum.map(clauses, fn {pattern, body, _body_type} ->
+      pattern_ast = emit_pattern(pattern)
+      body_ast = to_elixir(body)
+      {:->, [], [[pattern_ast], body_ast]}
+    end)
+
+    {:case, [], [expr_ast, [do: clause_asts]]}
+  end
+
+  # Let bindings → nested assignments using Elixir's block
+  # (let [x 1 y 2] (+ x y)) → (x = 1; y = 2; x + y)
+  def to_elixir({:let, bindings, body, _type}) do
+    body_ast = to_elixir(body)
+
+    # Build assignments from innermost to outermost
+    List.foldr(bindings, body_ast, fn {name, expr, _type}, acc ->
+      var = Macro.var(name, nil)
+      value = to_elixir(expr)
+      quote do
+        unquote(var) = unquote(value)
+        unquote(acc)
+      end
+    end)
+  end
+
   # Arithmetic calls → Elixir operators
   def to_elixir({:call, op, [left, right], _type}) when op in [:+, :-, :*, :/] do
     {op, [], [to_elixir(left), to_elixir(right)]}
@@ -66,6 +94,19 @@ defmodule Vaisto.Emitter do
     end
   end
 
+  # Record type definition - no runtime code needed, just documentation
+  def to_elixir({:deftype, _name, _fields, _type}) do
+    # deftype is a compile-time construct, no runtime representation needed
+    # Could emit a struct definition in the future
+    nil
+  end
+
+  # Record construction → tagged tuple {:record_name, field1, field2, ...}
+  def to_elixir({:call, name, args, {:record, name, _fields}}) do
+    typed_args = Enum.map(args, &to_elixir/1)
+    {:{}, [], [name | typed_args]}
+  end
+
   # Generic function call
   def to_elixir({:call, func, args, _type}) do
     {func, [], Enum.map(args, &to_elixir/1)}
@@ -83,7 +124,9 @@ defmodule Vaisto.Emitter do
 
   # Module: collection of definitions
   def to_elixir({:module, forms}) do
-    Enum.map(forms, &to_elixir/1)
+    forms
+    |> Enum.map(&to_elixir/1)
+    |> Enum.reject(&is_nil/1)
   end
 
   # Fallback for raw values (untyped literals from parser)
@@ -187,8 +230,19 @@ defmodule Vaisto.Emitter do
     end
   end
 
+  # Record pattern → tagged tuple pattern {:record_name, var1, var2, ...}
+  defp emit_pattern({:pattern, name, args, _type}) do
+    pattern_args = Enum.map(args, &emit_pattern/1)
+    {:{}, [], [name | pattern_args]}
+  end
+
+  defp emit_pattern({:var, name, _type}) do
+    Macro.var(name, nil)
+  end
+
   defp emit_pattern({:lit, :atom, a}), do: a
   defp emit_pattern(a) when is_atom(a), do: a
+  defp emit_pattern(n) when is_integer(n), do: n
 
   defp emit_supervisor(strategy, children) do
     # Build child specs at compile time

@@ -148,6 +148,30 @@ defmodule Vaisto.CoreEmitter do
     :cerl.c_var(name)
   end
 
+  # Match expression → Core Erlang case
+  defp to_core_expr({:match, expr, clauses, _type}) do
+    expr_core = to_core_expr(expr)
+    clause_cores = Enum.map(clauses, fn {pattern, body, _body_type} ->
+      pattern_core = to_core_pattern(pattern)
+      body_core = to_core_expr(body)
+      :cerl.c_clause([pattern_core], :cerl.c_atom(true), body_core)
+    end)
+    :cerl.c_case(expr_core, clause_cores)
+  end
+
+  # Let bindings: nest each binding as Core Erlang let
+  # (let [x 1 y 2] body) → let x = 1 in let y = 2 in body
+  defp to_core_expr({:let, bindings, body, _type}) do
+    body_expr = to_core_expr(body)
+
+    # Build from innermost to outermost
+    List.foldr(bindings, body_expr, fn {name, expr, _type}, acc ->
+      var = :cerl.c_var(name)
+      value = to_core_expr(expr)
+      :cerl.c_let([var], value, acc)
+    end)
+  end
+
   # Arithmetic: (+ a b) → erlang:'+'(a, b)
   defp to_core_expr({:call, op, [left, right], _type}) when op in [:+, :-, :*, :/] do
     :cerl.c_call(
@@ -172,6 +196,12 @@ defmodule Vaisto.CoreEmitter do
     )
   end
 
+  # Record construction → tagged tuple {:record_name, field1, field2, ...}
+  defp to_core_expr({:call, name, args, {:record, name, _fields}}) do
+    elements = [:cerl.c_atom(name) | Enum.map(args, &to_core_expr/1)]
+    :cerl.c_tuple(elements)
+  end
+
   # Generic function call
   defp to_core_expr({:call, func, args, _type}) do
     :cerl.c_call(
@@ -185,6 +215,21 @@ defmodule Vaisto.CoreEmitter do
   defp to_core_expr(n) when is_integer(n), do: :cerl.c_int(n)
   defp to_core_expr(f) when is_float(f), do: :cerl.c_float(f)
   defp to_core_expr(a) when is_atom(a), do: :cerl.c_atom(a)
+
+  # --- Pattern transformation ---
+
+  # Record pattern → tuple pattern {:record_name, var1, var2, ...}
+  defp to_core_pattern({:pattern, name, args, _type}) do
+    pattern_args = Enum.map(args, &to_core_pattern/1)
+    :cerl.c_tuple([:cerl.c_atom(name) | pattern_args])
+  end
+
+  defp to_core_pattern({:var, name, _type}) do
+    :cerl.c_var(name)
+  end
+
+  defp to_core_pattern(n) when is_integer(n), do: :cerl.c_int(n)
+  defp to_core_pattern(a) when is_atom(a), do: :cerl.c_atom(a)
 
   # --- Error formatting ---
 

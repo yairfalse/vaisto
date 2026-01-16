@@ -104,6 +104,28 @@ defmodule Vaisto.TypeChecker do
     end
   end
 
+  # Match expression: (match expr [pattern body] ...)
+  def check({:match, expr, clauses}, env) do
+    with {:ok, expr_type, typed_expr} <- check(expr, env),
+         {:ok, result_type, typed_clauses} <- check_match_clauses(clauses, expr_type, env) do
+      {:ok, result_type, {:match, typed_expr, typed_clauses, result_type}}
+    end
+  end
+
+  # Let binding: (let [x 1 y 2] body)
+  # Each binding extends the env for subsequent bindings and body
+  def check({:let, bindings, body}, env) do
+    case check_bindings(bindings, env, []) do
+      {:ok, extended_env, typed_bindings} ->
+        case check(body, extended_env) do
+          {:ok, body_type, typed_body} ->
+            {:ok, body_type, {:let, typed_bindings, typed_body, body_type}}
+          error -> error
+        end
+      error -> error
+    end
+  end
+
   # Function call (general case)
   def check({:call, func, args}, env) do
     with {:ok, func_type} <- lookup_function(func, env),
@@ -130,6 +152,16 @@ defmodule Vaisto.TypeChecker do
     end
   end
 
+  # Type definition: (deftype point x y)
+  # Registers a constructor function and a record type
+  def check({:deftype, name, fields}, _env) do
+    record_type = {:record, name, fields}
+    {:ok, record_type, {:deftype, name, fields, record_type}}
+  end
+
+  # Record construction: (point 1 2) when point is a record type
+  # Handled in function call - lookup_function returns the constructor type
+
   # Fallback
   def check(other, _env) do
     {:error, "Unknown expression: #{inspect(other)}"}
@@ -150,6 +182,84 @@ defmodule Vaisto.TypeChecker do
       nil -> {:error, "Unknown process: #{name}"}
       other -> {:error, "#{name} is not a process, got: #{inspect(other)}"}
     end
+  end
+
+  defp check_bindings([], env, acc) do
+    {:ok, env, Enum.reverse(acc)}
+  end
+
+  defp check_bindings([{name, expr} | rest], env, acc) do
+    case check(expr, env) do
+      {:ok, type, typed_expr} ->
+        extended_env = Map.put(env, name, type)
+        check_bindings(rest, extended_env, [{name, typed_expr, type} | acc])
+      error -> error
+    end
+  end
+
+  # Check match clauses - each clause pattern extends env for its body
+  defp check_match_clauses(clauses, expr_type, env) do
+    results = Enum.map(clauses, fn {pattern, body} ->
+      check_match_clause(pattern, body, expr_type, env)
+    end)
+
+    case Enum.find(results, &match?({:error, _}, &1)) do
+      {:error, _} = err -> err
+      nil ->
+        typed_clauses = Enum.map(results, fn {:ok, clause} -> clause end)
+        # All clauses must have the same result type - use the first one
+        [{_pattern, _body, result_type} | _] = typed_clauses
+        {:ok, result_type, typed_clauses}
+    end
+  end
+
+  defp check_match_clause(pattern, body, expr_type, env) do
+    # Extract bindings from pattern and add to env
+    bindings = extract_pattern_bindings(pattern, expr_type, env)
+    extended_env = Enum.reduce(bindings, env, fn {name, type}, acc ->
+      Map.put(acc, name, type)
+    end)
+
+    # Type the pattern itself
+    typed_pattern = type_pattern(pattern, expr_type, env)
+
+    case check(body, extended_env) do
+      {:ok, body_type, typed_body} ->
+        {:ok, {typed_pattern, typed_body, body_type}}
+      error -> error
+    end
+  end
+
+  # Extract variable bindings from a pattern
+  # (point x y) matching against {:record, :point, [:x, :y]} gives [{:x, :any}, {:y, :any}]
+  defp extract_pattern_bindings({:call, record_name, args}, {:record, record_name, fields}, _env) do
+    Enum.zip(args, fields)
+    |> Enum.filter(fn {arg, _field} -> is_atom(arg) and arg not in [:_, true, false] end)
+    |> Enum.map(fn {var_name, _field} -> {var_name, :any} end)
+  end
+
+  defp extract_pattern_bindings(var, _type, _env) when is_atom(var) and var not in [:_, true, false] do
+    [{var, :any}]
+  end
+
+  defp extract_pattern_bindings(_, _, _), do: []
+
+  # Type a pattern for the typed AST
+  defp type_pattern({:call, record_name, args}, {:record, record_name, fields}, _env) do
+    typed_args = Enum.map(args, fn
+      var when is_atom(var) and var not in [:_, true, false] -> {:var, var, :any}
+      {:call, _, _} = nested -> type_pattern(nested, :any, %{})
+      lit -> lit
+    end)
+    {:pattern, record_name, typed_args, {:record, record_name, fields}}
+  end
+
+  defp type_pattern(var, type, _env) when is_atom(var) and var not in [:_, true, false] do
+    {:var, var, type}
+  end
+
+  defp type_pattern(lit, _type, _env) when is_integer(lit) or is_float(lit) or is_atom(lit) do
+    lit
   end
 
   defp check_args(args, env) do
@@ -225,10 +335,18 @@ defmodule Vaisto.TypeChecker do
   defp check_module([form | rest], env, acc) do
     case check(form, env) do
       {:ok, _type, typed_form} ->
-        # Add process definitions to env so supervise can find them
+        # Add definitions to env for later forms to reference
         new_env = case typed_form do
           {:process, name, _init, _handlers, process_type} ->
             Map.put(env, name, process_type)
+
+          {:deftype, name, fields, record_type} ->
+            # Register constructor: point → fn([any, any], {:record, :point, [:x, :y]})
+            # For now, fields are untyped (any)
+            field_types = Enum.map(fields, fn _ -> :any end)
+            constructor_type = {:fn, field_types, record_type}
+            Map.put(env, name, constructor_type)
+
           _ ->
             env
         end

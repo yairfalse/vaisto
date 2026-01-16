@@ -58,6 +58,7 @@ defmodule Vaisto.Parser do
     ast = case acc do
       # Special forms
       [:let | rest] -> parse_let(rest)
+      [:match | rest] -> parse_match(rest)
       [:process | rest] -> parse_process(rest)
       [:supervise | rest] -> parse_supervise(rest)
       [:def | rest] -> parse_def(rest)
@@ -96,6 +97,23 @@ defmodule Vaisto.Parser do
   end
 
   # Special form parsers
+
+  # (let [x 1 y 2] body) → {:let, [{:x, 1}, {:y, 2}], body}
+  defp parse_let([{:bracket, bindings}, body]) do
+    pairs = bindings
+      |> Enum.chunk_every(2)
+      |> Enum.map(fn [name, value] -> {name, value} end)
+    {:let, pairs, body}
+  end
+
+  # (match expr [pattern1 body1] [pattern2 body2] ...) → {:match, expr, [{pattern, body}, ...]}
+  defp parse_match([expr | clauses]) do
+    parsed_clauses = Enum.map(clauses, fn {:bracket, [pattern, body]} ->
+      {pattern, body}
+    end)
+    {:match, expr, parsed_clauses}
+  end
+
   defp parse_process([name, initial_state | handlers]) do
     {:process, name, initial_state, parse_handlers(handlers)}
   end

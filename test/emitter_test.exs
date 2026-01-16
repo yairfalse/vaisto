@@ -88,5 +88,55 @@ defmodule Vaisto.EmitterTest do
       # (1 + 2) * (5 - 1) = 3 * 4 = 12
       assert E2E2.main() == 12
     end
+
+    test "let bindings" do
+      code = "(let [x 1 y 2] (+ x y))"
+
+      ast = Vaisto.Parser.parse(code)
+      {:ok, :int, typed_ast} = Vaisto.TypeChecker.check(ast)
+      {:ok, LetE2E, _} = Emitter.compile(typed_ast, LetE2E)
+
+      assert LetE2E.main() == 3
+    end
+
+    test "nested let bindings" do
+      code = "(let [a 10] (let [b (+ a 5)] (* b 2)))"
+
+      ast = Vaisto.Parser.parse(code)
+      {:ok, :int, typed_ast} = Vaisto.TypeChecker.check(ast)
+      {:ok, NestedLetE2E, _} = Emitter.compile(typed_ast, NestedLetE2E)
+
+      # (10 + 5) * 2 = 30
+      assert NestedLetE2E.main() == 30
+    end
+
+    test "record construction and pattern matching" do
+      code = """
+      (deftype point x y)
+      (match (point 1 2) [(point a b) (+ a b)])
+      """
+
+      ast = Vaisto.Parser.parse(code)
+      {:ok, :module, {:module, [_deftype, match_expr]}} = Vaisto.TypeChecker.check(ast)
+      {:ok, RecordMatchE2E, _} = Emitter.compile(match_expr, RecordMatchE2E)
+
+      # 1 + 2 = 3
+      assert RecordMatchE2E.main() == 3
+    end
+
+    test "nested record pattern matching" do
+      code = """
+      (deftype pair a b)
+      (match (pair 10 20)
+        [(pair x y) (* x y)])
+      """
+
+      ast = Vaisto.Parser.parse(code)
+      {:ok, :module, {:module, [_deftype, match_expr]}} = Vaisto.TypeChecker.check(ast)
+      {:ok, NestedRecordE2E, _} = Emitter.compile(match_expr, NestedRecordE2E)
+
+      # 10 * 20 = 200
+      assert NestedRecordE2E.main() == 200
+    end
   end
 end
