@@ -101,4 +101,58 @@ defmodule Vaisto.TypeCheckerTest do
       assert msg =~ "does not accept message :reset"
     end
   end
+
+  describe "typed record fields" do
+    test "parser creates typed field tuples from bracket syntax" do
+      code = "(deftype point [x :int y :int])"
+      ast = Vaisto.Parser.parse(code)
+      assert {:deftype, :point, [{:x, :int}, {:y, :int}]} = ast
+    end
+
+    test "parser converts legacy untyped syntax to :any fields" do
+      code = "(deftype point x y)"
+      ast = Vaisto.Parser.parse(code)
+      assert {:deftype, :point, [{:x, :any}, {:y, :any}]} = ast
+    end
+
+    test "typed record constructor has correct field types" do
+      code = "(deftype point [x :int y :int])"
+      ast = Vaisto.Parser.parse(code)
+      {:ok, record_type, _typed_ast} = TypeChecker.check(ast)
+      assert {:record, :point, [{:x, :int}, {:y, :int}]} = record_type
+    end
+
+    test "pattern matching extracts field types" do
+      code = """
+      (deftype point [x :int y :int])
+      (match (point 1 2) [(point a b) (+ a b)])
+      """
+      ast = Vaisto.Parser.parse(code)
+      # This should succeed because a and b get type :int from pattern
+      assert {:ok, :module, _} = TypeChecker.check(ast)
+    end
+
+    test "pattern matching with typed fields infers correct variable types" do
+      code = """
+      (deftype point [x :int y :int])
+      (match (point 1 2) [(point a b) a])
+      """
+      ast = Vaisto.Parser.parse(code)
+      {:ok, :module, {:module, [_deftype, match_expr]}} = TypeChecker.check(ast)
+      # The match result should be :int (the type of 'a' which comes from field x)
+      {:match, _expr, _clauses, result_type} = match_expr
+      assert result_type == :int
+    end
+
+    test "constructor enforces field types" do
+      code = """
+      (deftype point [x :int y :int])
+      (point 1 2)
+      """
+      ast = Vaisto.Parser.parse(code)
+      {:ok, :module, {:module, [_deftype, call_expr]}} = TypeChecker.check(ast)
+      {:call, :point, _args, result_type} = call_expr
+      assert {:record, :point, [{:x, :int}, {:y, :int}]} = result_type
+    end
+  end
 end

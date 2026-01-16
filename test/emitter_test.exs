@@ -528,5 +528,35 @@ defmodule Vaisto.EmitterTest do
       # 1*2*3*4*5 = 120
       assert FoldProductE2E.main() == 120
     end
+
+    test "typed record fields with bracket syntax" do
+      code = """
+      (deftype point [x :int y :int])
+      (match (point 3 4) [(point a b) (+ a b)])
+      """
+
+      ast = Vaisto.Parser.parse(code)
+      {:ok, :module, {:module, [_deftype, match_expr]}} = Vaisto.TypeChecker.check(ast)
+      {:ok, TypedRecordE2E, _} = Emitter.compile(match_expr, TypedRecordE2E)
+
+      # 3 + 4 = 7
+      assert TypedRecordE2E.main() == 7
+    end
+
+    test "typed record with function using pattern match" do
+      code = """
+      (deftype vec2 [x :int y :int])
+      (defn magnitude-squared [v]
+        (match v [(vec2 x y) (+ (* x x) (* y y))]))
+      (magnitude-squared (vec2 3 4))
+      """
+
+      ast = Vaisto.Parser.parse(code)
+      {:ok, :module, typed_ast} = Vaisto.TypeChecker.check(ast)
+      {:ok, Vec2E2E, _} = Emitter.compile(typed_ast, Vec2E2E)
+
+      # 3^2 + 4^2 = 9 + 16 = 25
+      assert Vec2E2E.main() == 25
+    end
   end
 end

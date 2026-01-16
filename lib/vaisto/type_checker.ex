@@ -345,8 +345,9 @@ defmodule Vaisto.TypeChecker do
     end
   end
 
-  # Type definition: (deftype point x y)
+  # Type definition: (deftype point [x :int y :int])
   # Registers a constructor function and a record type
+  # Fields are now [{:x, :int}, {:y, :int}] tuples with types
   def check({:deftype, name, fields}, _env) do
     record_type = {:record, name, fields}
     {:ok, record_type, {:deftype, name, fields, record_type}}
@@ -442,28 +443,65 @@ defmodule Vaisto.TypeChecker do
     end
   end
 
-  # Extract variable bindings from a pattern
-  # (point x y) matching against {:record, :point, [:x, :y]} gives [{:x, :any}, {:y, :any}]
+  # Extract variable bindings from a pattern with proper types
+  # (point x y) matching against {:record, :point, [{:x, :int}, {:y, :int}]}
+  # gives [{:x, :int}, {:y, :int}]
   defp extract_pattern_bindings({:call, record_name, args}, {:record, record_name, fields}, _env) do
     Enum.zip(args, fields)
     |> Enum.filter(fn {arg, _field} -> is_atom(arg) and arg not in [:_, true, false] end)
-    |> Enum.map(fn {var_name, _field} -> {var_name, :any} end)
+    |> Enum.map(fn {var_name, {_field_name, field_type}} -> {var_name, field_type} end)
   end
 
-  defp extract_pattern_bindings(var, _type, _env) when is_atom(var) and var not in [:_, true, false] do
-    [{var, :any}]
+  # Record pattern against :any type - try to look up the record in env
+  defp extract_pattern_bindings({:call, record_name, args}, :any, env) do
+    case Map.get(env, record_name) do
+      {:fn, _arg_types, {:record, ^record_name, fields}} ->
+        # Found the constructor, use its field types
+        extract_pattern_bindings({:call, record_name, args}, {:record, record_name, fields}, env)
+      _ ->
+        # Can't find record type, fall back to :any for all vars
+        args
+        |> Enum.filter(fn arg -> is_atom(arg) and arg not in [:_, true, false] end)
+        |> Enum.map(fn var_name -> {var_name, :any} end)
+    end
+  end
+
+  defp extract_pattern_bindings(var, type, _env) when is_atom(var) and var not in [:_, true, false] do
+    [{var, type}]
   end
 
   defp extract_pattern_bindings(_, _, _), do: []
 
   # Type a pattern for the typed AST
+  # Uses field types from the record definition
   defp type_pattern({:call, record_name, args}, {:record, record_name, fields}, _env) do
-    typed_args = Enum.map(args, fn
-      var when is_atom(var) and var not in [:_, true, false] -> {:var, var, :any}
-      {:call, _, _} = nested -> type_pattern(nested, :any, %{})
-      lit -> lit
+    typed_args = Enum.zip(args, fields)
+    |> Enum.map(fn
+      {var, {_field_name, field_type}} when is_atom(var) and var not in [:_, true, false] ->
+        {:var, var, field_type}
+      {{:call, _, _} = nested, _field} ->
+        type_pattern(nested, :any, %{})
+      {lit, _field} ->
+        lit
     end)
     {:pattern, record_name, typed_args, {:record, record_name, fields}}
+  end
+
+  # Record pattern against :any type - try to look up the record in env
+  defp type_pattern({:call, record_name, args}, :any, env) do
+    case Map.get(env, record_name) do
+      {:fn, _arg_types, {:record, ^record_name, fields}} ->
+        # Found the constructor, use its field types
+        type_pattern({:call, record_name, args}, {:record, record_name, fields}, env)
+      _ ->
+        # Can't find record type, fall back to :any for all vars
+        typed_args = Enum.map(args, fn
+          var when is_atom(var) and var not in [:_, true, false] -> {:var, var, :any}
+          {:call, _, _} = nested -> type_pattern(nested, :any, env)
+          lit -> lit
+        end)
+        {:pattern, record_name, typed_args, :any}
+    end
   end
 
   defp type_pattern(var, type, _env) when is_atom(var) and var not in [:_, true, false] do
@@ -565,7 +603,8 @@ defmodule Vaisto.TypeChecker do
           Map.put(acc_env, name, func_type)
 
         {:deftype, name, fields} ->
-          field_types = Enum.map(fields, fn _ -> :any end)
+          # Fields are now [{:x, :int}, {:y, :int}] tuples
+          field_types = Enum.map(fields, fn {_name, type} -> type end)
           record_type = {:record, name, fields}
           constructor_type = {:fn, field_types, record_type}
           Map.put(acc_env, name, constructor_type)
@@ -604,7 +643,8 @@ defmodule Vaisto.TypeChecker do
             Map.put(env, name, process_type)
 
           {:deftype, name, fields, record_type} ->
-            field_types = Enum.map(fields, fn _ -> :any end)
+            # Fields are now [{:x, :int}, {:y, :int}] tuples
+            field_types = Enum.map(fields, fn {_name, type} -> type end)
             constructor_type = {:fn, field_types, record_type}
             Map.put(env, name, constructor_type)
 

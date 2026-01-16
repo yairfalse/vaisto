@@ -171,8 +171,20 @@ defmodule Vaisto.Parser do
     {:defn, name, params, body}
   end
 
-  defp parse_deftype([name | fields]) do
-    {:deftype, name, fields}
+  # (deftype point [x :int y :int]) → {:deftype, :point, [{:x, :int}, {:y, :int}]}
+  defp parse_deftype([name, {:bracket, fields}]) do
+    # Parse field pairs: [x :int y :int] → [{:x, :int}, {:y, :int}]
+    field_pairs = fields
+      |> Enum.chunk_every(2)
+      |> Enum.map(fn [field_name, type] -> {field_name, type} end)
+    {:deftype, name, field_pairs}
+  end
+
+  # Legacy support: (deftype point x y) → untyped fields
+  defp parse_deftype([name | fields]) when is_list(fields) and length(fields) > 0 do
+    # Old-style untyped fields - convert to {:field_name, :any}
+    field_pairs = Enum.map(fields, fn field -> {field, :any} end)
+    {:deftype, name, field_pairs}
   end
 
   defp parse_handlers(handlers) do
