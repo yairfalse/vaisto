@@ -275,6 +275,101 @@ defmodule Vaisto.CoreEmitter do
     )
   end
 
+  # --- List operations ---
+
+  # head: erlang:hd/1
+  defp to_core_expr({:call, :head, [list_expr], _type}, user_fns) do
+    :cerl.c_call(
+      :cerl.c_atom(:erlang),
+      :cerl.c_atom(:hd),
+      [to_core_expr(list_expr, user_fns)]
+    )
+  end
+
+  # tail: erlang:tl/1
+  defp to_core_expr({:call, :tail, [list_expr], _type}, user_fns) do
+    :cerl.c_call(
+      :cerl.c_atom(:erlang),
+      :cerl.c_atom(:tl),
+      [to_core_expr(list_expr, user_fns)]
+    )
+  end
+
+  # cons: [elem | list]
+  defp to_core_expr({:call, :cons, [elem_expr, list_expr], _type}, user_fns) do
+    :cerl.c_cons(
+      to_core_expr(elem_expr, user_fns),
+      to_core_expr(list_expr, user_fns)
+    )
+  end
+
+  # empty?: list == []
+  defp to_core_expr({:call, :empty?, [list_expr], _type}, user_fns) do
+    :cerl.c_call(
+      :cerl.c_atom(:erlang),
+      :cerl.c_atom(:"=:="),
+      [to_core_expr(list_expr, user_fns), :cerl.c_nil()]
+    )
+  end
+
+  # length: erlang:length/1
+  defp to_core_expr({:call, :length, [list_expr], _type}, user_fns) do
+    :cerl.c_call(
+      :cerl.c_atom(:erlang),
+      :cerl.c_atom(:length),
+      [to_core_expr(list_expr, user_fns)]
+    )
+  end
+
+  # --- Higher-order list functions ---
+
+  # map: lists:map/2 with function reference
+  defp to_core_expr({:call, :map, [func_name, list_expr], _type}, user_fns) when is_atom(func_name) do
+    list_core = to_core_expr(list_expr, user_fns)
+    func_ref = :cerl.c_fname(func_name, 1)
+    # Create a fun wrapper: fun(X) -> func_name(X) end
+    x_var = :cerl.c_var(:__map_x__)
+    fun_body = :cerl.c_apply(func_ref, [x_var])
+    map_fun = :cerl.c_fun([x_var], fun_body)
+    :cerl.c_call(
+      :cerl.c_atom(:lists),
+      :cerl.c_atom(:map),
+      [map_fun, list_core]
+    )
+  end
+
+  # filter: lists:filter/2 with predicate reference
+  defp to_core_expr({:call, :filter, [func_name, list_expr], _type}, user_fns) when is_atom(func_name) do
+    list_core = to_core_expr(list_expr, user_fns)
+    func_ref = :cerl.c_fname(func_name, 1)
+    x_var = :cerl.c_var(:__filter_x__)
+    fun_body = :cerl.c_apply(func_ref, [x_var])
+    filter_fun = :cerl.c_fun([x_var], fun_body)
+    :cerl.c_call(
+      :cerl.c_atom(:lists),
+      :cerl.c_atom(:filter),
+      [filter_fun, list_core]
+    )
+  end
+
+  # fold: lists:foldl/3 with folder function
+  defp to_core_expr({:call, :fold, [func_name, init_expr, list_expr], _type}, user_fns) when is_atom(func_name) do
+    init_core = to_core_expr(init_expr, user_fns)
+    list_core = to_core_expr(list_expr, user_fns)
+    func_ref = :cerl.c_fname(func_name, 2)
+    # lists:foldl expects fun(Elem, Acc) but we defined func(Acc, Elem)
+    # so we need to swap the arguments
+    elem_var = :cerl.c_var(:__fold_elem__)
+    acc_var = :cerl.c_var(:__fold_acc__)
+    fun_body = :cerl.c_apply(func_ref, [acc_var, elem_var])
+    fold_fun = :cerl.c_fun([elem_var, acc_var], fun_body)
+    :cerl.c_call(
+      :cerl.c_atom(:lists),
+      :cerl.c_atom(:foldl),
+      [fold_fun, init_core, list_core]
+    )
+  end
+
   # Record construction → tagged tuple {:record_name, field1, field2, ...}
   defp to_core_expr({:call, name, args, {:record, name, _fields}}, user_fns) do
     elements = [:cerl.c_atom(name) | Enum.map(args, &to_core_expr(&1, user_fns))]

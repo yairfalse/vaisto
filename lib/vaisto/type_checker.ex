@@ -9,6 +9,7 @@ defmodule Vaisto.TypeChecker do
 
   # Built-in type environment
   # Note: spawn and send (!) are handled specially for typed PIDs
+  # Note: head, tail, cons, map, filter, fold are handled specially for list types
   @primitives %{
     :+ => {:fn, [:int, :int], :int},
     :- => {:fn, [:int, :int], :int},
@@ -16,7 +17,10 @@ defmodule Vaisto.TypeChecker do
     :/ => {:fn, [:int, :int], :int},
     :== => {:fn, [:any, :any], :bool},
     :< => {:fn, [:int, :int], :bool},
-    :> => {:fn, [:int, :int], :bool}
+    :> => {:fn, [:int, :int], :bool},
+    :<= => {:fn, [:int, :int], :bool},
+    :>= => {:fn, [:int, :int], :bool},
+    :!= => {:fn, [:any, :any], :bool}
   }
 
   @doc """
@@ -91,6 +95,164 @@ defmodule Vaisto.TypeChecker do
       {:process, _state_type, accepted_msgs} = process_type
       pid_type = {:pid, process_name, accepted_msgs}
       {:ok, pid_type, {:call, :spawn, [process_name, typed_init], pid_type}}
+    end
+  end
+
+  # --- List operations ---
+
+  # head: (list a) → a
+  def check({:call, :head, [list_expr]}, env) do
+    with {:ok, list_type, typed_list} <- check(list_expr, env) do
+      case list_type do
+        {:list, elem_type} ->
+          {:ok, elem_type, {:call, :head, [typed_list], elem_type}}
+        :any ->
+          {:ok, :any, {:call, :head, [typed_list], :any}}
+        other ->
+          {:error, "head expects a list, got #{inspect(other)}"}
+      end
+    end
+  end
+
+  # tail: (list a) → (list a)
+  def check({:call, :tail, [list_expr]}, env) do
+    with {:ok, list_type, typed_list} <- check(list_expr, env) do
+      case list_type do
+        {:list, _elem_type} = t ->
+          {:ok, t, {:call, :tail, [typed_list], t}}
+        :any ->
+          {:ok, {:list, :any}, {:call, :tail, [typed_list], {:list, :any}}}
+        other ->
+          {:error, "tail expects a list, got #{inspect(other)}"}
+      end
+    end
+  end
+
+  # cons: a → (list a) → (list a)
+  def check({:call, :cons, [elem_expr, list_expr]}, env) do
+    with {:ok, elem_type, typed_elem} <- check(elem_expr, env),
+         {:ok, list_type, typed_list} <- check(list_expr, env) do
+      case list_type do
+        {:list, :any} ->
+          # Empty list - element determines type
+          result_type = {:list, elem_type}
+          {:ok, result_type, {:call, :cons, [typed_elem, typed_list], result_type}}
+        {:list, list_elem_type} ->
+          if types_match?(elem_type, list_elem_type) do
+            result_type = {:list, list_elem_type}
+            {:ok, result_type, {:call, :cons, [typed_elem, typed_list], result_type}}
+          else
+            {:error, "cons type mismatch: element is #{inspect(elem_type)}, list is #{inspect(list_type)}"}
+          end
+        :any ->
+          result_type = {:list, elem_type}
+          {:ok, result_type, {:call, :cons, [typed_elem, typed_list], result_type}}
+        other ->
+          {:error, "cons expects a list as second argument, got #{inspect(other)}"}
+      end
+    end
+  end
+
+  # empty?: (list a) → bool
+  def check({:call, :empty?, [list_expr]}, env) do
+    with {:ok, list_type, typed_list} <- check(list_expr, env) do
+      case list_type do
+        {:list, _} ->
+          {:ok, :bool, {:call, :empty?, [typed_list], :bool}}
+        :any ->
+          {:ok, :bool, {:call, :empty?, [typed_list], :bool}}
+        other ->
+          {:error, "empty? expects a list, got #{inspect(other)}"}
+      end
+    end
+  end
+
+  # length: (list a) → int
+  def check({:call, :length, [list_expr]}, env) do
+    with {:ok, list_type, typed_list} <- check(list_expr, env) do
+      case list_type do
+        {:list, _} ->
+          {:ok, :int, {:call, :length, [typed_list], :int}}
+        :any ->
+          {:ok, :int, {:call, :length, [typed_list], :int}}
+        other ->
+          {:error, "length expects a list, got #{inspect(other)}"}
+      end
+    end
+  end
+
+  # --- Higher-order list functions ---
+
+  # map: (a → b) → (list a) → (list b)
+  # (map func list) - applies func to each element
+  def check({:call, :map, [func_name, list_expr]}, env) when is_atom(func_name) do
+    with {:ok, func_type} <- lookup_function(func_name, env),
+         {:ok, list_type, typed_list} <- check(list_expr, env) do
+      case {func_type, list_type} do
+        {{:fn, [_arg_type], ret_type}, {:list, _elem_type}} ->
+          result_type = {:list, ret_type}
+          {:ok, result_type, {:call, :map, [func_name, typed_list], result_type}}
+        {{:fn, [_], ret_type}, :any} ->
+          result_type = {:list, ret_type}
+          {:ok, result_type, {:call, :map, [func_name, typed_list], result_type}}
+        {{:fn, args, _}, _} when length(args) != 1 ->
+          {:error, "map function must take exactly 1 argument, got #{length(args)}"}
+        {_, {:list, _}} ->
+          {:error, "map expects a function and a list"}
+        {_, :any} ->
+          {:error, "map expects a function and a list"}
+        {_, other} ->
+          {:error, "map expects a list as second argument, got #{inspect(other)}"}
+      end
+    end
+  end
+
+  # filter: (a → bool) → (list a) → (list a)
+  # (filter predicate list) - keeps elements where predicate returns true
+  def check({:call, :filter, [func_name, list_expr]}, env) when is_atom(func_name) do
+    with {:ok, func_type} <- lookup_function(func_name, env),
+         {:ok, list_type, typed_list} <- check(list_expr, env) do
+      case {func_type, list_type} do
+        {{:fn, [_arg_type], :bool}, {:list, elem_type}} ->
+          {:ok, list_type, {:call, :filter, [func_name, typed_list], {:list, elem_type}}}
+        {{:fn, [_arg_type], :any}, {:list, elem_type}} ->
+          {:ok, list_type, {:call, :filter, [func_name, typed_list], {:list, elem_type}}}
+        {{:fn, [_], :bool}, :any} ->
+          {:ok, {:list, :any}, {:call, :filter, [func_name, typed_list], {:list, :any}}}
+        {{:fn, [_], ret_type}, _} when ret_type not in [:bool, :any] ->
+          {:error, "filter predicate must return bool, got #{inspect(ret_type)}"}
+        {{:fn, args, _}, _} when length(args) != 1 ->
+          {:error, "filter predicate must take exactly 1 argument, got #{length(args)}"}
+        {_, {:list, _}} ->
+          {:error, "filter expects a predicate function and a list"}
+        {_, :any} ->
+          {:error, "filter expects a predicate function and a list"}
+        {_, other} ->
+          {:error, "filter expects a list as second argument, got #{inspect(other)}"}
+      end
+    end
+  end
+
+  # fold: (b → a → b) → b → (list a) → b
+  # (fold func init list) - left fold
+  def check({:call, :fold, [func_name, init_expr, list_expr]}, env) when is_atom(func_name) do
+    with {:ok, func_type} <- lookup_function(func_name, env),
+         {:ok, init_type, typed_init} <- check(init_expr, env),
+         {:ok, list_type, typed_list} <- check(list_expr, env) do
+      case {func_type, list_type} do
+        {{:fn, [_acc_type, _elem_type], ret_type}, {:list, _}} ->
+          {:ok, ret_type, {:call, :fold, [func_name, typed_init, typed_list], ret_type}}
+        {{:fn, [_, _], ret_type}, :any} ->
+          {:ok, ret_type, {:call, :fold, [func_name, typed_init, typed_list], ret_type}}
+        {{:fn, args, _}, _} when length(args) != 2 ->
+          {:error, "fold function must take exactly 2 arguments (acc, elem), got #{length(args)}"}
+        {_, {:list, _}} ->
+          {:ok, init_type, {:call, :fold, [func_name, typed_init, typed_list], init_type}}
+        {_, :any} ->
+          {:ok, init_type, {:call, :fold, [func_name, typed_init, typed_list], init_type}}
+        {_, other} ->
+          {:error, "fold expects a list as third argument, got #{inspect(other)}"}
+      end
     end
   end
 

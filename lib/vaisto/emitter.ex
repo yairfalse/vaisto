@@ -92,6 +92,76 @@ defmodule Vaisto.Emitter do
     {op, [], [to_elixir(left), to_elixir(right)]}
   end
 
+  # --- List operations ---
+
+  # head: get first element of list
+  def to_elixir({:call, :head, [list_expr], _type}) do
+    list_ast = to_elixir(list_expr)
+    quote do: hd(unquote(list_ast))
+  end
+
+  # tail: get all but first element
+  def to_elixir({:call, :tail, [list_expr], _type}) do
+    list_ast = to_elixir(list_expr)
+    quote do: tl(unquote(list_ast))
+  end
+
+  # cons: prepend element to list
+  def to_elixir({:call, :cons, [elem_expr, list_expr], _type}) do
+    elem_ast = to_elixir(elem_expr)
+    list_ast = to_elixir(list_expr)
+    quote do: [unquote(elem_ast) | unquote(list_ast)]
+  end
+
+  # empty?: check if list is empty
+  def to_elixir({:call, :empty?, [list_expr], _type}) do
+    list_ast = to_elixir(list_expr)
+    quote do: unquote(list_ast) == []
+  end
+
+  # length: get list length
+  def to_elixir({:call, :length, [list_expr], _type}) do
+    list_ast = to_elixir(list_expr)
+    quote do: length(unquote(list_ast))
+  end
+
+  # --- Higher-order list functions ---
+
+  # map: apply function to each element
+  def to_elixir({:call, :map, [func_name, list_expr], _type}) when is_atom(func_name) do
+    list_ast = to_elixir(list_expr)
+    # Build: Enum.map(list, fn x -> func_name(x) end)
+    x_var = Macro.var(:vaisto_map_x, nil)
+    call_ast = {func_name, [], [x_var]}
+    quote do
+      Enum.map(unquote(list_ast), fn unquote(x_var) -> unquote(call_ast) end)
+    end
+  end
+
+  # filter: keep elements where predicate is true
+  def to_elixir({:call, :filter, [func_name, list_expr], _type}) when is_atom(func_name) do
+    list_ast = to_elixir(list_expr)
+    # Build: Enum.filter(list, fn x -> predicate(x) end)
+    x_var = Macro.var(:vaisto_filter_x, nil)
+    call_ast = {func_name, [], [x_var]}
+    quote do
+      Enum.filter(unquote(list_ast), fn unquote(x_var) -> unquote(call_ast) end)
+    end
+  end
+
+  # fold: left fold with accumulator
+  def to_elixir({:call, :fold, [func_name, init_expr, list_expr], _type}) when is_atom(func_name) do
+    init_ast = to_elixir(init_expr)
+    list_ast = to_elixir(list_expr)
+    # Build: Enum.reduce(list, init, fn elem, acc -> func(acc, elem) end)
+    elem_var = Macro.var(:vaisto_fold_elem, nil)
+    acc_var = Macro.var(:vaisto_fold_acc, nil)
+    call_ast = {func_name, [], [acc_var, elem_var]}
+    quote do
+      Enum.reduce(unquote(list_ast), unquote(init_ast), fn unquote(elem_var), unquote(acc_var) -> unquote(call_ast) end)
+    end
+  end
+
   # spawn: start a GenServer and return its PID
   # (spawn counter 0) → Counter.start_link(0) |> elem(1)
   def to_elixir({:call, :spawn, [process_name, init_arg], _pid_type}) do

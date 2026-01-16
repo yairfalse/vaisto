@@ -332,5 +332,201 @@ defmodule Vaisto.EmitterTest do
 
       assert StringListE2E.main() == ["a", "b", "c"]
     end
+
+    test "head of list" do
+      code = "(head (list 1 2 3))"
+
+      ast = Vaisto.Parser.parse(code)
+      {:ok, :int, typed_ast} = Vaisto.TypeChecker.check(ast)
+      {:ok, HeadE2E, _} = Emitter.compile(typed_ast, HeadE2E)
+
+      assert HeadE2E.main() == 1
+    end
+
+    test "tail of list" do
+      code = "(tail (list 1 2 3))"
+
+      ast = Vaisto.Parser.parse(code)
+      {:ok, {:list, :int}, typed_ast} = Vaisto.TypeChecker.check(ast)
+      {:ok, TailE2E, _} = Emitter.compile(typed_ast, TailE2E)
+
+      assert TailE2E.main() == [2, 3]
+    end
+
+    test "cons element to list" do
+      code = "(cons 0 (list 1 2 3))"
+
+      ast = Vaisto.Parser.parse(code)
+      {:ok, {:list, :int}, typed_ast} = Vaisto.TypeChecker.check(ast)
+      {:ok, ConsE2E, _} = Emitter.compile(typed_ast, ConsE2E)
+
+      assert ConsE2E.main() == [0, 1, 2, 3]
+    end
+
+    test "cons to empty list" do
+      code = "(cons 1 (list))"
+
+      ast = Vaisto.Parser.parse(code)
+      {:ok, {:list, :int}, typed_ast} = Vaisto.TypeChecker.check(ast)
+      {:ok, ConsEmptyE2E, _} = Emitter.compile(typed_ast, ConsEmptyE2E)
+
+      assert ConsEmptyE2E.main() == [1]
+    end
+
+    test "empty? on empty list" do
+      code = "(empty? (list))"
+
+      ast = Vaisto.Parser.parse(code)
+      {:ok, :bool, typed_ast} = Vaisto.TypeChecker.check(ast)
+      {:ok, EmptyTrueE2E, _} = Emitter.compile(typed_ast, EmptyTrueE2E)
+
+      assert EmptyTrueE2E.main() == true
+    end
+
+    test "empty? on non-empty list" do
+      code = "(empty? (list 1 2))"
+
+      ast = Vaisto.Parser.parse(code)
+      {:ok, :bool, typed_ast} = Vaisto.TypeChecker.check(ast)
+      {:ok, EmptyFalseE2E, _} = Emitter.compile(typed_ast, EmptyFalseE2E)
+
+      assert EmptyFalseE2E.main() == false
+    end
+
+    test "length of list" do
+      code = "(length (list 1 2 3 4 5))"
+
+      ast = Vaisto.Parser.parse(code)
+      {:ok, :int, typed_ast} = Vaisto.TypeChecker.check(ast)
+      {:ok, LengthE2E, _} = Emitter.compile(typed_ast, LengthE2E)
+
+      assert LengthE2E.main() == 5
+    end
+
+    test "chained list operations" do
+      code = "(head (tail (tail (list 1 2 3 4))))"
+
+      ast = Vaisto.Parser.parse(code)
+      {:ok, :int, typed_ast} = Vaisto.TypeChecker.check(ast)
+      {:ok, ChainedE2E, _} = Emitter.compile(typed_ast, ChainedE2E)
+
+      # tail [1,2,3,4] = [2,3,4], tail [2,3,4] = [3,4], head [3,4] = 3
+      assert ChainedE2E.main() == 3
+    end
+
+    test "recursive sum with list operations" do
+      code = """
+      (defn sum [xs]
+        (if (empty? xs)
+          0
+          (+ (head xs) (sum (tail xs)))))
+      (sum (list 1 2 3 4 5))
+      """
+
+      ast = Vaisto.Parser.parse(code)
+      {:ok, :module, typed_ast} = Vaisto.TypeChecker.check(ast)
+      {:ok, RecSumE2E, _} = Emitter.compile(typed_ast, RecSumE2E)
+
+      assert RecSumE2E.main() == 15
+    end
+
+    test "recursive list reverse" do
+      code = """
+      (defn reverse-helper [xs acc]
+        (if (empty? xs)
+          acc
+          (reverse-helper (tail xs) (cons (head xs) acc))))
+      (defn reverse [xs]
+        (reverse-helper xs (list)))
+      (reverse (list 1 2 3 4))
+      """
+
+      ast = Vaisto.Parser.parse(code)
+      {:ok, :module, typed_ast} = Vaisto.TypeChecker.check(ast)
+      {:ok, ReverseE2E, _} = Emitter.compile(typed_ast, ReverseE2E)
+
+      assert ReverseE2E.main() == [4, 3, 2, 1]
+    end
+
+    test "map with user-defined function" do
+      code = """
+      (defn double [x] (* x 2))
+      (map double (list 1 2 3 4 5))
+      """
+
+      ast = Vaisto.Parser.parse(code)
+      {:ok, :module, typed_ast} = Vaisto.TypeChecker.check(ast)
+      {:ok, MapE2E, _} = Emitter.compile(typed_ast, MapE2E)
+
+      assert MapE2E.main() == [2, 4, 6, 8, 10]
+    end
+
+    test "filter with user-defined predicate" do
+      code = """
+      (defn positive? [x] (> x 0))
+      (filter positive? (list -2 -1 0 1 2 3))
+      """
+
+      ast = Vaisto.Parser.parse(code)
+      {:ok, :module, typed_ast} = Vaisto.TypeChecker.check(ast)
+      {:ok, FilterE2E, _} = Emitter.compile(typed_ast, FilterE2E)
+
+      assert FilterE2E.main() == [1, 2, 3]
+    end
+
+    test "fold with user-defined function" do
+      code = """
+      (defn add [acc x] (+ acc x))
+      (fold add 0 (list 1 2 3 4 5))
+      """
+
+      ast = Vaisto.Parser.parse(code)
+      {:ok, :module, typed_ast} = Vaisto.TypeChecker.check(ast)
+      {:ok, FoldE2E, _} = Emitter.compile(typed_ast, FoldE2E)
+
+      assert FoldE2E.main() == 15
+    end
+
+    test "chained map and filter" do
+      code = """
+      (defn double [x] (* x 2))
+      (defn big? [x] (> x 5))
+      (filter big? (map double (list 1 2 3 4 5)))
+      """
+
+      ast = Vaisto.Parser.parse(code)
+      {:ok, :module, typed_ast} = Vaisto.TypeChecker.check(ast)
+      {:ok, ChainMapFilterE2E, _} = Emitter.compile(typed_ast, ChainMapFilterE2E)
+
+      # [1,2,3,4,5] -> [2,4,6,8,10] -> [6,8,10]
+      assert ChainMapFilterE2E.main() == [6, 8, 10]
+    end
+
+    test "fold to build list (reverse)" do
+      code = """
+      (defn prepend [acc x] (cons x acc))
+      (fold prepend (list) (list 1 2 3 4))
+      """
+
+      ast = Vaisto.Parser.parse(code)
+      {:ok, :module, typed_ast} = Vaisto.TypeChecker.check(ast)
+      {:ok, FoldReverseE2E, _} = Emitter.compile(typed_ast, FoldReverseE2E)
+
+      assert FoldReverseE2E.main() == [4, 3, 2, 1]
+    end
+
+    test "fold to compute product" do
+      code = """
+      (defn multiply [acc x] (* acc x))
+      (fold multiply 1 (list 1 2 3 4 5))
+      """
+
+      ast = Vaisto.Parser.parse(code)
+      {:ok, :module, typed_ast} = Vaisto.TypeChecker.check(ast)
+      {:ok, FoldProductE2E, _} = Emitter.compile(typed_ast, FoldProductE2E)
+
+      # 1*2*3*4*5 = 120
+      assert FoldProductE2E.main() == 120
+    end
   end
 end
