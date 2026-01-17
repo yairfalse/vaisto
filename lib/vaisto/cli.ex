@@ -189,7 +189,7 @@ defmodule Vaisto.CLI do
   defp format_error(file, %Vaisto.Error{} = error) do
     # Structured error - format it
     # This shouldn't normally happen since check_with_source formats them
-    "#{file}: [#{error.code}] #{error.message}"
+    "#{file}: #{error.message}"
   end
 
   defp format_error(file, reason) do

@@ -1,9 +1,8 @@
 defmodule Vaisto.Error do
   @moduledoc """
-  Structured compiler error with Rust-style diagnostics support.
+  Structured compiler error with diagnostics support.
 
   Errors contain rich information for formatted display:
-  - Error code (E001, E002, etc.) for documentation lookup
   - Primary span showing the main error location with label
   - Secondary spans for related code locations
   - Expected/actual types for type errors
@@ -12,7 +11,6 @@ defmodule Vaisto.Error do
   ## Example
 
       %Vaisto.Error{
-        code: "E001",
         message: "type mismatch",
         primary_span: %{line: 3, col: 8, length: 7, label: "expected `Int`"},
         expected: :int,
@@ -29,7 +27,6 @@ defmodule Vaisto.Error do
   }
 
   @type t :: %__MODULE__{
-    code: String.t(),
     message: String.t(),
     file: String.t() | nil,
     primary_span: span() | nil,
@@ -41,7 +38,6 @@ defmodule Vaisto.Error do
   }
 
   defstruct [
-    :code,
     :message,
     :file,
     :primary_span,
@@ -53,11 +49,10 @@ defmodule Vaisto.Error do
   ]
 
   @doc """
-  Create a new error with the given code and message.
+  Create a new error with the given message and options.
   """
-  def new(code, message, opts \\ []) do
+  def new(message, opts \\ []) do
     %__MODULE__{
-      code: code,
       message: message,
       file: Keyword.get(opts, :file),
       primary_span: Keyword.get(opts, :span),

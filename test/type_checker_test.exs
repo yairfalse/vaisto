@@ -77,7 +77,6 @@ defmodule Vaisto.TypeCheckerTest do
       if is_binary(error) do
         assert error =~ "does not accept message"
       else
-        assert error.code == "E300"
         assert error.note =~ "does not accept"
       end
     end
@@ -106,7 +105,6 @@ defmodule Vaisto.TypeCheckerTest do
       if is_binary(error) do
         assert error =~ "does not accept message :reset"
       else
-        assert error.code == "E300"
         assert error.note =~ "does not accept `:reset`"
       end
     end
@@ -174,7 +172,7 @@ defmodule Vaisto.TypeCheckerTest do
       {:error, error} = TypeChecker.check(ast)
       # Now returns structured error
       assert %Vaisto.Error{} = error
-      assert error.code == "E001"
+      assert error.message == "type mismatch"
       assert error.primary_span.line == 1
       assert error.primary_span.col == 1
     end
@@ -206,7 +204,7 @@ defmodule Vaisto.TypeCheckerTest do
       ast = Vaisto.Parser.parse(code)
       {:error, error} = TypeChecker.check(ast)
       assert %Vaisto.Error{} = error
-      assert error.code == "E101"
+      assert error.message == "unknown function"
       assert error.primary_span.line == 1
     end
   end
