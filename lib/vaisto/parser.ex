@@ -93,8 +93,8 @@ defmodule Vaisto.Parser do
     tokenize_chars(rest, line, col + 1, file, tokens, nil)
   end
 
-  # Delimiters: ( ) [ ]
-  defp tokenize_chars([d | rest], line, col, file, tokens, state) when d in ["(", ")", "[", "]"] do
+  # Delimiters: ( ) [ ] { }
+  defp tokenize_chars([d | rest], line, col, file, tokens, state) when d in ["(", ")", "[", "]", "{", "}"] do
     tokens = flush_token(tokens, state, file)
     tokenize_chars(rest, line, col + 1, file, [{d, Loc.new(line, col, file)} | tokens], nil)
   end
@@ -130,6 +130,11 @@ defmodule Vaisto.Parser do
     do_parse(rest, stack ++ [list])
   end
 
+  defp do_parse([{"{", loc} | tail], stack) do
+    {rest, brace_contents} = parse_brace(tail, [], loc)
+    do_parse(rest, stack ++ [{:tuple_pattern, brace_contents}])
+  end
+
   defp do_parse([{token, loc} | tail], stack) do
     do_parse(tail, stack ++ [parse_token(token, loc)])
   end
@@ -142,6 +147,7 @@ defmodule Vaisto.Parser do
       [:if | rest] -> parse_if(rest, open_loc)
       [:let | rest] -> parse_let(rest, open_loc)
       [:match | rest] -> parse_match(rest, open_loc)
+      [:"match-tuple" | rest] -> parse_match_tuple(rest, open_loc)
       [:receive | rest] -> parse_receive(rest, open_loc)
       [:process | rest] -> parse_process(rest, open_loc)
       [:supervise | rest] -> parse_supervise(rest, open_loc)
@@ -150,6 +156,9 @@ defmodule Vaisto.Parser do
       [:deftype | rest] -> parse_deftype(rest, open_loc)
       [:fn | rest] -> parse_fn(rest, open_loc)
       [:extern | rest] -> parse_extern(rest, open_loc)
+      # Module system
+      [:ns | rest] -> parse_ns(rest, open_loc)
+      [:import | rest] -> parse_import(rest, open_loc)
       # List literal: (list 1 2 3) → {:list, [1, 2, 3], loc}
       [:list | elements] -> {:list, elements, open_loc}
       # Regular function call
@@ -167,6 +176,11 @@ defmodule Vaisto.Parser do
   defp parse_list([{"[", loc} | tail], acc, open_loc) do
     {rest, bracket_contents} = parse_bracket(tail, [], loc)
     parse_list(rest, acc ++ [{:bracket, bracket_contents}], open_loc)
+  end
+
+  defp parse_list([{"{", loc} | tail], acc, open_loc) do
+    {rest, brace_contents} = parse_brace(tail, [], loc)
+    parse_list(rest, acc ++ [{:tuple_pattern, brace_contents}], open_loc)
   end
 
   defp parse_list([{token, loc} | tail], acc, open_loc) do
@@ -196,6 +210,12 @@ defmodule Vaisto.Parser do
     parse_bracket(rest, acc ++ [nested], open_loc)
   end
 
+  defp parse_bracket([{"{", loc} | tail], acc, open_loc) do
+    # Tuple pattern inside bracket: [{:ok v} body]
+    {rest, tuple_contents} = parse_brace(tail, [], loc)
+    parse_bracket(rest, acc ++ [{:tuple_pattern, tuple_contents}], open_loc)
+  end
+
   defp parse_bracket([{token, loc} | tail], acc, open_loc) do
     parse_bracket(tail, acc ++ [parse_token(token, loc)], open_loc)
   end
@@ -215,6 +235,35 @@ defmodule Vaisto.Parser do
       # Regular list of elements (for let bindings, param lists, etc.)
       _ -> acc
     end
+  end
+
+  # Parse brace contents {...} - raw Erlang tuple patterns for match-tuple
+  # {tag arg1 arg2} → {:tuple_pattern, [tag, arg1, arg2]}
+  defp parse_brace([{"}", _} | tail], acc, _open_loc) do
+    {tail, acc}
+  end
+
+  defp parse_brace([{"(", loc} | tail], acc, open_loc) do
+    {rest, nested} = parse_list(tail, [], loc)
+    parse_brace(rest, acc ++ [nested], open_loc)
+  end
+
+  defp parse_brace([{"[", loc} | tail], acc, open_loc) do
+    {rest, bracket_contents} = parse_bracket(tail, [], loc)
+    parse_brace(rest, acc ++ [{:bracket, bracket_contents}], open_loc)
+  end
+
+  defp parse_brace([{"{", loc} | tail], acc, open_loc) do
+    {rest, nested} = parse_brace(tail, [], loc)
+    parse_brace(rest, acc ++ [{:tuple_pattern, nested}], open_loc)
+  end
+
+  defp parse_brace([{token, loc} | tail], acc, open_loc) do
+    parse_brace(tail, acc ++ [parse_token(token, loc)], open_loc)
+  end
+
+  defp parse_brace([], _acc, open_loc) do
+    raise "Unclosed brace at line #{open_loc.line}, column #{open_loc.col}"
   end
 
   # Special form parsers
@@ -239,6 +288,20 @@ defmodule Vaisto.Parser do
       {pattern, body}
     end)
     {:match, expr, parsed_clauses, loc}
+  end
+
+  # (match-tuple expr [{tag args...} body1] [{tag2 args...} body2] ...)
+  # For matching raw Erlang tuples like {:ok, value} or {:error, reason}
+  # → {:match_tuple, expr, [{tuple_pattern, body}, ...], loc}
+  defp parse_match_tuple([expr | clauses], loc) do
+    parsed_clauses = Enum.map(clauses, fn
+      {:bracket, [{:tuple_pattern, elements}, body]} ->
+        {{:tuple_pattern, elements}, body}
+      {:bracket, [pattern, body]} ->
+        # Allow non-tuple patterns too (atoms, variables as catch-all)
+        {pattern, body}
+    end)
+    {:match_tuple, expr, parsed_clauses, loc}
   end
 
   # (receive [pattern1 body1] [pattern2 body2] ...) → {:receive, [{pattern, body}, ...], loc}
@@ -333,25 +396,77 @@ defmodule Vaisto.Parser do
     {:fn, params, body, loc}
   end
 
-  # (deftype point [x :int y :int]) → {:deftype, :point, [{:x, :int}, {:y, :int}], loc}
+  # Product type (record): (deftype Point [x :int y :int])
+  # → {:deftype, :Point, {:product, [{:x, :int}, {:y, :int}]}, loc}
   defp parse_deftype([name, {:bracket, fields}], loc) do
     # Parse field pairs: [x :int y :int] → [{:x, :int}, {:y, :int}]
     field_pairs = fields
       |> Enum.chunk_every(2)
       |> Enum.map(fn [field_name, type] -> {field_name, type} end)
-    {:deftype, name, field_pairs, loc}
+    {:deftype, name, {:product, field_pairs}, loc}
   end
 
-  # Legacy support: (deftype point x y) → untyped fields
-  defp parse_deftype([name | fields], loc) when is_list(fields) and length(fields) > 0 do
-    # Old-style untyped fields - convert to {:field_name, :any}
-    field_pairs = Enum.map(fields, fn field -> {field, :any} end)
-    {:deftype, name, field_pairs, loc}
+  # Sum type (variants): (deftype Result (Ok v) (Error msg))
+  # → {:deftype, :Result, {:sum, [{:Ok, [:v]}, {:Error, [:msg]}]}, loc}
+  # Each variant is parsed as {:call, CtorName, [type_params], loc}
+  defp parse_deftype([name | rest], loc) when is_list(rest) and length(rest) > 0 do
+    # Check if first element looks like a variant (parsed as a call)
+    case rest do
+      [{:call, _, _, _} | _] ->
+        # Sum type: parse variants from call AST nodes
+        parsed_variants = Enum.map(rest, fn
+          {:call, ctor_name, args, _loc} ->
+            {ctor_name, args}
+          other ->
+            {:error, "Invalid variant syntax: #{inspect(other)}"}
+        end)
+        # Check for errors
+        case Enum.find(parsed_variants, &match?({:error, _}, &1)) do
+          nil -> {:deftype, name, {:sum, parsed_variants}, loc}
+          {:error, msg} -> {:error, msg, loc}
+        end
+
+      # Legacy: (deftype point x y) → untyped product fields
+      fields ->
+        field_pairs = Enum.map(fields, fn field -> {field, :any} end)
+        {:deftype, name, {:product, field_pairs}, loc}
+    end
   end
 
   # (extern erlang:hd [(List :any)] :any) → {:extern, :erlang, :hd, [type_expr], ret_type, loc}
   defp parse_extern([{:qualified, mod, func}, {:bracket, arg_types}, ret_type], loc) do
     {:extern, mod, func, arg_types, ret_type, loc}
+  end
+
+  # (ns MyModule) → {:ns, :MyModule, loc}
+  # (ns Std.List) → {:ns, :"Std.List", loc}
+  defp parse_ns([name], loc) do
+    {:ns, normalize_module_name(name), loc}
+  end
+
+  # (import Std.List) → {:import, :"Std.List", loc}
+  # (import Std.List :as List) → {:import, :"Std.List", :List, loc}
+  defp parse_import([name], loc) do
+    {:import, normalize_module_name(name), nil, loc}
+  end
+
+  defp parse_import([name, {:atom, :as}, alias_name], loc) do
+    {:import, normalize_module_name(name), alias_name, loc}
+  end
+
+  # Normalize module names: handles both atoms and dotted names
+  defp normalize_module_name({:module_path, parts}) do
+    parts |> Enum.join(".") |> String.to_atom()
+  end
+  defp normalize_module_name(name) when is_atom(name), do: name
+
+  # For use in token parsing (takes string)
+  defp normalize_module_name_str(str) do
+    if String.contains?(str, ".") do
+      String.to_atom(str)
+    else
+      String.to_atom(str)
+    end
   end
 
   defp parse_handlers(handlers) do
@@ -378,11 +493,24 @@ defmodule Vaisto.Parser do
       # This distinguishes atoms from variable names in the AST
       String.starts_with?(token, ":") ->
         {:atom, token |> String.trim_leading(":") |> String.to_atom()}
-      # Qualified name: erlang:hd → {:qualified, :erlang, :hd}
-      # Must contain : but not start with :
+      # Qualified call: Std.List/fold → {:qualified, module, func}
+      # Forward slash for Vaisto module calls
+      # Must have non-empty module and function parts (/ alone is division)
+      String.contains?(token, "/") and token != "/" ->
+        case String.split(token, "/", parts: 2) do
+          [mod, func] when mod != "" and func != "" ->
+            {:qualified, normalize_module_name_str(mod), String.to_atom(func)}
+          _ ->
+            # Just "/" or missing parts - treat as atom
+            String.to_atom(token)
+        end
+      # Legacy Erlang-style qualified: erlang:hd → {:qualified, :erlang, :hd}
       String.contains?(token, ":") ->
         [mod, func] = String.split(token, ":", parts: 2)
         {:qualified, String.to_atom(mod), String.to_atom(func)}
+      # Module path: Std.List → {:module_path, ["Std", "List"]}
+      String.contains?(token, ".") and String.match?(token, ~r/^[A-Z]/) ->
+        {:module_path, String.split(token, ".")}
       true -> String.to_atom(token)
     end
   end

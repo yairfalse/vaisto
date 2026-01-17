@@ -1,0 +1,8 @@
+(deftype Tree (Leaf v) (Node left right))
+
+(defn tree-sum [t]
+  (match t
+    [(Leaf v) v]
+    [(Node l r) (+ (tree-sum l) (tree-sum r))]))
+
+(tree-sum (Node (Leaf 10) (Node (Leaf 20) (Leaf 12))))

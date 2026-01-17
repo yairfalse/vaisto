@@ -1,0 +1,11 @@
+; Math utilities module
+(ns Math)
+
+(defn square [x]
+  (* x x))
+
+(defn double [x]
+  (* x 2))
+
+(defn add [x y]
+  (+ x y))

@@ -24,6 +24,11 @@ defmodule Vaisto.TypeChecker do
   }
 
   @doc """
+  Return the built-in primitives type environment.
+  """
+  def primitives, do: @primitives
+
+  @doc """
   Check types and return the result type. Raises on error.
   """
   def check!(ast, env \\ @primitives) do
@@ -105,6 +110,10 @@ defmodule Vaisto.TypeChecker do
   def check({:extern, mod, func, arg_types, ret_type, %Vaisto.Parser.Loc{} = loc}, env), do: with_loc(check({:extern, mod, func, arg_types, ret_type}, env), loc)
   def check({:list, elements, %Vaisto.Parser.Loc{} = loc}, env), do: with_loc(check({:list, elements}, env), loc)
   def check({:unit, %Vaisto.Parser.Loc{} = loc}, env), do: with_loc(check({:unit}, env), loc)
+  def check({:match_tuple, expr, clauses, %Vaisto.Parser.Loc{} = loc}, env), do: with_loc(check({:match_tuple, expr, clauses}, env), loc)
+  def check({:tuple_pattern, elements}, env), do: check_tuple_expr(elements, env)
+  def check({:ns, name, %Vaisto.Parser.Loc{} = loc}, env), do: with_loc(check({:ns, name}, env), loc)
+  def check({:import, module, alias_name, %Vaisto.Parser.Loc{} = loc}, env), do: with_loc(check({:import, module, alias_name}, env), loc)
 
   # Literals
   def check(n, _env) when is_integer(n), do: {:ok, :int, {:lit, :int, n}}
@@ -448,6 +457,15 @@ defmodule Vaisto.TypeChecker do
     end
   end
 
+  # Match-tuple expression: (match-tuple expr [{:ok v} body] [{:error e} body2])
+  # Used for interop with raw Erlang tuples - deliberately untyped
+  def check({:match_tuple, expr, clauses}, env) do
+    with {:ok, _expr_type, typed_expr} <- check(expr, env),
+         {:ok, result_type, typed_clauses} <- check_match_tuple_clauses(clauses, env) do
+      {:ok, result_type, {:match_tuple, typed_expr, typed_clauses, result_type}}
+    end
+  end
+
   # Receive expression: (receive [pattern body] ...)
   # Blocks until a message matching one of the patterns arrives
   # Patterns are typed as :any (full typed PIDs would constrain this)
@@ -515,16 +533,35 @@ defmodule Vaisto.TypeChecker do
     end
   end
 
-  # Type definition: (deftype point [x :int y :int])
+  # Product type (record): (deftype Point [x :int y :int])
   # Registers a constructor function and a record type
-  # Fields are now [{:x, {:atom, :int}}, {:y, {:atom, :int}}] tuples with types
-  def check({:deftype, name, fields}, _env) do
+  def check({:deftype, name, {:product, fields}}, _env) do
     # Normalize field types
     normalized_fields = Enum.map(fields, fn {field_name, type} ->
       {field_name, parse_type_expr(type)}
     end)
     record_type = {:record, name, normalized_fields}
-    {:ok, record_type, {:deftype, name, normalized_fields, record_type}}
+    {:ok, record_type, {:deftype, name, {:product, normalized_fields}, record_type}}
+  end
+
+  # Sum type (ADT): (deftype Result (Ok v) (Error msg))
+  # Registers constructor functions for each variant
+  # Each constructor returns the sum type
+  def check({:deftype, name, {:sum, variants}}, _env) do
+    # For now, treat type parameters as :any (we'll add full generics later)
+    # Each variant becomes: CtorName => (field_types...) -> SumType
+    normalized_variants = Enum.map(variants, fn {ctor_name, type_params} ->
+      # Type params are just names for now - treat as :any
+      field_types = Enum.map(type_params, fn _param -> :any end)
+      {ctor_name, field_types}
+    end)
+    sum_type = {:sum, name, normalized_variants}
+    {:ok, sum_type, {:deftype, name, {:sum, normalized_variants}, sum_type}}
+  end
+
+  # Legacy support: old-style deftype without wrapper
+  def check({:deftype, name, fields}, env) when is_list(fields) do
+    check({:deftype, name, {:product, fields}}, env)
   end
 
   # Function definition: (defn add [x :int y :int] (+ x y))
@@ -630,6 +667,19 @@ defmodule Vaisto.TypeChecker do
     {:ok, :extern, {:extern, mod, func, func_type}}
   end
 
+  # Module declaration: (ns MyModule)
+  # Compile-time only - sets the module name for the current file
+  def check({:ns, name}, _env) do
+    {:ok, :ns, {:ns, name}}
+  end
+
+  # Import declaration: (import Std.List) or (import Std.List :as L)
+  # Compile-time only - brings another module's exports into scope
+  # The actual loading of the interface is done by the build system
+  def check({:import, module, alias_name}, _env) do
+    {:ok, :import, {:import, module, alias_name}}
+  end
+
   # Fallback
   def check(other, _env) do
     {:error, "Unknown expression: #{inspect(other)}"}
@@ -698,6 +748,7 @@ defmodule Vaisto.TypeChecker do
   end
 
   # Check match clauses - each clause pattern extends env for its body
+  # Also checks exhaustiveness for sum types
   defp check_match_clauses(clauses, expr_type, env) do
     results = Enum.map(clauses, fn {pattern, body} ->
       check_match_clause(pattern, body, expr_type, env)
@@ -709,9 +760,56 @@ defmodule Vaisto.TypeChecker do
         typed_clauses = Enum.map(results, fn {:ok, clause} -> clause end)
         # All clauses must have the same result type - use the first one
         [{_pattern, _body, result_type} | _] = typed_clauses
-        {:ok, result_type, typed_clauses}
+
+        # Exhaustiveness check for sum types
+        case check_exhaustiveness(clauses, expr_type) do
+          :ok -> {:ok, result_type, typed_clauses}
+          {:error, _} = err -> err
+        end
     end
   end
+
+  # Check if pattern matching on sum types covers all variants
+  defp check_exhaustiveness(clauses, {:sum, type_name, variants}) do
+    # Extract constructor names from patterns
+    covered = clauses
+      |> Enum.map(fn {pattern, _body} -> extract_variant_name(pattern) end)
+      |> Enum.reject(&is_nil/1)
+      |> MapSet.new()
+
+    # Check if there's a catch-all pattern (underscore or variable)
+    has_catch_all = Enum.any?(clauses, fn {pattern, _body} ->
+      is_catch_all_pattern?(pattern)
+    end)
+
+    if has_catch_all do
+      :ok
+    else
+      all_variants = variants |> Enum.map(fn {name, _} -> name end) |> MapSet.new()
+      missing = MapSet.difference(all_variants, covered)
+
+      if MapSet.size(missing) == 0 do
+        :ok
+      else
+        missing_list = missing |> MapSet.to_list() |> Enum.join(", ")
+        {:error, "Non-exhaustive pattern match on #{type_name}. Missing variants: #{missing_list}"}
+      end
+    end
+  end
+
+  # Non-sum types don't need exhaustiveness checking (for now)
+  defp check_exhaustiveness(_clauses, _expr_type), do: :ok
+
+  # Extract variant constructor name from pattern
+  defp extract_variant_name({:call, name, _, _}), do: name
+  defp extract_variant_name({:pattern, name, _, _}), do: name
+  defp extract_variant_name(_), do: nil
+
+  # Check if pattern is a catch-all (matches anything)
+  defp is_catch_all_pattern?(:_), do: true
+  defp is_catch_all_pattern?(name) when is_atom(name) and name != :_, do: true
+  defp is_catch_all_pattern?({:var, _, _}), do: true
+  defp is_catch_all_pattern?(_), do: false
 
   defp check_match_clause(pattern, body, expr_type, env) do
     # Extract bindings from pattern and add to env
@@ -764,6 +862,92 @@ defmodule Vaisto.TypeChecker do
     end
   end
 
+  # Raw tuple expression: {:tuple_pattern, elements} when used as expression
+  # Returns :any type since raw Erlang tuples are for interop with untyped code
+  # This allows mixing different tuple shapes in if/match branches
+  defp check_tuple_expr(elements, env) do
+    case check_args(elements, env) do
+      {:ok, _types, typed_elements} ->
+        # Use :any for tuple type - these are for Erlang interop
+        {:ok, :any, {:tuple, typed_elements, :any}}
+      error -> error
+    end
+  end
+
+  # Check match-tuple clauses - patterns are raw Erlang tuples, all bindings are :any
+  defp check_match_tuple_clauses(clauses, env) do
+    results = Enum.map(clauses, fn {pattern, body} ->
+      check_match_tuple_clause(pattern, body, env)
+    end)
+
+    case Enum.find(results, &match?({:error, _}, &1)) do
+      {:error, _} = err -> err
+      nil ->
+        typed_clauses = Enum.map(results, fn {:ok, clause} -> clause end)
+        # All clauses must have the same result type - use the first one
+        [{_pattern, _body, result_type} | _] = typed_clauses
+        {:ok, result_type, typed_clauses}
+    end
+  end
+
+  defp check_match_tuple_clause(pattern, body, env) do
+    # Extract bindings from tuple pattern - all variables get :any type
+    bindings = extract_tuple_pattern_bindings(pattern)
+    extended_env = Enum.reduce(bindings, env, fn {name, type}, acc ->
+      Map.put(acc, name, type)
+    end)
+
+    # Type the pattern itself
+    typed_pattern = type_tuple_pattern(pattern)
+
+    case check(body, extended_env) do
+      {:ok, body_type, typed_body} ->
+        {:ok, {typed_pattern, typed_body, body_type}}
+      error -> error
+    end
+  end
+
+  # Extract variable bindings from a raw tuple pattern
+  # {:tuple_pattern, [{:atom, :ok}, :v]} → [{:v, :any}]
+  defp extract_tuple_pattern_bindings({:tuple_pattern, elements}) do
+    Enum.flat_map(elements, &extract_tuple_element_bindings/1)
+  end
+  defp extract_tuple_pattern_bindings(var) when is_atom(var) and var not in [:_, true, false] do
+    # Catch-all variable pattern
+    [{var, :any}]
+  end
+  defp extract_tuple_pattern_bindings(_), do: []
+
+  defp extract_tuple_element_bindings(var) when is_atom(var) and var not in [:_, true, false] do
+    [{var, :any}]
+  end
+  defp extract_tuple_element_bindings({:tuple_pattern, elements}) do
+    Enum.flat_map(elements, &extract_tuple_element_bindings/1)
+  end
+  defp extract_tuple_element_bindings(_), do: []
+
+  # Type a raw tuple pattern for the typed AST
+  defp type_tuple_pattern({:tuple_pattern, elements}) do
+    typed_elements = Enum.map(elements, &type_tuple_element/1)
+    {:tuple_pattern, typed_elements, :any}
+  end
+  defp type_tuple_pattern(var) when is_atom(var) and var not in [:_, true, false] do
+    {:var, var, :any}
+  end
+  defp type_tuple_pattern(other), do: other
+
+  defp type_tuple_element({:atom, a}), do: {:lit, :atom, a}
+  defp type_tuple_element({:tuple_pattern, elements}) do
+    typed_elements = Enum.map(elements, &type_tuple_element/1)
+    {:tuple_pattern, typed_elements, :any}
+  end
+  defp type_tuple_element(var) when is_atom(var) and var not in [:_, true, false] do
+    {:var, var, :any}
+  end
+  defp type_tuple_element(lit) when is_integer(lit), do: {:lit, :int, lit}
+  defp type_tuple_element(lit) when is_atom(lit), do: {:lit, :atom, lit}
+  defp type_tuple_element(other), do: other
+
   # Extract variable bindings from a pattern with proper types
   # (point x y) matching against {:record, :point, [{:x, :int}, {:y, :int}]}
   # gives [{:x, :int}, {:y, :int}]
@@ -778,12 +962,27 @@ defmodule Vaisto.TypeChecker do
     |> Enum.map(fn {var_name, {_field_name, field_type}} -> {var_name, field_type} end)
   end
 
-  # Record pattern against :any type - try to look up the record in env
+  # Variant pattern against sum type
+  defp extract_pattern_bindings({:call, ctor_name, args}, {:sum, _sum_name, variants}, _env) do
+    case List.keyfind(variants, ctor_name, 0) do
+      {^ctor_name, field_types} ->
+        Enum.zip(args, field_types)
+        |> Enum.filter(fn {arg, _} -> is_atom(arg) and arg not in [:_, true, false] end)
+        |> Enum.map(fn {var_name, field_type} -> {var_name, field_type} end)
+      nil ->
+        []
+    end
+  end
+
+  # Record pattern against :any type - try to look up the record/variant in env
   defp extract_pattern_bindings({:call, record_name, args}, :any, env) do
     case Map.get(env, record_name) do
       {:fn, _arg_types, {:record, ^record_name, fields}} ->
         # Found the constructor, use its field types
         extract_pattern_bindings({:call, record_name, args}, {:record, record_name, fields}, env)
+      {:fn, _arg_types, {:sum, _sum_name, _variants} = sum_type} ->
+        # Found a variant constructor, use the sum type
+        extract_pattern_bindings({:call, record_name, args}, sum_type, env)
       _ ->
         # Can't find record type, fall back to :any for all vars
         args
@@ -818,12 +1017,37 @@ defmodule Vaisto.TypeChecker do
     {:pattern, record_name, typed_args, {:record, record_name, fields}}
   end
 
+  # Variant pattern against sum type: (Ok v) matched against Result
+  defp type_pattern({:call, ctor_name, args}, {:sum, sum_name, variants}, _env) do
+    # Find the variant in the sum type
+    case List.keyfind(variants, ctor_name, 0) do
+      {^ctor_name, field_types} ->
+        # Type the args according to the variant's field types
+        typed_args = Enum.zip(args, field_types)
+        |> Enum.map(fn
+          {var, field_type} when is_atom(var) and var not in [:_, true, false] ->
+            {:var, var, field_type}
+          {lit, _field_type} when is_integer(lit) or is_float(lit) ->
+            lit
+          {:_, _field_type} ->
+            :_
+        end)
+        {:pattern, ctor_name, typed_args, {:sum, sum_name, variants}}
+      nil ->
+        # Unknown variant - this shouldn't happen if type checking is correct
+        {:pattern, ctor_name, args, :any}
+    end
+  end
+
   # Record pattern against :any type - try to look up the record in env
   defp type_pattern({:call, record_name, args}, :any, env) do
     case Map.get(env, record_name) do
       {:fn, _arg_types, {:record, ^record_name, fields}} ->
         # Found the constructor, use its field types
         type_pattern({:call, record_name, args}, {:record, record_name, fields}, env)
+      {:fn, _arg_types, {:sum, _sum_name, _variants} = sum_type} ->
+        # Found a variant constructor, use the sum type
+        type_pattern({:call, record_name, args}, sum_type, env)
       _ ->
         # Can't find record type, fall back to :any for all vars
         typed_args = Enum.map(args, fn
@@ -921,17 +1145,23 @@ defmodule Vaisto.TypeChecker do
     if length(expected_args) != length(actual_args) do
       {:error, "Arity mismatch: expected #{length(expected_args)}, got #{length(actual_args)}"}
     else
-      mismatches = 
+      mismatches =
         Enum.zip(expected_args, actual_args)
         |> Enum.with_index()
         |> Enum.filter(fn {{exp, act}, _} -> not types_match?(exp, act) end)
 
       case mismatches do
         [] -> {:ok, ret_type}
-        [{_, idx} | _] -> 
+        [{_, idx} | _] ->
           {:error, "Type mismatch at argument #{idx + 1}"}
       end
     end
+  end
+
+  # When the function type is :any (untyped higher-order function parameter)
+  # allow any arguments and return :any
+  defp unify_call(:any, _actual_args) do
+    {:ok, :any}
   end
 
   defp types_match?(:any, _), do: true
@@ -1060,9 +1290,8 @@ defmodule Vaisto.TypeChecker do
     Map.put(env, name, func_type)
   end
 
-  defp collect_deftype_signature(name, fields, env) do
-    # Fields are now [{:x, {:atom, :int}}, {:y, {:atom, :int}}] tuples
-    # Normalize field types using parse_type_expr
+  defp collect_deftype_signature(name, {:product, fields}, env) do
+    # Product type (record): single constructor
     normalized_fields = Enum.map(fields, fn {field_name, type} ->
       {field_name, parse_type_expr(type)}
     end)
@@ -1070,6 +1299,27 @@ defmodule Vaisto.TypeChecker do
     record_type = {:record, name, normalized_fields}
     constructor_type = {:fn, field_types, record_type}
     Map.put(env, name, constructor_type)
+  end
+
+  defp collect_deftype_signature(name, {:sum, variants}, env) do
+    # Sum type: constructor for each variant
+    normalized_variants = Enum.map(variants, fn {ctor_name, type_params} ->
+      field_types = Enum.map(type_params, fn _param -> :any end)
+      {ctor_name, field_types}
+    end)
+    sum_type = {:sum, name, normalized_variants}
+
+    # Register sum type and all constructors
+    env_with_type = Map.put(env, name, sum_type)
+    Enum.reduce(normalized_variants, env_with_type, fn {ctor_name, field_types}, acc_env ->
+      constructor_type = {:fn, field_types, sum_type}
+      Map.put(acc_env, ctor_name, constructor_type)
+    end)
+  end
+
+  # Legacy: list of fields without wrapper
+  defp collect_deftype_signature(name, fields, env) when is_list(fields) do
+    collect_deftype_signature(name, {:product, fields}, env)
   end
 
   defp collect_process_signature(name, initial_state, handlers, env) do
@@ -1110,11 +1360,20 @@ defmodule Vaisto.TypeChecker do
           {:process, name, _init, _handlers, process_type} ->
             Map.put(env, name, process_type)
 
-          {:deftype, name, fields, record_type} ->
-            # Fields are now [{:x, :int}, {:y, :int}] tuples
+          {:deftype, name, {:product, fields}, record_type} ->
+            # Product type: register single constructor
             field_types = Enum.map(fields, fn {_name, type} -> type end)
             constructor_type = {:fn, field_types, record_type}
             Map.put(env, name, constructor_type)
+
+          {:deftype, name, {:sum, variants}, sum_type} ->
+            # Sum type: register constructor for each variant
+            # Also register the sum type itself for type annotations
+            env_with_type = Map.put(env, name, sum_type)
+            Enum.reduce(variants, env_with_type, fn {ctor_name, field_types}, acc_env ->
+              constructor_type = {:fn, field_types, sum_type}
+              Map.put(acc_env, ctor_name, constructor_type)
+            end)
 
           {:defn, name, _params, _body, func_type} ->
             Map.put(env, name, func_type)

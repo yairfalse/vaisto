@@ -1,0 +1,7 @@
+; Main module using Math and Utils
+(ns Main)
+(import Math)
+(import Utils)
+
+; Simple composition of qualified calls
+(Utils/safe-div 100 (Math/square 5))

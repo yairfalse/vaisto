@@ -75,4 +75,137 @@ defmodule Vaisto.CoreEmitterTest do
       assert byte_size(core_binary) < byte_size(elixir_binary)
     end
   end
+
+  describe "ADT (sum type) compilation" do
+    test "compiles variant construction" do
+      code = """
+      (deftype Result (Ok v) (Error msg))
+      (Ok 42)
+      """
+      ast = Parser.parse(code)
+      {:ok, _type, typed} = TypeChecker.check(ast)
+      {:ok, mod, binary} = CoreEmitter.compile(typed, CoreOkCtor)
+      :code.load_binary(mod, ~c"test", binary)
+
+      assert {:Ok, 42} = CoreOkCtor.main()
+    end
+
+    test "compiles variant construction with no fields" do
+      code = """
+      (deftype Option (Some v) (None))
+      (None)
+      """
+      ast = Parser.parse(code)
+      {:ok, _type, typed} = TypeChecker.check(ast)
+      {:ok, mod, binary} = CoreEmitter.compile(typed, CoreNoneCtor)
+      :code.load_binary(mod, ~c"test", binary)
+
+      assert {:None} = CoreNoneCtor.main()
+    end
+
+    test "compiles pattern matching on variants" do
+      code = """
+      (deftype Result (Ok v) (Error msg))
+      (match (Ok 42)
+        [(Ok v) v]
+        [(Error _) 0])
+      """
+      ast = Parser.parse(code)
+      {:ok, _type, typed} = TypeChecker.check(ast)
+      {:ok, mod, binary} = CoreEmitter.compile(typed, CoreMatchOk)
+      :code.load_binary(mod, ~c"test", binary)
+
+      assert 42 = CoreMatchOk.main()
+    end
+
+    test "compiles pattern matching on Error variant" do
+      code = """
+      (deftype Result (Ok v) (Error msg))
+      (match (Error "failed")
+        [(Ok _) 0]
+        [(Error m) 1])
+      """
+      ast = Parser.parse(code)
+      {:ok, _type, typed} = TypeChecker.check(ast)
+      {:ok, mod, binary} = CoreEmitter.compile(typed, CoreMatchErr)
+      :code.load_binary(mod, ~c"test", binary)
+
+      assert 1 = CoreMatchErr.main()
+    end
+
+    test "compiles function returning sum type" do
+      code = """
+      (deftype Maybe (Just v) (Nothing))
+      (defn wrap [x] (Just x))
+      (match (wrap 100)
+        [(Just v) v]
+        [(Nothing) 0])
+      """
+      ast = Parser.parse(code)
+      {:ok, _type, typed} = TypeChecker.check(ast)
+      {:ok, mod, binary} = CoreEmitter.compile(typed, CoreWrapFn)
+      :code.load_binary(mod, ~c"test", binary)
+
+      assert 100 = CoreWrapFn.main()
+    end
+
+    test "compiles recursive ADT (binary tree)" do
+      code = """
+      (deftype Tree (Leaf v) (Node left right))
+      (defn tree-sum [t]
+        (match t
+          [(Leaf v) v]
+          [(Node l r) (+ (tree-sum l) (tree-sum r))]))
+      (tree-sum (Node (Leaf 1) (Node (Leaf 2) (Leaf 3))))
+      """
+      ast = Parser.parse(code)
+      {:ok, _type, typed} = TypeChecker.check(ast)
+      {:ok, mod, binary} = CoreEmitter.compile(typed, CoreTreeSum)
+      :code.load_binary(mod, ~c"test", binary)
+
+      assert 6 = CoreTreeSum.main()
+    end
+  end
+
+  describe "match-tuple (Erlang interop)" do
+    test "matches raw Erlang-style tuples" do
+      code = """
+      (defn safe-div [x y]
+        (match-tuple (if (== y 0) {:error "div by zero"} {:ok (/ x y)})
+          [{:ok result} result]
+          [{:error msg} 0]))
+      (safe-div 10 2)
+      """
+      ast = Parser.parse(code)
+      {:ok, _type, typed} = TypeChecker.check(ast)
+      {:ok, mod, binary} = CoreEmitter.compile(typed, CoreSafeDiv)
+      :code.load_binary(mod, ~c"test", binary)
+
+      assert 5.0 = CoreSafeDiv.main()
+    end
+
+    test "matches error case" do
+      code = """
+      (match-tuple {:error 42}
+        [{:ok v} v]
+        [{:error e} (+ e 100)])
+      """
+      ast = Parser.parse(code)
+      {:ok, _type, typed} = TypeChecker.check(ast)
+      {:ok, mod, binary} = CoreEmitter.compile(typed, CoreMatchError)
+      :code.load_binary(mod, ~c"test", binary)
+
+      assert 142 = CoreMatchError.main()
+    end
+
+    test "constructs raw tuples" do
+      code = "{:ok 42}"
+      ast = Parser.parse(code)
+      {:ok, _type, typed} = TypeChecker.check(ast)
+      {:ok, mod, binary} = CoreEmitter.compile(typed, CoreTuple)
+      :code.load_binary(mod, ~c"test", binary)
+
+      assert {:ok, 42} = CoreTuple.main()
+    end
+  end
 end

@@ -58,6 +58,8 @@ defmodule Vaisto.CoreEmitter do
       {:defn_multi, _, _, _} -> true
       {:deftype, _, _, _} -> true  # Skip deftypes (compile-time only)
       {:extern, _, _, _} -> true   # Skip externs (compile-time only)
+      {:ns, _} -> true             # Skip ns (compile-time only)
+      {:import, _, _} -> true      # Skip import (compile-time only)
       _ -> false
     end)
 
@@ -275,6 +277,24 @@ defmodule Vaisto.CoreEmitter do
     :cerl.c_case(expr_core, clause_cores)
   end
 
+  # Match-tuple expression → Core Erlang case with raw tuple patterns
+  # Used for Erlang interop: (match-tuple x [{:ok v} v] [{:error e} 0])
+  defp to_core_expr({:match_tuple, expr, clauses, _type}, user_fns) do
+    expr_core = to_core_expr(expr, user_fns)
+    clause_cores = Enum.map(clauses, fn {pattern, body, _body_type} ->
+      pattern_core = to_core_tuple_pattern(pattern)
+      body_core = to_core_expr(body, user_fns)
+      :cerl.c_clause([pattern_core], :cerl.c_atom(true), body_core)
+    end)
+    :cerl.c_case(expr_core, clause_cores)
+  end
+
+  # Raw tuple expression: {:tuple, elements, type} → Core Erlang tuple
+  defp to_core_expr({:tuple, elements, _type}, user_fns) do
+    element_cores = Enum.map(elements, &to_core_expr(&1, user_fns))
+    :cerl.c_tuple(element_cores)
+  end
+
   # Receive expression → Core Erlang receive
   # (receive [pattern body] ...) → receive pattern -> body end
   defp to_core_expr({:receive, clauses, _type}, user_fns) do
@@ -473,7 +493,8 @@ defmodule Vaisto.CoreEmitter do
     :cerl.c_tuple(elements)
   end
 
-  # Qualified call: (erlang:hd xs) → :cerl.c_call(:erlang, :hd, args)
+  # Qualified call: (Module/func args) → :cerl.c_call(Module, func, args)
+  # Must come before sum type pattern to avoid matching qualified names as constructors
   defp to_core_expr({:call, {:qualified, mod, func}, args, _type}, user_fns) do
     arg_cores = Enum.map(args, &to_core_expr(&1, user_fns))
     :cerl.c_call(
@@ -481,6 +502,26 @@ defmodule Vaisto.CoreEmitter do
       :cerl.c_atom(func),
       arg_cores
     )
+  end
+
+  # Variant construction → tagged tuple {:VariantName, field1, field2, ...}
+  # Only when the call name is an actual constructor of the sum type
+  defp to_core_expr({:call, ctor_name, args, {:sum, _sum_name, variants}}, user_fns) do
+    if List.keymember?(variants, ctor_name, 0) do
+      # Variant constructor: emit tagged tuple
+      elements = [:cerl.c_atom(ctor_name) | Enum.map(args, &to_core_expr(&1, user_fns))]
+      :cerl.c_tuple(elements)
+    else
+      # Regular function call that returns a sum type
+      arity = length(args)
+      arg_cores = Enum.map(args, &to_core_expr(&1, user_fns))
+
+      if MapSet.member?(user_fns, {ctor_name, arity}) do
+        :cerl.c_apply(:cerl.c_fname(ctor_name, arity), arg_cores)
+      else
+        :cerl.c_call(:cerl.c_atom(:erlang), :cerl.c_atom(ctor_name), arg_cores)
+      end
+    end
   end
 
   # User-defined function call → local apply
@@ -520,6 +561,32 @@ defmodule Vaisto.CoreEmitter do
 
   defp to_core_pattern(n) when is_integer(n), do: :cerl.c_int(n)
   defp to_core_pattern(a) when is_atom(a), do: :cerl.c_atom(a)
+
+  # --- Raw tuple pattern transformation (for match-tuple) ---
+
+  # Tuple pattern: {:tuple_pattern, elements, type} → tuple
+  defp to_core_tuple_pattern({:tuple_pattern, elements, _type}) do
+    pattern_elements = Enum.map(elements, &to_core_tuple_pattern/1)
+    :cerl.c_tuple(pattern_elements)
+  end
+
+  # Variable binding
+  defp to_core_tuple_pattern({:var, name, _type}), do: :cerl.c_var(name)
+
+  # Literals
+  defp to_core_tuple_pattern({:lit, :atom, a}), do: :cerl.c_atom(a)
+  defp to_core_tuple_pattern({:lit, :int, n}), do: :cerl.c_int(n)
+  defp to_core_tuple_pattern({:lit, :string, s}), do: :cerl.c_binary(string_to_binary_segments(s))
+
+  # Wildcard
+  defp to_core_tuple_pattern(:_), do: :cerl.c_var(:_)
+
+  # Catch-all variable (plain atom that isn't a keyword)
+  defp to_core_tuple_pattern(a) when is_atom(a) and a not in [:_, true, false] do
+    :cerl.c_var(a)
+  end
+
+  defp to_core_tuple_pattern(n) when is_integer(n), do: :cerl.c_int(n)
 
   # --- Multi-clause function helpers ---
 

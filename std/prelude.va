@@ -1,0 +1,71 @@
+; Vaisto Standard Prelude
+; Automatically loaded by the compiler
+
+; --- Result Type ---
+; Used for operations that may fail
+(deftype Result (Ok v) (Err e))
+
+; Unwrap a Result, returning the value or a default
+(defn result-unwrap [r default]
+  (match r
+    [(Ok v) v]
+    [(Err _) default]))
+
+; Map over a successful Result
+(defn result-map [r f]
+  (match r
+    [(Ok v) (Ok (f v))]
+    [(Err e) (Err e)]))
+
+; Chain Result-returning operations (flatMap/bind)
+(defn result-then [r f]
+  (match r
+    [(Ok v) (f v)]
+    [(Err e) (Err e)]))
+
+; Check if Result is Ok
+(defn result-ok? [r]
+  (match r
+    [(Ok _) true]
+    [(Err _) false]))
+
+; --- Option Type ---
+; Used for values that may or may not exist
+(deftype Option (Some v) (None))
+
+; Unwrap an Option, returning the value or a default
+(defn option-unwrap [o default]
+  (match o
+    [(Some v) v]
+    [(None) default]))
+
+; Map over a present Option
+(defn option-map [o f]
+  (match o
+    [(Some v) (Some (f v))]
+    [(None) (None)]))
+
+; Chain Option-returning operations (flatMap/bind)
+(defn option-then [o f]
+  (match o
+    [(Some v) (f v)]
+    [(None) (None)]))
+
+; Check if Option has a value
+(defn option-some? [o]
+  (match o
+    [(Some _) true]
+    [(None) false]))
+
+; --- Erlang Interop Helpers ---
+; Convert Erlang {:ok, v} / {:error, e} to Result
+(defn from-erlang-result [tuple]
+  (match-tuple tuple
+    [{:ok v} (Ok v)]
+    [{:error e} (Err e)]))
+
+; Convert Result to Erlang tuple
+(defn to-erlang-result [r]
+  (match r
+    [(Ok v) {:ok v}]
+    [(Err e) {:error e}]))

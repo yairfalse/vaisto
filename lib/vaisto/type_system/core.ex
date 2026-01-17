@@ -42,6 +42,18 @@ defmodule Vaisto.TypeSystem.Core do
     {:record, name, Enum.map(fields, fn {k, v} -> {k, apply_subst(subst, v)} end)}
   end
 
+  # Sum type: {:sum, TypeName, [{CtorName, [field_types]}]}
+  def apply_subst(subst, {:sum, name, variants}) do
+    {:sum, name, Enum.map(variants, fn {ctor, types} ->
+      {ctor, Enum.map(types, &apply_subst(subst, &1))}
+    end)}
+  end
+
+  # Variant type: {:variant, SumTypeName, CtorName, [field_types]}
+  def apply_subst(subst, {:variant, sum_name, ctor, types}) do
+    {:variant, sum_name, ctor, Enum.map(types, &apply_subst(subst, &1))}
+  end
+
   def apply_subst(subst, {:process, state_type, msgs}) do
     {:process, apply_subst(subst, state_type), msgs}
   end
@@ -73,6 +85,18 @@ defmodule Vaisto.TypeSystem.Core do
       MapSet.union(acc, free_vars(v))
     end)
   end
+  def free_vars({:sum, _name, variants}) do
+    Enum.reduce(variants, MapSet.new(), fn {_ctor, types}, acc ->
+      Enum.reduce(types, acc, fn t, inner_acc ->
+        MapSet.union(inner_acc, free_vars(t))
+      end)
+    end)
+  end
+  def free_vars({:variant, _sum, _ctor, types}) do
+    Enum.reduce(types, MapSet.new(), fn t, acc ->
+      MapSet.union(acc, free_vars(t))
+    end)
+  end
   def free_vars(_), do: MapSet.new()
 
   @doc """
@@ -89,6 +113,8 @@ defmodule Vaisto.TypeSystem.Core do
   def format_type({:list, t}), do: "List(#{format_type(t)})"
   def format_type({:pid, name, _}), do: "Pid(#{name})"
   def format_type({:record, name, _}), do: "#{name}"
+  def format_type({:sum, name, _variants}), do: "#{name}"
+  def format_type({:variant, sum_name, ctor, _}), do: "#{sum_name}.#{ctor}"
   def format_type({:fn, args, ret}) do
     arg_str = args |> Enum.map(&format_type/1) |> Enum.join(", ")
     "(#{arg_str}) -> #{format_type(ret)}"

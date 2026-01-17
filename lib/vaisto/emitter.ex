@@ -66,6 +66,26 @@ defmodule Vaisto.Emitter do
     {:case, [], [expr_ast, [do: clause_asts]]}
   end
 
+  # Match-tuple expression → Elixir case with raw tuple patterns
+  # (match-tuple x [{:ok v} v]) → case x do {:ok, v} -> v end
+  def to_elixir({:match_tuple, expr, clauses, _type}) do
+    expr_ast = to_elixir(expr)
+    clause_asts = Enum.map(clauses, fn {pattern, body, _body_type} ->
+      pattern_ast = emit_tuple_pattern(pattern)
+      body_ast = to_elixir(body)
+      {:->, [], [[pattern_ast], body_ast]}
+    end)
+
+    {:case, [], [expr_ast, [do: clause_asts]]}
+  end
+
+  # Raw tuple expression → Elixir tuple
+  # {:tuple, elements, type} → {elem1, elem2, ...}
+  def to_elixir({:tuple, elements, _type}) do
+    elixir_elements = Enum.map(elements, &to_elixir/1)
+    {:{}, [], elixir_elements}
+  end
+
   # Receive expression → Elixir receive
   # (receive [:inc x] [:dec y]) → receive do :inc -> x; :dec -> y end
   def to_elixir({:receive, clauses, _type}) do
@@ -241,11 +261,30 @@ defmodule Vaisto.Emitter do
     end
   end
 
-  # Record type definition - no runtime code needed, just documentation
-  def to_elixir({:deftype, _name, _fields, _type}) do
-    # deftype is a compile-time construct, no runtime representation needed
-    # Could emit a struct definition in the future
+  # Type definitions - no runtime code needed, just documentation
+  # Product types (records) and sum types (ADTs) are compile-time constructs
+  def to_elixir({:deftype, _name, {:product, _fields}, _type}) do
     nil
+  end
+  def to_elixir({:deftype, _name, {:sum, _variants}, _type}) do
+    nil
+  end
+  # Legacy format
+  def to_elixir({:deftype, _name, _fields, _type}) do
+    nil
+  end
+
+  # Variant construction → tagged tuple {:CtorName, field1, field2, ...}
+  # Only when the call name is an actual constructor (variant) of the sum type
+  def to_elixir({:call, ctor_name, args, {:sum, _sum_name, variants}}) do
+    # Check if ctor_name is actually a variant constructor
+    if List.keymember?(variants, ctor_name, 0) do
+      typed_args = Enum.map(args, &to_elixir/1)
+      {:{}, [], [ctor_name | typed_args]}
+    else
+      # Regular function call that happens to return a sum type
+      {ctor_name, [], Enum.map(args, &to_elixir/1)}
+    end
   end
 
   # Function definition → Elixir def
@@ -294,6 +333,15 @@ defmodule Vaisto.Emitter do
 
   # Extern declaration - no runtime code, just type information
   def to_elixir({:extern, _mod, _func, _func_type}) do
+    nil
+  end
+
+  # Module system declarations - compile-time only, no runtime code
+  def to_elixir({:ns, _name}) do
+    nil
+  end
+
+  def to_elixir({:import, _module, _alias}) do
     nil
   end
 
@@ -352,6 +400,11 @@ defmodule Vaisto.Emitter do
       main_results = case fn_defs_and_exprs do
         [] -> []
         items ->
+          # De-duplicate function definitions BEFORE flattening
+          # This preserves multi-clause functions (from defn_multi) as units
+          # while allowing later single-clause defn to shadow earlier ones
+          items = dedup_def_items(items)
+
           # Flatten any __block__ wrappers from defn_multi
           flattened = Enum.flat_map(items, fn
             {:__block__, [], block_items} -> block_items
@@ -427,6 +480,42 @@ defmodule Vaisto.Emitter do
 
   # Private helpers
 
+  # De-duplicate function definition items by name, keeping the last definition
+  # This implements shadowing semantics for REPL-style redefinition
+  # Works on pre-flattened items to preserve multi-clause functions as units
+  defp dedup_def_items(items) do
+    items
+    |> Enum.reverse()  # Process in reverse to keep last occurrence
+    |> Enum.reduce({[], MapSet.new()}, fn item, {acc, seen} ->
+      case extract_item_def_name(item) do
+        nil ->
+          # Not a def item (expression), always keep
+          {[item | acc], seen}
+        name ->
+          if MapSet.member?(seen, name) do
+            {acc, seen}  # Skip - already have a later definition
+          else
+            {[item | acc], MapSet.put(seen, name)}
+          end
+      end
+    end)
+    |> elem(0)
+  end
+
+  # Extract function name from a definition item (def or __block__ of defs)
+  defp extract_item_def_name({:__block__, [], [{:def, _, _} | _] = defs}) do
+    # Multi-clause function - get name from first clause
+    extract_def_name(hd(defs))
+  end
+  defp extract_item_def_name({:def, _, _} = def_ast) do
+    extract_def_name(def_ast)
+  end
+  defp extract_item_def_name(_), do: nil
+
+  # Extract function name from def AST
+  defp extract_def_name({:def, _, [{:when, _, [{name, _, _} | _]} | _]}), do: name
+  defp extract_def_name({:def, _, [{name, _, _} | _]}), do: name
+
   defp wrap_in_module(expr_ast, module_name) do
     quote do
       defmodule unquote(module_name) do
@@ -483,8 +572,28 @@ defmodule Vaisto.Emitter do
 
   defp emit_pattern({:lit, :atom, a}), do: a
   defp emit_pattern({:atom, a}), do: a  # Wrapped atom from parser
+  # Underscore is a wildcard pattern, not a literal atom
+  defp emit_pattern(:_), do: Macro.var(:_, nil)
   defp emit_pattern(a) when is_atom(a), do: a
   defp emit_pattern(n) when is_integer(n), do: n
+
+  # Raw tuple pattern → Elixir tuple pattern {:ok, v} etc
+  # Used by match-tuple for Erlang interop
+  defp emit_tuple_pattern({:tuple_pattern, elements, _type}) do
+    pattern_elements = Enum.map(elements, &emit_tuple_pattern/1)
+    {:{}, [], pattern_elements}
+  end
+
+  defp emit_tuple_pattern({:var, name, _type}) do
+    Macro.var(name, nil)
+  end
+
+  defp emit_tuple_pattern({:lit, :atom, a}), do: a
+  defp emit_tuple_pattern({:lit, :int, n}), do: n
+  defp emit_tuple_pattern({:lit, :string, s}), do: s
+  defp emit_tuple_pattern(:_), do: Macro.var(:_, nil)
+  defp emit_tuple_pattern(a) when is_atom(a) and a not in [:_, true, false], do: Macro.var(a, nil)
+  defp emit_tuple_pattern(n) when is_integer(n), do: n
 
   # Function head patterns (for multi-clause functions)
   # These patterns are used directly as function arguments

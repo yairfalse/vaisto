@@ -1,0 +1,10 @@
+; Utility functions
+(ns Utils)
+
+(defn safe-div [x y]
+  (if (== y 0)
+    (Err "division by zero")
+    (Ok (/ x y))))
+
+(defn apply-twice [f x]
+  (f (f x)))
