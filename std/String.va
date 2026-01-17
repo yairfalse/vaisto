@@ -1,0 +1,61 @@
+; Std.String - String manipulation functions using Erlang's string/binary modules
+(ns Std.String)
+
+; Get string length (byte length)
+(extern erlang/byte_size [:string] :int)
+
+; Convert to uppercase
+(extern string/uppercase [:string] :string)
+
+; Convert to lowercase
+(extern string/lowercase [:string] :string)
+
+; Trim whitespace from both ends
+(extern string/trim [:string] :string)
+
+; Split string by delimiter
+(extern string/split [:string :string] (List :string))
+
+; Join list of strings with separator (note: Erlang uses lists:join)
+(extern lists/join [:string (List :string)] (List :any))
+
+; Get substring (start index, length)
+(extern binary/part [:string :int :int] :string)
+
+; Convert integer to string
+(extern erlang/integer_to_binary [:int] :string)
+
+; Higher-level helpers
+
+; Get length of string
+(defn length [s] :int
+  (erlang/byte_size s))
+
+; Check if string is empty
+(defn empty? [s] :bool
+  (== (erlang/byte_size s) 0))
+
+; Get a substring from start position with given length
+(defn substring [s start len]
+  (binary/part s start len))
+
+; Repeat a string n times
+(defn repeat [s n]
+  (if (<= n 0)
+    ""
+    (let [half (/ n 2)
+          doubled (repeat s half)]
+      (if (== (* half 2) n)
+        (concat doubled doubled)
+        (concat s (concat doubled doubled))))))
+
+; Simple concat using Erlang iolist
+(extern erlang/iolist_to_binary [(List :any)] :string)
+
+; Concatenate two strings
+(defn concat [a b]
+  (erlang/iolist_to_binary (list a b)))
+
+; Convert integer to string
+(defn from-int [n] :string
+  (erlang/integer_to_binary n))

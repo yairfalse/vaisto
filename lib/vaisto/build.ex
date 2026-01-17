@@ -99,6 +99,8 @@ defmodule Vaisto.Build do
   defp scan_files(dir) do
     pattern = Path.join(dir, "**/*.va")
     files = Path.wildcard(pattern)
+             # Exclude prelude.va since it's auto-prepended to all files
+             |> Enum.reject(&String.ends_with?(&1, "/prelude.va"))
 
     if files == [] do
       {:error, "No .va files found in #{dir}"}

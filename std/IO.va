@@ -1,0 +1,61 @@
+; Std.IO - Input/Output operations
+(ns Std.IO)
+
+; Print to stdout with format string and args
+(extern io/format [:string (List :any)] :atom)
+
+; Read a line from stdin
+(extern io/get_line [:string] :string)
+
+; File operations
+
+; Read entire file contents
+(extern file/read_file [:string] :any)
+
+; Write string to file (overwrites)
+(extern file/write_file [:string :string] :any)
+
+; Append string to file
+(extern file/write_file_append [:string :string (List :atom)] :any)
+
+; Check if file exists
+(extern filelib/is_file [:string] :bool)
+
+; Check if directory exists
+(extern filelib/is_dir [:string] :bool)
+
+; List files in directory
+(extern file/list_dir [:string] :any)
+
+; Delete a file
+(extern file/delete [:string] :any)
+
+; Create a directory
+(extern file/make_dir [:string] :any)
+
+; Higher-level helpers
+
+; Print a line (string with newline)
+(defn println [s]
+  (io/format "~s~n" (list s)))
+
+; Print any value (for debugging)
+(defn print [x]
+  (io/format "~p" (list x)))
+
+; Read file, returning Result
+(defn read-file [path]
+  (from-erlang-result (file/read_file path)))
+
+; Write file, returning Result
+(defn write-file [path content]
+  (from-erlang-result (file/write_file path content)))
+
+; Print formatted string (like printf)
+(defn printf [format-str args]
+  (io/format format-str args))
+
+; Print value for debugging with label
+(defn debug [label value]
+  (let [_ (io/format "~s: ~p~n" (list label value))]
+    value))

@@ -1,0 +1,55 @@
+; Std.Map - Dictionary/Map operations using Erlang's :maps module
+(ns Std.Map)
+
+; Create an empty map
+(extern maps/new [] Map)
+
+; Get a value from a map, returns the value or raises if not found
+(extern maps/get [:any Map] :any)
+
+; Put a key-value pair into a map
+(extern maps/put [:any :any Map] Map)
+
+; Remove a key from a map
+(extern maps/remove [:any Map] Map)
+
+; Check if a key exists
+(extern maps/is_key [:any Map] :bool)
+
+; Get all keys
+(extern maps/keys [Map] (List :any))
+
+; Get all values
+(extern maps/values [Map] (List :any))
+
+; Get size of map
+(extern maps/size [Map] :int)
+
+; Merge two maps (second map's values take precedence)
+(extern maps/merge [Map Map] Map)
+
+; Convert to list of {key, value} tuples
+(extern maps/to_list [Map] (List :any))
+
+; Convert from list of {key, value} tuples
+(extern maps/from_list [(List :any)] Map)
+
+; Higher-level helpers
+
+; Safe get with default value
+(defn get-or [m key default]
+  (if (maps/is_key key m)
+    (maps/get key m)
+    default))
+
+; Safe get returning Option
+(defn lookup [m key]
+  (if (maps/is_key key m)
+    (Some (maps/get key m))
+    (None)))
+
+; Update a value with a function, or insert default if missing
+(defn update [m key default f]
+  (if (maps/is_key key m)
+    (maps/put key (f (maps/get key m)) m)
+    (maps/put key default m)))

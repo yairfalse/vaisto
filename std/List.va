@@ -1,0 +1,141 @@
+; Std.List - List manipulation functions
+(ns Std.List)
+
+; fold/reduce: (fold fn init list)
+; Folds a list from the left, applying fn(acc, elem) for each element
+(defn fold [f init xs]
+  (if (empty? xs)
+    init
+    (fold f (f init (head xs)) (tail xs))))
+
+; fold-right: (fold-right fn init list)
+; Folds a list from the right
+(defn fold-right [f init xs]
+  (if (empty? xs)
+    init
+    (f (head xs) (fold-right f init (tail xs)))))
+
+; map: (map fn list)
+; Applies fn to each element, returns new list
+(defn map [f xs]
+  (if (empty? xs)
+    (list)
+    (cons (f (head xs)) (map f (tail xs)))))
+
+; filter: (filter pred list)
+; Returns list of elements where (pred elem) is true
+(defn filter [pred xs]
+  (if (empty? xs)
+    (list)
+    (if (pred (head xs))
+      (cons (head xs) (filter pred (tail xs)))
+      (filter pred (tail xs)))))
+
+; length: (length list)
+; Returns the number of elements
+(defn length [xs] :int
+  (fold (fn [acc _] (+ acc 1)) 0 xs))
+
+; reverse: (reverse list)
+; Returns a new list with elements in reverse order
+(defn reverse [xs]
+  (fold (fn [acc x] (cons x acc)) (list) xs))
+
+; append: (append list1 list2)
+; Concatenates two lists
+(defn append [xs ys]
+  (fold-right cons ys xs))
+
+; take: (take n list)
+; Returns first n elements
+(defn take [n xs]
+  (if (== n 0)
+    (list)
+    (if (empty? xs)
+      (list)
+      (cons (head xs) (take (- n 1) (tail xs))))))
+
+; drop: (drop n list)
+; Returns list without first n elements
+(defn drop [n xs]
+  (if (== n 0)
+    xs
+    (if (empty? xs)
+      (list)
+      (drop (- n 1) (tail xs)))))
+
+; nth: (nth n list)
+; Returns element at index n (0-based), or (None) if out of bounds
+(defn nth [n xs]
+  (if (empty? xs)
+    (None)
+    (if (== n 0)
+      (Some (head xs))
+      (nth (- n 1) (tail xs)))))
+
+; find: (find pred list)
+; Returns first element matching predicate, or (None)
+(defn find [pred xs]
+  (if (empty? xs)
+    (None)
+    (if (pred (head xs))
+      (Some (head xs))
+      (find pred (tail xs)))))
+
+; any?: (any? pred list)
+; Returns true if any element satisfies predicate
+(defn any? [pred xs] :bool
+  (if (empty? xs)
+    false
+    (if (pred (head xs))
+      true
+      (any? pred (tail xs)))))
+
+; all?: (all? pred list)
+; Returns true if all elements satisfy predicate
+(defn all? [pred xs] :bool
+  (if (empty? xs)
+    true
+    (if (pred (head xs))
+      (all? pred (tail xs))
+      false)))
+
+; zip: (zip list1 list2)
+; Combines two lists into list of tuples
+(defn zip [xs ys]
+  (if (empty? xs)
+    (list)
+    (if (empty? ys)
+      (list)
+      (cons {:pair (head xs) (head ys)} (zip (tail xs) (tail ys))))))
+
+; range: (range start end)
+; Creates a list of integers from start to end-1
+(defn range [start end]
+  (if (>= start end)
+    (list)
+    (cons start (range (+ start 1) end))))
+
+; sum: (sum list)
+; Returns sum of all elements
+(defn sum [xs] :int
+  (fold (fn [a b] (+ a b)) 0 xs))
+
+; product: (product list)
+; Returns product of all elements
+(defn product [xs] :int
+  (fold (fn [a b] (* a b)) 1 xs))
+
+; max: (max list)
+; Returns maximum element, or (None) for empty list
+(defn max [xs]
+  (if (empty? xs)
+    (None)
+    (Some (fold (fn [acc x] (if (> x acc) x acc)) (head xs) (tail xs)))))
+
+; min: (min list)
+; Returns minimum element, or (None) for empty list
+(defn min [xs]
+  (if (empty? xs)
+    (None)
+    (Some (fold (fn [acc x] (if (< x acc) x acc)) (head xs) (tail xs)))))

@@ -325,30 +325,13 @@ defmodule Vaisto.Parser do
     {:def, name, args, body, loc}
   end
 
-  # (defn add [x y] (+ x y)) → {:defn, :add, [{:x, :any}, {:y, :any}], body, loc}
-  # (defn add [x :int y :int] (+ x y)) → {:defn, :add, [{:x, :int}, {:y, :int}], body, loc}
-  # Single-clause: name, params bracket, non-bracket body
-  defp parse_defn([name, {:bracket, params}, body], loc) when not is_tuple(body) or elem(body, 0) != :bracket do
-    # Check if params look like typed (name :type pairs) or untyped (just names)
-    typed_params = if looks_typed?(params) do
-      # Parse as pairs: [x :int y :int] → [{:x, :int}, {:y, :int}]
-      # Unwrap {:atom, type} to just type
-      params
-      |> Enum.chunk_every(2)
-      |> Enum.map(fn [param_name, type] -> {param_name, unwrap_type(type)} end)
-    else
-      # Untyped params: [x y] → [{:x, :any}, {:y, :any}]
-      Enum.map(params, fn p -> {p, :any} end)
-    end
-    {:defn, name, typed_params, body, loc}
-  end
-
   # Multi-clause function definition
   # (defn len
   #   [[] 0]
   #   [[h | t] (+ 1 (len t))])
   # All clauses are brackets: [pattern body]
-  defp parse_defn([name | clauses], loc) when is_list(clauses) and length(clauses) > 0 do
+  # This clause only matches when ALL remaining elements are brackets (multi-clause style)
+  defp parse_defn([name | clauses], loc) when is_list(clauses) and length(clauses) >= 2 do
     # Check if this is multi-clause style (all elements are brackets)
     all_brackets? = Enum.all?(clauses, fn
       {:bracket, _} -> true
@@ -362,9 +345,29 @@ defmodule Vaisto.Parser do
       end)
       {:defn_multi, name, parsed_clauses, loc}
     else
-      # Single clause with bracket body (unlikely but handle gracefully)
+      # Not multi-clause - fall through to single-clause patterns
+      parse_defn_single(name, clauses, loc)
+    end
+  end
+
+  # Helper for single-clause defn to avoid pattern match conflicts
+  defp parse_defn_single(name, [{:bracket, params}, ret_type, body], loc) do
+    typed_params = parse_typed_params(params)
+    if is_type_annotation?(ret_type) do
+      {:defn, name, typed_params, body, unwrap_type(ret_type), loc}
+    else
+      # ret_type is actually the body, and there's a trailing element - error
       {:error, "Invalid defn syntax", loc}
     end
+  end
+
+  defp parse_defn_single(name, [{:bracket, params}, body], loc) do
+    typed_params = parse_typed_params(params)
+    {:defn, name, typed_params, body, :any, loc}
+  end
+
+  defp parse_defn_single(_name, _rest, loc) do
+    {:error, "Invalid defn syntax", loc}
   end
 
   # Extract pattern and body from a clause
@@ -383,13 +386,32 @@ defmodule Vaisto.Parser do
   end
   defp looks_typed?(_), do: false
 
-  defp is_type_annotation?({:atom, t}) when t in [:int, :float, :string, :bool, :any, :atom], do: true
-  defp is_type_annotation?(t) when is_atom(t) and t in [:int, :float, :string, :bool, :any, :atom], do: true
+  # Basic types
+  defp is_type_annotation?({:atom, t}) when t in [:int, :float, :string, :bool, :any, :atom, :unit], do: true
+  defp is_type_annotation?(t) when is_atom(t) and t in [:int, :float, :string, :bool, :any, :atom, :unit], do: true
+  # Parameterized types: (List :int), (Result :int :string)
+  defp is_type_annotation?({:call, type_name, _args, _loc}) when is_atom(type_name), do: true
+  # User-defined types (capitalized atoms)
+  defp is_type_annotation?({:atom, t}) when is_atom(t), do: String.match?(Atom.to_string(t), ~r/^[A-Z]/)
+  defp is_type_annotation?(t) when is_atom(t), do: String.match?(Atom.to_string(t), ~r/^[A-Z]/)
   defp is_type_annotation?(_), do: false
 
   # Unwrap {:atom, :int} → :int for type annotations
   defp unwrap_type({:atom, t}), do: t
   defp unwrap_type(t), do: t
+
+  # Helper to parse typed or untyped params
+  defp parse_typed_params(params) do
+    if looks_typed?(params) do
+      # Parse as pairs: [x :int y :int] → [{:x, :int}, {:y, :int}]
+      params
+      |> Enum.chunk_every(2)
+      |> Enum.map(fn [param_name, type] -> {param_name, unwrap_type(type)} end)
+    else
+      # Untyped params: [x y] → [{:x, :any}, {:y, :any}]
+      Enum.map(params, fn p -> {p, :any} end)
+    end
+  end
 
   # (fn [x] (* x 2)) → {:fn, [:x], body, loc}
   defp parse_fn([{:bracket, params}, body], loc) do
