@@ -102,8 +102,8 @@ defmodule Vaisto.Interface do
               end)
 
             {:record, _name, _fields} = record_type ->
-              # Register record constructor
-              qualified_ctor = :"#{alias_name}/#{type_name}"
+              # Register record constructor (using : for TypeChecker compatibility)
+              qualified_ctor = :"#{alias_name}:#{type_name}"
               field_types = extract_field_types(record_type)
               ctor_type = {:fn, field_types, record_type}
               Map.put(acc, qualified_ctor, ctor_type)

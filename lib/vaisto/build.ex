@@ -36,12 +36,21 @@ defmodule Vaisto.Build do
   @doc """
   Compile a single file with its dependencies.
 
-  The import_env should contain types from all imported modules.
+  Options:
+    - :output_dir - where to write .beam and .vsi files (default: same as source)
+    - :backend - :core or :elixir (default: :core)
+    - :prelude - prelude source to prepend (default: nil)
+    - :search_paths - directories to search for .vsi interfaces (default: [output_dir])
+    - :auto_import - automatically load .vsi files for imports (default: true)
+
+  The import_env should contain additional types from imported modules.
   """
   def compile_file(source_path, import_env, opts \\ []) do
     output_dir = Keyword.get(opts, :output_dir, Path.dirname(source_path))
     backend = Keyword.get(opts, :backend, :core)
     prelude = Keyword.get(opts, :prelude)
+    search_paths = Keyword.get(opts, :search_paths, [output_dir])
+    auto_import = Keyword.get(opts, :auto_import, true)
 
     case File.read(source_path) do
       {:ok, source} ->
@@ -51,12 +60,21 @@ defmodule Vaisto.Build do
         # Parse
         ast = Parser.parse(full_source, file: source_path)
 
-        # Extract module name
-        {module_name, _imports} = Interface.extract_declarations(ast)
+        # Extract module name and imports
+        {module_name, imports} = Interface.extract_declarations(ast)
         module_name = module_name || infer_module_name(source_path)
 
-        # Merge import environment with primitives
-        env = Map.merge(TypeChecker.primitives(), import_env)
+        # Load interfaces for imported modules (if auto_import is enabled)
+        auto_import_env = if auto_import do
+          load_import_env(imports, search_paths)
+        else
+          %{}
+        end
+
+        # Merge: primitives < auto-loaded imports < explicit import_env
+        env = TypeChecker.primitives()
+              |> Map.merge(auto_import_env)
+              |> Map.merge(import_env)
 
         # Type check
         case TypeChecker.check(ast, env) do
@@ -84,6 +102,9 @@ defmodule Vaisto.Build do
               {:error, reason} ->
                 {:error, "Compilation error: #{reason}"}
             end
+
+          {:error, %Vaisto.Error{} = error} ->
+            {:error, "Type error: #{inspect(error)}"}
 
           {:error, reason} ->
             {:error, "Type error: #{reason}"}
@@ -123,7 +144,8 @@ defmodule Vaisto.Build do
             imports: imports
           })
 
-        {:error, _} ->
+        {:error, reason} ->
+          IO.warn("Cannot read file #{file}: #{inspect(reason)}")
           acc
       end
     end)
@@ -212,18 +234,24 @@ defmodule Vaisto.Build do
     end
   end
 
-  defp load_import_env(imports, search_dir) do
+  defp load_import_env(imports, search_paths) when is_list(search_paths) do
     Enum.reduce(imports, %{}, fn {module, alias_name}, acc ->
-      case Interface.load(module, [search_dir]) do
+      case Interface.load(module, search_paths) do
         {:ok, interface} ->
           aliases = if alias_name, do: %{module => alias_name}, else: %{}
           Map.merge(acc, Interface.build_env([interface], aliases))
 
-        {:error, _} ->
-          # External module not found - will be resolved at runtime
+        {:error, _reason} ->
+          # Interface not found - module may be external (erlang, etc.)
+          # Will be resolved via extern declarations or at runtime
           acc
       end
     end)
+  end
+
+  # Handle single search dir for backwards compatibility
+  defp load_import_env(imports, search_dir) when is_binary(search_dir) do
+    load_import_env(imports, [search_dir])
   end
 
   defp infer_module_name(file_path) do

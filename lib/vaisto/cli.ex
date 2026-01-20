@@ -32,6 +32,9 @@ defmodule Vaisto.CLI do
       :repl ->
         Vaisto.REPL.start()
 
+      :lsp ->
+        start_lsp()
+
       {:error, msg} ->
         IO.puts(:stderr, "error: #{msg}")
         System.halt(1)
@@ -45,6 +48,7 @@ defmodule Vaisto.CLI do
   defp parse_args(["--help"]), do: :help
   defp parse_args(["-h"]), do: :help
   defp parse_args(["repl"]), do: :repl
+  defp parse_args(["lsp"]), do: :lsp
 
   # Build project (all .va files in directory)
   defp parse_args(["build"]), do: {:build, ".", ".", :core}
@@ -181,6 +185,13 @@ defmodule Vaisto.CLI do
     end
   end
 
+  defp start_lsp do
+    # Start LSP server on stdio
+    {:ok, _pid} = Vaisto.LSP.Server.start()
+    # Keep the process alive
+    Process.sleep(:infinity)
+  end
+
   defp format_error(_file, reason) when is_binary(reason) do
     # Already formatted (from check_with_source)
     reason
@@ -208,6 +219,7 @@ defmodule Vaisto.CLI do
       vaistoc build [dir] -o <output_dir>   Build with custom output directory
       vaistoc --eval "<code>"               Evaluate expression
       vaistoc repl                          Start interactive REPL
+      vaistoc lsp                           Start Language Server Protocol server
       vaistoc --help                        Show this help
 
     Backends:
