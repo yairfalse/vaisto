@@ -1,0 +1,134 @@
+; Vaisto Lexer Types
+; Token definitions for the self-hosted compiler
+;
+; Design: Each token carries its source location for error messages.
+; Location is represented as a map #{ :file :line :col }
+
+(ns Vaisto.Lexer.Types)
+
+; --- Erlang FFI for string operations ---
+(extern erlang/iolist_to_binary [(List :any)] :string)
+(extern erlang/integer_to_binary [:int] :string)
+
+; --- Source Location ---
+
+; Create a location map
+(defn loc [file line col]
+  #{ :file file :line line :col col })
+
+; Default location for generated code
+(defn no-loc []
+  #{ :file "<generated>" :line 0 :col 0 })
+
+; Format location for error messages: "foo.va:10:5"
+(defn format-loc [l]
+  (erlang/iolist_to_binary
+    (list (. l :file) ":" (erlang/integer_to_binary (. l :line))
+          ":" (erlang/integer_to_binary (. l :col)))))
+
+; --- Token Type ---
+; Using ADT sum type for exhaustive pattern matching
+; Each variant carries location and optional value
+
+(deftype Token
+  ; Delimiters
+  (LParen loc:any)
+  (RParen loc:any)
+  (LBracket loc:any)
+  (RBracket loc:any)
+  (LBrace loc:any)
+  (RBrace loc:any)
+
+  ; Literals
+  (IntLit loc:any val:int)
+  (FloatLit loc:any val:float)
+  (StringLit loc:any val:string)
+  (CharLit loc:any val:int)
+
+  ; Identifiers and keywords
+  (Symbol loc:any name:string)
+  (Keyword loc:any name:string)
+
+  ; Special forms
+  (KwDef loc:any)
+  (KwDefn loc:any)
+  (KwDeftype loc:any)
+  (KwDefrecord loc:any)
+  (KwLet loc:any)
+  (KwIf loc:any)
+  (KwMatch loc:any)
+  (KwFn loc:any)
+  (KwDo loc:any)
+  (KwNs loc:any)
+  (KwImport loc:any)
+  (KwExtern loc:any)
+
+  ; Special
+  (Comment loc:any text:string)
+  (EOF loc:any))
+
+; --- Token helpers ---
+
+; Get location from any token
+; Using match-tuple for ADT variants (they're represented as tuples)
+(defn token-loc [tok]
+  (match-tuple tok
+    [{:LParen l} l]
+    [{:RParen l} l]
+    [{:LBracket l} l]
+    [{:RBracket l} l]
+    [{:LBrace l} l]
+    [{:RBrace l} l]
+    [{:IntLit l _} l]
+    [{:FloatLit l _} l]
+    [{:StringLit l _} l]
+    [{:CharLit l _} l]
+    [{:Symbol l _} l]
+    [{:Keyword l _} l]
+    [{:KwDef l} l]
+    [{:KwDefn l} l]
+    [{:KwDeftype l} l]
+    [{:KwDefrecord l} l]
+    [{:KwLet l} l]
+    [{:KwIf l} l]
+    [{:KwMatch l} l]
+    [{:KwFn l} l]
+    [{:KwDo l} l]
+    [{:KwNs l} l]
+    [{:KwImport l} l]
+    [{:KwExtern l} l]
+    [{:Comment l _} l]
+    [{:EOF l} l]))
+
+; Check if token is a keyword (special form)
+(defn keyword-token? [tok] :bool
+  (match-tuple tok
+    [{:KwDef _} true]
+    [{:KwDefn _} true]
+    [{:KwDeftype _} true]
+    [{:KwDefrecord _} true]
+    [{:KwLet _} true]
+    [{:KwIf _} true]
+    [{:KwMatch _} true]
+    [{:KwFn _} true]
+    [{:KwDo _} true]
+    [{:KwNs _} true]
+    [{:KwImport _} true]
+    [{:KwExtern _} true]
+    [_ false]))
+
+; Format token for debugging
+(defn format-token [tok]
+  (match-tuple tok
+    [{:LParen _} "("]
+    [{:RParen _} ")"]
+    [{:LBracket _} "["]
+    [{:RBracket _} "]"]
+    [{:LBrace _} "{"]
+    [{:RBrace _} "}"]
+    [{:IntLit _ v} (erlang/integer_to_binary v)]
+    [{:StringLit _ v} (erlang/iolist_to_binary (list "\"" v "\""))]
+    [{:Symbol _ n} n]
+    [{:Keyword _ n} (erlang/iolist_to_binary (list ":" n))]
+    [{:EOF _} "<EOF>"]
+    [_ "<token>"]))

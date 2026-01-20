@@ -1,0 +1,247 @@
+; Vaisto Self-Hosted Lexer
+; Transforms source text into a stream of tokens
+;
+; The lexer maintains position state (line, col) and uses Std.Regex
+; for pattern matching. It's designed to produce helpful error messages
+; with accurate source locations.
+
+(ns Vaisto.Lexer)
+
+(import Std.Regex)
+(import Std.State)
+(import Std.String)
+(import Std.File)
+(import Vaisto.Lexer.Types)
+
+; Erlang/BEAM primitives (these still need extern declarations)
+(extern erlang/byte_size [:binary] :int)
+(extern erlang/binary_to_integer [:binary] :int)
+(extern erlang/binary_to_float [:binary] :float)
+(extern erlang/error [:any] :any)
+(extern erlang/hd [(List :any)] :any)
+(extern erlang/element [:int :any] :any)
+(extern lists/reverse [(List :any)] (List :any))
+
+; --- Lexer State ---
+; We use the process dictionary to track position during lexing.
+; Keys: :lex-line, :lex-col, :lex-file
+
+(defn init-state! [filename]
+  (Std.State/set! :lex-file filename)
+  (Std.State/set! :lex-line 1)
+  (Std.State/set! :lex-col 1))
+
+(defn current-loc []
+  (Vaisto.Lexer.Types/loc
+    (Std.State/get-or :lex-file "<unknown>")
+    (Std.State/get-or :lex-line 1)
+    (Std.State/get-or :lex-col 1)))
+
+(defn advance-pos! [text]
+  ; Update line/col based on consumed text
+  (let [lines (Std.Regex/count-newlines text)
+        len (erlang/byte_size text)]
+    (if (> lines 0)
+      (do
+        (Std.State/update! :lex-line (fn [l] (+ l lines)))
+        (Std.State/set! :lex-col (+ 1 (Std.Regex/last-line-length text))))
+      (Std.State/update! :lex-col (fn [c] (+ c len))))))
+
+; --- Token Pattern Type ---
+; Define a record so all patterns have the same type
+; Note: Using :any for type field because the type checker distinguishes
+; specific atom literals like {:atom, :whitespace} from the general :atom type
+(deftype TokenPattern [type :any pattern :string])
+
+; --- Lexer Result Type ---
+; The result from lexing one token: either skip (whitespace/comment) or a token
+(deftype LexResult
+  (Skip rest:string)
+  (Got token:any rest:string))
+
+; --- Token Patterns ---
+; Order matters: more specific patterns first
+
+(def token-patterns
+  (list
+    ; Whitespace (skip, but track position)
+    (TokenPattern :whitespace "^[ \\t\\r]+")
+
+    ; Newlines (track separately for line counting)
+    (TokenPattern :newline "^\\n")
+
+    ; Comments
+    (TokenPattern :comment "^;[^\\n]*")
+
+    ; String literals: "..."
+    (TokenPattern :string "^\"([^\"]*)\"")
+
+    ; Character literals: \a \newline \space
+    (TokenPattern :char-named "^\\\\(newline|space|tab|return)")
+    (TokenPattern :char-simple "^\\\\(.)")
+
+    ; Numbers (integer and float)
+    (TokenPattern :float "^-?[0-9]+\\.[0-9]+")
+    (TokenPattern :integer "^-?[0-9]+")
+
+    ; Keywords :foo
+    (TokenPattern :keyword "^:([a-zA-Z_][a-zA-Z0-9_\\-]*)")
+
+    ; Delimiters
+    (TokenPattern :lparen "^\\(")
+    (TokenPattern :rparen "^\\)")
+    (TokenPattern :lbracket "^\\[")
+    (TokenPattern :rbracket "^\\]")
+    (TokenPattern :lbrace "^\\{")
+    (TokenPattern :rbrace "^\\}")
+
+    ; Symbols (identifiers and operators)
+    ; Must come after keywords and numbers
+    (TokenPattern :symbol "^[a-zA-Z_+\\-*/<>=!?][a-zA-Z0-9_+\\-*/<>=!?.]*")
+
+    ; Dot accessor (for row polymorphism)
+    (TokenPattern :dot "^\\.")))
+
+; --- Character literal mapping ---
+
+(defn char-name-to-code [name]
+  (match name
+    ["newline" 10]
+    ["space" 32]
+    ["tab" 9]
+    ["return" 13]
+    [_ (erlang/error {:unknown-char-name name})]))
+
+; --- Symbol to keyword mapping ---
+
+(defn symbol-to-keyword-token [loc name]
+  (match name
+    ["def" (Vaisto.Lexer.Types/KwDef loc)]
+    ["defn" (Vaisto.Lexer.Types/KwDefn loc)]
+    ["deftype" (Vaisto.Lexer.Types/KwDeftype loc)]
+    ["defrecord" (Vaisto.Lexer.Types/KwDefrecord loc)]
+    ["let" (Vaisto.Lexer.Types/KwLet loc)]
+    ["if" (Vaisto.Lexer.Types/KwIf loc)]
+    ["match" (Vaisto.Lexer.Types/KwMatch loc)]
+    ["fn" (Vaisto.Lexer.Types/KwFn loc)]
+    ["do" (Vaisto.Lexer.Types/KwDo loc)]
+    ["ns" (Vaisto.Lexer.Types/KwNs loc)]
+    ["import" (Vaisto.Lexer.Types/KwImport loc)]
+    ["extern" (Vaisto.Lexer.Types/KwExtern loc)]
+    [_ (Vaisto.Lexer.Types/Symbol loc name)]))
+
+; --- Core Lexer Logic ---
+
+; TODO: Implement this function
+; This is where the lexing decision happens for each token type.
+; You have the match result with :type, :full (full match), :groups (captures), :rest
+;
+; Trade-off to consider:
+; - Should we skip comments entirely, or include them in the token stream?
+;   (Including them allows a formatter/pretty-printer to preserve them)
+; - Should whitespace-sensitive errors be handled here or in the parser?
+;
+; The function should return {:token Token :rest String} or {:skip :rest String}
+; for whitespace/comments we want to skip.
+(defn make-token [match-result]
+  ; match-result has :type :full :groups :rest
+  (let [loc (current-loc)
+        typ (. match-result :type)
+        full (. match-result :full)
+        groups (. match-result :groups)
+        rest (. match-result :rest)]
+    ; Advance position for consumed text
+    (advance-pos! full)
+    ; Create appropriate token - returns LexResult sum type
+    (match typ
+      ; Skip whitespace and newlines
+      [:whitespace (Skip rest)]
+      [:newline (Skip rest)]
+
+      ; Comments - skip for now
+      [:comment (Skip rest)]
+
+      ; Delimiters
+      [:lparen (Got (Vaisto.Lexer.Types/LParen loc) rest)]
+      [:rparen (Got (Vaisto.Lexer.Types/RParen loc) rest)]
+      [:lbracket (Got (Vaisto.Lexer.Types/LBracket loc) rest)]
+      [:rbracket (Got (Vaisto.Lexer.Types/RBracket loc) rest)]
+      [:lbrace (Got (Vaisto.Lexer.Types/LBrace loc) rest)]
+      [:rbrace (Got (Vaisto.Lexer.Types/RBrace loc) rest)]
+
+      ; Literals
+      [:integer (Got (Vaisto.Lexer.Types/IntLit loc (erlang/binary_to_integer full)) rest)]
+      [:float (Got (Vaisto.Lexer.Types/FloatLit loc (erlang/binary_to_float full)) rest)]
+      [:string (Got (Vaisto.Lexer.Types/StringLit loc (erlang/hd groups)) rest)]
+
+      ; Character literals
+      [:char-named (Got (Vaisto.Lexer.Types/CharLit loc (char-name-to-code (erlang/hd groups))) rest)]
+      [:char-simple (Got (Vaisto.Lexer.Types/CharLit loc (Std.String/first-char (erlang/hd groups))) rest)]
+
+      ; Keywords and symbols
+      [:keyword (Got (Vaisto.Lexer.Types/Keyword loc (erlang/hd groups)) rest)]
+      [:symbol (Got (symbol-to-keyword-token loc full) rest)]
+      [:dot (Got (Vaisto.Lexer.Types/Symbol loc ".") rest)]
+
+      ; Unknown
+      [_ (erlang/error {:unknown-token-type typ})])))
+
+; Try to match next token from input
+; Returns LexResult: either (Skip rest) or (Got token rest)
+(defn next-token [input]
+  (if (== (erlang/byte_size input) 0)
+    (Got (Vaisto.Lexer.Types/EOF (current-loc)) "")
+    (match (try-patterns input token-patterns)
+      [(Some result) (make-token result)]
+      [(None) (erlang/error {:unexpected-char
+                             :char (Std.Regex/peek input 1)
+                             :loc (current-loc)})])))
+
+; Try patterns in order until one matches
+; Note: Records are represented as tuples {:RecordName, field1, field2, ...}
+; We use erlang/element to access fields by index since the type checker
+; doesn't yet propagate record types through pattern matching.
+(defn try-patterns [input patterns]
+  (match patterns
+    [[] (None)]
+    [[pat | rest]
+      (let [t (erlang/element 2 pat)   ; :type field is at index 2
+            p (erlang/element 3 pat)]  ; :pattern field is at index 3
+        (match (Std.Regex/match-groups input p)
+          [(Some m) (Some #{ :type t
+                             :full (. m :full)
+                             :groups (. m :groups)
+                             :rest (. m :rest) })]
+          [(None) (try-patterns input rest)]))]))
+
+; --- Main Entry Point ---
+
+; Tokenize a string, returning a list of tokens
+(defn tokenize [source filename]
+  (Std.State/with-isolated-state
+    (fn []
+      (init-state! filename)
+      (tokenize-loop source (list)))))
+
+; Internal tokenization loop
+; Pattern matches on LexResult sum type
+(defn tokenize-loop [input acc]
+  (match (next-token input)
+    ; Skipped whitespace/comment, continue with rest
+    [(Skip rest-input)
+      (tokenize-loop rest-input acc)]
+    ; Got a token - check if EOF or continue
+    [(Got tok rest-input)
+      (match-tuple tok
+        [{:EOF _}
+          ; Done - reverse accumulated tokens and add EOF
+          (lists/reverse (cons tok acc))]
+        [_
+          ; Continue with this token
+          (tokenize-loop rest-input (cons tok acc))])]))
+
+; Convenience: tokenize from a file
+(defn tokenize-file [path]
+  (match (Std.File/read-file path)
+    [(Ok content) (Ok (tokenize content path))]
+    [(Err e) (Err e)]))
