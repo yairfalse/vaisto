@@ -224,22 +224,26 @@ defmodule Vaisto.LSP.Handler do
     if text do
       line = pos["line"] + 1
       col = pos["character"] + 1
+      file = uri_to_path(uri)
 
-      location = find_definition(text, line, col, uri)
+      result = case Hover.get_definition(text, line, col, file) do
+        {:ok, loc} ->
+          %{
+            "uri" => uri,
+            "range" => %{
+              "start" => %{"line" => loc.line - 1, "character" => loc.col - 1},
+              "end" => %{"line" => loc.line - 1, "character" => loc.col - 1}
+            }
+          }
 
-      {Protocol.response(id, location), state}
+        :not_found ->
+          nil
+      end
+
+      {Protocol.response(id, result), state}
     else
       {Protocol.response(id, nil), state}
     end
-  end
-
-  defp find_definition(_text, _line, _col, _uri) do
-    # TODO: Implement definition lookup
-    # Would need to:
-    # 1. Find identifier at position
-    # 2. Look up in symbol table
-    # 3. Return location
-    nil
   end
 
   # ============================================================================

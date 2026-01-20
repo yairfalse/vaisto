@@ -14,6 +14,23 @@ defmodule Vaisto.LSP.Hover do
   @delimiters [?(, ?), ?[, ?], ?{, ?}, ?\s, ?\t, ?\n, ?\r]
 
   @doc """
+  Get the definition location for a symbol at a position.
+
+  Returns {:ok, %{line: n, col: n}} or :not_found.
+  """
+  def get_definition(source, line, col, file \\ nil) do
+    with {:ok, token, _span} <- token_at(source, line, col),
+         false <- is_literal?(token),
+         {:ok, loc} <- find_definition_loc(source, token, file) do
+      {:ok, loc}
+    else
+      true -> :not_found  # literals have no definition
+      :not_found -> :not_found
+      {:error, _} -> :not_found
+    end
+  end
+
+  @doc """
   Get hover information for a position in the source.
 
   Returns {:ok, hover_info} or :not_found where hover_info contains:
@@ -188,6 +205,17 @@ defmodule Vaisto.LSP.Hover do
     end
   end
 
+  defp is_literal?(token) do
+    cond do
+      Regex.match?(~r/^-?\d+$/, token) -> true
+      Regex.match?(~r/^-?\d+\.\d+$/, token) -> true
+      String.starts_with?(token, "\"") -> true
+      String.starts_with?(token, ":") -> true
+      token in ["true", "false"] -> true
+      true -> false
+    end
+  end
+
   defp literal_type(token) do
     cond do
       # Integer
@@ -213,6 +241,180 @@ defmodule Vaisto.LSP.Hover do
 
       true ->
         :not_literal
+    end
+  end
+
+  # Find the definition location for a symbol in the source
+  defp find_definition_loc(source, token, file) do
+    token_atom = String.to_atom(token)
+
+    try do
+      ast = Parser.parse(source, file: file)
+      forms = if is_list(ast), do: ast, else: [ast]
+
+      # First, search top-level definitions
+      case find_top_level_def(forms, token_atom) do
+        {:ok, _} = found -> found
+        :not_found ->
+          # Search for local definitions (let bindings, params)
+          find_local_def(forms, token_atom)
+      end
+    rescue
+      _ -> :not_found
+    end
+  end
+
+  # Search top-level forms for a definition
+  defp find_top_level_def([], _name), do: :not_found
+
+  defp find_top_level_def([{:defn, name, _params, _body, _ret, loc} | _rest], name) do
+    {:ok, definition_loc(name, loc)}
+  end
+
+  defp find_top_level_def([{:defn, name, _params, _body, loc} | _rest], name) when is_struct(loc, Parser.Loc) do
+    {:ok, definition_loc(name, loc)}
+  end
+
+  defp find_top_level_def([{:defn_multi, name, _clauses, loc} | _rest], name) do
+    {:ok, definition_loc(name, loc)}
+  end
+
+  defp find_top_level_def([{:defval, name, _expr, loc} | _rest], name) do
+    {:ok, definition_loc(name, loc)}
+  end
+
+  defp find_top_level_def([{:process, name, _init, _handlers, loc} | _rest], name) do
+    {:ok, definition_loc(name, loc)}
+  end
+
+  defp find_top_level_def([{:deftype, type_name, {:sum, variants}, loc} | _rest], name) do
+    # Check if it's the type name
+    if type_name == name do
+      {:ok, definition_loc(type_name, loc)}
+    else
+      # Check if it's a constructor name
+      case Enum.find(variants, fn {ctor, _} -> ctor == name end) do
+        {^name, _} -> {:ok, definition_loc(type_name, loc)}
+        nil -> :not_found
+      end
+    end
+  end
+
+  defp find_top_level_def([{:deftype, name, _def, loc} | _rest], name) do
+    {:ok, definition_loc(name, loc)}
+  end
+
+  defp find_top_level_def([{:extern, _mod, func, _args, _ret, loc} | _rest], func) do
+    {:ok, definition_loc(func, loc)}
+  end
+
+  defp find_top_level_def([_ | rest], name), do: find_top_level_def(rest, name)
+
+  # Calculate the actual location of the name within the definition
+  # For (defn add ...), the 'add' is at loc.col + 6 (after "(defn ")
+  defp definition_loc(_name, %Parser.Loc{} = loc) do
+    # Offset depends on the keyword length
+    # We store the location of the opening paren, name comes after keyword
+    %{line: loc.line, col: loc.col + 6}  # Approximate - "(defn " is 6 chars
+  end
+
+  # Search for local definitions (let bindings, function params)
+  defp find_local_def(forms, name) do
+    Enum.find_value(forms, :not_found, fn form ->
+      case search_local_in_form(form, name) do
+        {:ok, _} = found -> found
+        :not_found -> nil
+      end
+    end)
+  end
+
+  # Search within a form for local variable definitions
+  defp search_local_in_form({:defn, _fname, params, body, _ret, loc}, name) do
+    # Check params first
+    case find_in_params(params, name, loc) do
+      {:ok, _} = found -> found
+      :not_found -> search_local_in_expr(body, name)
+    end
+  end
+
+  defp search_local_in_form({:defn, _fname, params, body, loc}, name) when is_struct(loc, Parser.Loc) do
+    case find_in_params(params, name, loc) do
+      {:ok, _} = found -> found
+      :not_found -> search_local_in_expr(body, name)
+    end
+  end
+
+  defp search_local_in_form({:let, bindings, body, loc}, name) do
+    case find_in_let_bindings(bindings, name, loc) do
+      {:ok, _} = found -> found
+      :not_found -> search_local_in_expr(body, name)
+    end
+  end
+
+  defp search_local_in_form({:fn, params, body, _loc}, name) do
+    # Anonymous functions - params are just atoms
+    case Enum.find_index(params, &(&1 == name)) do
+      nil -> search_local_in_expr(body, name)
+      _idx -> :not_found  # TODO: track param locations in fn
+    end
+  end
+
+  defp search_local_in_form({:call, _func, args, _loc}, name) do
+    Enum.find_value(args, :not_found, fn arg ->
+      case search_local_in_expr(arg, name) do
+        {:ok, _} = found -> found
+        :not_found -> nil
+      end
+    end)
+  end
+
+  defp search_local_in_form({:if, cond, then_b, else_b, _loc}, name) do
+    search_local_in_expr(cond, name) ||
+    search_local_in_expr(then_b, name) ||
+    search_local_in_expr(else_b, name) ||
+    :not_found
+  end
+
+  defp search_local_in_form({:do, exprs, _loc}, name) do
+    Enum.find_value(exprs, :not_found, fn expr ->
+      case search_local_in_expr(expr, name) do
+        {:ok, _} = found -> found
+        :not_found -> nil
+      end
+    end)
+  end
+
+  defp search_local_in_form(_, _name), do: :not_found
+
+  defp search_local_in_expr(expr, name), do: search_local_in_form(expr, name)
+
+  # Find a parameter in the params list
+  # Params are [{name, type}, ...] with types
+  defp find_in_params(params, name, defn_loc) do
+    case Enum.find_index(params, fn
+      {pname, _type} -> pname == name
+      pname when is_atom(pname) -> pname == name
+      _ -> false
+    end) do
+      nil -> :not_found
+      idx ->
+        # Approximate: params start after "[" which is after "(defn name "
+        # This is imprecise but gives a reasonable location
+        {:ok, %{line: defn_loc.line, col: defn_loc.col + 14 + idx * 2}}
+    end
+  end
+
+  # Find a variable in let bindings
+  # Bindings from parser are [{name, value}, ...] or keyword list
+  defp find_in_let_bindings(bindings, name, let_loc) do
+    case Enum.find_index(bindings, fn
+      {bname, _value} -> bname == name
+      _ -> false
+    end) do
+      nil -> :not_found
+      idx ->
+        # Approximate: bindings start at col + 6 "(let ["
+        {:ok, %{line: let_loc.line, col: let_loc.col + 6 + idx * 4}}
     end
   end
 

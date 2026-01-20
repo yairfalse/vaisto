@@ -2,6 +2,112 @@ defmodule Vaisto.LSP.HoverTest do
   use ExUnit.Case
   alias Vaisto.LSP.Hover
 
+  # ============================================================================
+  # Go to Definition Tests
+  # ============================================================================
+
+  describe "get_definition/4" do
+    test "finds function definition from call site" do
+      source = """
+      (defn add [a :int b :int] :int
+        (+ a b))
+
+      (add 1 2)
+      """
+      # Hover on 'add' in the call (line 4, col 2)
+      assert {:ok, loc} = Hover.get_definition(source, 4, 2)
+      assert loc.line == 1
+      assert loc.col == 7  # 'add' starts at col 7 in defn
+    end
+
+    test "finds function definition from within another function" do
+      source = """
+      (defn helper [] :int 42)
+
+      (defn main [] :int
+        (helper))
+      """
+      # Hover on 'helper' in main (line 4)
+      assert {:ok, loc} = Hover.get_definition(source, 4, 4)
+      assert loc.line == 1
+    end
+
+    test "finds type definition from constructor call" do
+      source = """
+      (deftype Result (Ok v) (Error e))
+
+      (Ok 42)
+      """
+      # Hover on 'Ok' (line 3)
+      assert {:ok, loc} = Hover.get_definition(source, 3, 2)
+      assert loc.line == 1
+    end
+
+    test "finds process definition from spawn" do
+      source = """
+      (process counter 0
+        :increment (+ state 1))
+
+      (spawn counter 0)
+      """
+      # Hover on 'counter' in spawn (line 4)
+      assert {:ok, loc} = Hover.get_definition(source, 4, 8)
+      assert loc.line == 1
+    end
+
+    test "finds variable definition in let binding" do
+      source = "(let [x 42] (+ x 1))"
+      # Hover on 'x' in the body (col 16)
+      assert {:ok, loc} = Hover.get_definition(source, 1, 16)
+      # x is defined at col 7
+      assert loc.col == 7
+    end
+
+    test "finds parameter definition in function" do
+      source = "(defn double [n :int] :int (+ n n))"
+      # Hover on first 'n' in body (around col 31)
+      assert {:ok, loc} = Hover.get_definition(source, 1, 31)
+      # n is defined in params at col 15
+      assert loc.col == 15
+    end
+
+    test "returns not_found for undefined symbol" do
+      source = "(+ x 1)"
+      assert :not_found = Hover.get_definition(source, 1, 4)
+    end
+
+    test "returns not_found for builtin operators" do
+      source = "(+ 1 2)"
+      # '+' is a builtin, no definition location
+      assert :not_found = Hover.get_definition(source, 1, 2)
+    end
+
+    test "returns not_found for literals" do
+      source = "(+ 42 1)"
+      assert :not_found = Hover.get_definition(source, 1, 4)
+    end
+
+    test "returns not_found for whitespace" do
+      source = "(+ 1 2)"
+      assert :not_found = Hover.get_definition(source, 1, 3)
+    end
+
+    test "works across multiple definitions" do
+      source = """
+      (defn foo [] :int 1)
+      (defn bar [] :int 2)
+      (defn baz [] :int (+ (foo) (bar)))
+      """
+      # Find 'foo' in baz
+      assert {:ok, loc} = Hover.get_definition(source, 3, 23)
+      assert loc.line == 1
+
+      # Find 'bar' in baz
+      assert {:ok, loc} = Hover.get_definition(source, 3, 30)
+      assert loc.line == 2
+    end
+  end
+
   describe "token_at/3" do
     test "finds identifier in simple expression" do
       source = "(+ x 1)"
