@@ -20,7 +20,8 @@ defmodule Vaisto.ADTTest do
       code = "(deftype Option (Some v) (None))"
       ast = Vaisto.Parser.parse(code)
       {:ok, type, _typed_ast} = Vaisto.TypeChecker.check(ast)
-      assert {:sum, :Option, [{:Some, [:any]}, {:None, []}]} = type
+      # Type parameters are now represented as type variables {:tvar, n}
+      assert {:sum, :Option, [{:Some, [{:tvar, 0}]}, {:None, []}]} = type
     end
   end
 

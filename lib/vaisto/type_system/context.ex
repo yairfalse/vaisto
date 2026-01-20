@@ -14,6 +14,7 @@ defmodule Vaisto.TypeSystem.Context do
 
   defstruct [
     :counter,      # Next fresh type variable ID
+    :row_counter,  # Next fresh row variable ID
     :subst,        # Current substitution map
     :env           # Type environment: var_name -> type or type_scheme
   ]
@@ -24,6 +25,7 @@ defmodule Vaisto.TypeSystem.Context do
   def new(env \\ %{}) do
     %__MODULE__{
       counter: 0,
+      row_counter: 0,
       subst: Core.empty_subst(),
       env: env
     }
@@ -45,6 +47,13 @@ defmodule Vaisto.TypeSystem.Context do
     {var, ctx} = fresh_var(ctx)
     {rest, ctx} = fresh_vars(ctx, n - 1)
     {[var | rest], ctx}
+  end
+
+  @doc """
+  Generates a fresh row variable and returns {rvar, updated_context}.
+  """
+  def fresh_row_var(%__MODULE__{row_counter: n} = ctx) do
+    {{:rvar, n}, %{ctx | row_counter: n + 1}}
   end
 
   @doc """
@@ -82,9 +91,10 @@ defmodule Vaisto.TypeSystem.Context do
   Unifies two types within the context, updating substitutions.
   Returns {:ok, updated_context} or {:error, reason}.
   """
-  def unify_types(%__MODULE__{subst: subst} = ctx, t1, t2) do
-    case Unify.unify(t1, t2, subst) do
-      {:ok, new_subst} -> {:ok, %{ctx | subst: new_subst}}
+  def unify_types(%__MODULE__{subst: subst, row_counter: row_counter} = ctx, t1, t2) do
+    case Unify.unify(t1, t2, subst, row_counter) do
+      {:ok, new_subst, new_row_counter} ->
+        {:ok, %{ctx | subst: new_subst, row_counter: new_row_counter}}
       {:error, _} = err -> err
     end
   end
@@ -137,7 +147,11 @@ defmodule Vaisto.TypeSystem.Context do
     Enum.reduce(env, MapSet.new(), fn {_name, type}, acc ->
       type = Core.apply_subst(subst, type)
       case type do
-        {:forall, _vars, inner} -> MapSet.union(acc, Core.free_vars(inner))
+        {:forall, vars, inner} ->
+          # Exclude forall-bound variables from free vars
+          inner_free = Core.free_vars(inner)
+          bound = MapSet.new(vars)
+          MapSet.union(acc, MapSet.difference(inner_free, bound))
         _ -> MapSet.union(acc, Core.free_vars(type))
       end
     end)

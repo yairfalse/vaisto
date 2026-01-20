@@ -3,11 +3,28 @@ defmodule Vaisto.TypeSystem.Core do
   Core type system primitives for Hindley-Milner type inference.
 
   Type Variables: Placeholders like {:tvar, 0}, {:tvar, 1} representing unknown types.
+  Row Variables: {:rvar, id} representing "and possibly more fields" in records.
   Substitutions: A map tracking what type variables resolve to.
+
+  ## Row Polymorphism
+
+  Row types allow functions to accept records with *at least* certain fields:
+
+      ; This function works with any record that has a :name field
+      (defn get-name [r] (. r :name))
+
+  Internally, the record type is represented as:
+      {:row, [{:name, :string}], {:rvar, 0}}
+
+  The row variable {:rvar, 0} represents "and maybe more fields".
+  When unified with a concrete record, it captures the extra fields.
   """
 
   @doc "Creates a type variable with the given id"
   def tvar(id), do: {:tvar, id}
+
+  @doc "Creates a row variable with the given id"
+  def rvar(id), do: {:rvar, id}
 
   @doc "Returns an empty substitution map"
   def empty_subst, do: %{}
@@ -60,6 +77,24 @@ defmodule Vaisto.TypeSystem.Core do
 
   def apply_subst(_subst, {:atom, _} = t), do: t
 
+  # Row variable - similar to type variable but for record fields
+  def apply_subst(subst, {:rvar, id} = rv) do
+    case Map.fetch(subst, {:row, id}) do
+      {:ok, ^rv} -> rv
+      {:ok, type} -> apply_subst(subst, type)
+      :error -> rv
+    end
+  end
+
+  # Row type: known fields + row variable for extension
+  # {:row, [{field, type}, ...], row_tail}
+  # row_tail is either {:rvar, id} (open) or :closed (closed row)
+  def apply_subst(subst, {:row, fields, tail}) do
+    new_fields = Enum.map(fields, fn {k, v} -> {k, apply_subst(subst, v)} end)
+    new_tail = apply_subst(subst, tail)
+    {:row, new_fields, new_tail}
+  end
+
   def apply_subst(_subst, type), do: type
 
   @doc """
@@ -97,6 +132,13 @@ defmodule Vaisto.TypeSystem.Core do
       MapSet.union(acc, free_vars(t))
     end)
   end
+  def free_vars({:rvar, id}), do: MapSet.new([{:row, id}])
+  def free_vars({:row, fields, tail}) do
+    field_vars = Enum.reduce(fields, MapSet.new(), fn {_k, v}, acc ->
+      MapSet.union(acc, free_vars(v))
+    end)
+    MapSet.union(field_vars, free_vars(tail))
+  end
   def free_vars(_), do: MapSet.new()
 
   @doc """
@@ -118,6 +160,15 @@ defmodule Vaisto.TypeSystem.Core do
   def format_type({:fn, args, ret}) do
     arg_str = args |> Enum.map(&format_type/1) |> Enum.join(", ")
     "(#{arg_str}) -> #{format_type(ret)}"
+  end
+  def format_type({:rvar, id}), do: "r#{id}"
+  def format_type({:row, fields, :closed}) do
+    field_str = fields |> Enum.map(fn {k, v} -> "#{k}: #{format_type(v)}" end) |> Enum.join(", ")
+    "{#{field_str}}"
+  end
+  def format_type({:row, fields, tail}) do
+    field_str = fields |> Enum.map(fn {k, v} -> "#{k}: #{format_type(v)}" end) |> Enum.join(", ")
+    "{#{field_str} | #{format_type(tail)}}"
   end
   def format_type(other), do: inspect(other)
 end
