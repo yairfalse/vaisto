@@ -1,6 +1,6 @@
 # Vaisto VS Code Extension
 
-Language support for [Vaisto](https://github.com/yourusername/vaisto) - a statically-typed Scheme for the BEAM.
+Language support for Vaisto - a statically-typed Scheme for the BEAM.
 
 ## Features
 

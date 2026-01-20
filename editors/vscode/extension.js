@@ -30,10 +30,18 @@ function activate(context) {
         clientOptions
     );
 
-    // Start the client (also starts the server)
-    client.start();
-
-    console.log('Vaisto language server started');
+    // Start the client (also starts the server) with error handling
+    client.start().then(() => {
+        console.log('Vaisto language server started');
+    }).catch((error) => {
+        const message = error && error.message ? error.message : String(error);
+        console.error('Failed to start Vaisto language server:', message);
+        vscode.window.showErrorMessage(
+            `Failed to start Vaisto language server. ` +
+            `Please ensure "vaistoc" is installed and in your PATH, ` +
+            `or configure "vaisto.serverPath" in settings.`
+        );
+    });
 }
 
 function deactivate() {

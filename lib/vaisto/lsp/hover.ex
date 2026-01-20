@@ -268,54 +268,61 @@ defmodule Vaisto.LSP.Hover do
   defp find_top_level_def([], _name), do: :not_found
 
   defp find_top_level_def([{:defn, name, _params, _body, _ret, loc} | _rest], name) do
-    {:ok, definition_loc(name, loc)}
+    {:ok, definition_loc(:defn, loc)}
   end
 
   defp find_top_level_def([{:defn, name, _params, _body, loc} | _rest], name) when is_struct(loc, Parser.Loc) do
-    {:ok, definition_loc(name, loc)}
+    {:ok, definition_loc(:defn, loc)}
   end
 
   defp find_top_level_def([{:defn_multi, name, _clauses, loc} | _rest], name) do
-    {:ok, definition_loc(name, loc)}
+    {:ok, definition_loc(:defn, loc)}
   end
 
   defp find_top_level_def([{:defval, name, _expr, loc} | _rest], name) do
-    {:ok, definition_loc(name, loc)}
+    {:ok, definition_loc(:defval, loc)}
   end
 
   defp find_top_level_def([{:process, name, _init, _handlers, loc} | _rest], name) do
-    {:ok, definition_loc(name, loc)}
+    {:ok, definition_loc(:process, loc)}
   end
 
   defp find_top_level_def([{:deftype, type_name, {:sum, variants}, loc} | _rest], name) do
     # Check if it's the type name
     if type_name == name do
-      {:ok, definition_loc(type_name, loc)}
+      {:ok, definition_loc(:deftype, loc)}
     else
       # Check if it's a constructor name
       case Enum.find(variants, fn {ctor, _} -> ctor == name end) do
-        {^name, _} -> {:ok, definition_loc(type_name, loc)}
+        {^name, _} -> {:ok, definition_loc(:deftype, loc)}
         nil -> :not_found
       end
     end
   end
 
   defp find_top_level_def([{:deftype, name, _def, loc} | _rest], name) do
-    {:ok, definition_loc(name, loc)}
+    {:ok, definition_loc(:deftype, loc)}
   end
 
   defp find_top_level_def([{:extern, _mod, func, _args, _ret, loc} | _rest], func) do
-    {:ok, definition_loc(func, loc)}
+    {:ok, definition_loc(:extern, loc)}
   end
 
   defp find_top_level_def([_ | rest], name), do: find_top_level_def(rest, name)
 
   # Calculate the actual location of the name within the definition
-  # For (defn add ...), the 'add' is at loc.col + 6 (after "(defn ")
-  defp definition_loc(_name, %Parser.Loc{} = loc) do
-    # Offset depends on the keyword length
-    # We store the location of the opening paren, name comes after keyword
-    %{line: loc.line, col: loc.col + 6}  # Approximate - "(defn " is 6 chars
+  # Offset depends on the keyword: "(defn " = 6, "(deftype " = 9, etc.
+  @keyword_offsets %{
+    defn: 6,      # "(defn "
+    defval: 6,    # "(def " - defval is parsed from (def name value)
+    deftype: 9,   # "(deftype "
+    process: 9,   # "(process "
+    extern: 8     # "(extern " - but extern has module:func format
+  }
+
+  defp definition_loc(keyword, %Parser.Loc{} = loc) do
+    offset = Map.get(@keyword_offsets, keyword, 6)
+    %{line: loc.line, col: loc.col + offset}
   end
 
   # Search for local definitions (let bindings, function params)
@@ -390,6 +397,8 @@ defmodule Vaisto.LSP.Hover do
 
   # Find a parameter in the params list
   # Params are [{name, type}, ...] with types
+  # NOTE: Column calculation is approximate - assumes standard formatting.
+  # A more robust solution would store exact positions during parsing.
   defp find_in_params(params, name, defn_loc) do
     case Enum.find_index(params, fn
       {pname, _type} -> pname == name
@@ -398,14 +407,15 @@ defmodule Vaisto.LSP.Hover do
     end) do
       nil -> :not_found
       idx ->
-        # Approximate: params start after "[" which is after "(defn name "
-        # This is imprecise but gives a reasonable location
+        # Approximate: "(defn name [" is ~14 chars, each "x :type " is ~2 per param
         {:ok, %{line: defn_loc.line, col: defn_loc.col + 14 + idx * 2}}
     end
   end
 
   # Find a variable in let bindings
   # Bindings from parser are [{name, value}, ...] or keyword list
+  # NOTE: Column calculation is approximate - assumes standard formatting.
+  # A more robust solution would store exact positions during parsing.
   defp find_in_let_bindings(bindings, name, let_loc) do
     case Enum.find_index(bindings, fn
       {bname, _value} -> bname == name
@@ -413,7 +423,7 @@ defmodule Vaisto.LSP.Hover do
     end) do
       nil -> :not_found
       idx ->
-        # Approximate: bindings start at col + 6 "(let ["
+        # Approximate: "(let [" is 6 chars, each binding "x val " is ~4 chars
         {:ok, %{line: let_loc.line, col: let_loc.col + 6 + idx * 4}}
     end
   end
@@ -574,22 +584,16 @@ defmodule Vaisto.LSP.Hover do
     Map.put(env, name, %{type: func_type, loc: loc, kind: :function})
   end
 
-  # Typed AST value definition: {:defval, name, typed_expr, type}
-  defp extract_definition({:defval, name, _typed_expr, type}, env) when is_atom(type) or is_tuple(type) do
-    # Check if last element is a loc or a type
-    case type do
-      %Parser.Loc{} = loc ->
-        # Has location, no explicit type - need to extract from expr
-        Map.put(env, name, %{type: :any, loc: loc, kind: :variable})
-      _ ->
-        Map.put(env, name, %{type: type, loc: nil, kind: :variable})
-    end
-  end
-
-  # Value definition with location (from tests): {:defval, name, typed_expr, loc}
+  # Value definition with location: {:defval, name, typed_expr, loc}
+  # (must come before the catch-all type clause)
   defp extract_definition({:defval, name, typed_expr, %Parser.Loc{} = loc}, env) do
     type = extract_expr_type(typed_expr)
     Map.put(env, name, %{type: type, loc: loc, kind: :variable})
+  end
+
+  # Typed AST value definition: {:defval, name, typed_expr, type}
+  defp extract_definition({:defval, name, _typed_expr, type}, env) when is_atom(type) or is_tuple(type) do
+    Map.put(env, name, %{type: type, loc: nil, kind: :variable})
   end
 
   # Typed AST process: {:process, name, init, handlers, process_type}

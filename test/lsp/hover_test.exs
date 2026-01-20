@@ -14,7 +14,7 @@ defmodule Vaisto.LSP.HoverTest do
 
       (add 1 2)
       """
-      # Hover on 'add' in the call (line 4, col 2)
+      # Go to definition for 'add' in the call (line 4, col 2)
       assert {:ok, loc} = Hover.get_definition(source, 4, 2)
       assert loc.line == 1
       assert loc.col == 7  # 'add' starts at col 7 in defn
@@ -27,7 +27,7 @@ defmodule Vaisto.LSP.HoverTest do
       (defn main [] :int
         (helper))
       """
-      # Hover on 'helper' in main (line 4)
+      # Go to definition for 'helper' in main (line 4)
       assert {:ok, loc} = Hover.get_definition(source, 4, 4)
       assert loc.line == 1
     end
@@ -38,7 +38,7 @@ defmodule Vaisto.LSP.HoverTest do
 
       (Ok 42)
       """
-      # Hover on 'Ok' (line 3)
+      # Go to definition for 'Ok' (line 3)
       assert {:ok, loc} = Hover.get_definition(source, 3, 2)
       assert loc.line == 1
     end
@@ -50,14 +50,14 @@ defmodule Vaisto.LSP.HoverTest do
 
       (spawn counter 0)
       """
-      # Hover on 'counter' in spawn (line 4)
+      # Go to definition for 'counter' in spawn (line 4)
       assert {:ok, loc} = Hover.get_definition(source, 4, 8)
       assert loc.line == 1
     end
 
     test "finds variable definition in let binding" do
       source = "(let [x 42] (+ x 1))"
-      # Hover on 'x' in the body (col 16)
+      # Go to definition for 'x' in the body (col 16)
       assert {:ok, loc} = Hover.get_definition(source, 1, 16)
       # x is defined at col 7
       assert loc.col == 7
@@ -65,7 +65,7 @@ defmodule Vaisto.LSP.HoverTest do
 
     test "finds parameter definition in function" do
       source = "(defn double [n :int] :int (+ n n))"
-      # Hover on first 'n' in body (around col 31)
+      # Go to definition for first 'n' in body (around col 31)
       assert {:ok, loc} = Hover.get_definition(source, 1, 31)
       # n is defined in params at col 15
       assert loc.col == 15
