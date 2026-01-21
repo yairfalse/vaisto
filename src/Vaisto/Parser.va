@@ -107,16 +107,15 @@
     ; Empty input - error
     [[] (erlang/error {:unclosed-delimiter kind loc})]
 
-    ; Found closing delimiter
-    [[{closer _} | rest]
-      (let [items (lists/reverse acc)]
-        {rest (finalize-delimited items loc kind)})]
-
-    ; Parse one item, continue
-    [_
-      (match (parse-expr tokens)
-        [{remaining item}
-          (parse-delimited remaining (cons item acc) closer loc kind)])]))
+    ; Check for closing delimiter
+    [[tok | rest]
+      (if (is-closer? tok closer)
+        (let [items (lists/reverse acc)]
+          {rest (finalize-delimited items loc kind)})
+        ; Not a closer - parse as expression
+        (match (parse-expr tokens)
+          [{remaining item}
+            (parse-delimited remaining (cons item acc) closer loc kind)]))]))
 
 ; Finalize based on delimiter type
 (defn finalize-delimited [items loc kind]
@@ -291,6 +290,14 @@
       {:call func (list acc) {:line 0 :col 0}}]))
 
 ; --- Utility Functions ---
+
+; Check if token is a specific closing delimiter
+(defn is-closer? [tok closer]
+  (match tok
+    [{:RParen _} (== closer :RParen)]
+    [{:RBracket _} (== closer :RBracket)]
+    [{:RBrace _} (== closer :RBrace)]
+    [_ false]))
 
 (defn string-to-atom [s]
   (erlang/binary_to_atom s :utf8))

@@ -311,8 +311,9 @@ defmodule Vaisto.CoreEmitter do
 
   # Variables
   # If the variable is a zero-arity user function (defval), call it
+  # If the variable has a function type and is a user function, create a fun reference
   # Otherwise, it's a regular variable reference
-  defp to_core_expr({:var, name, _type}, user_fns, local_vars) do
+  defp to_core_expr({:var, name, type}, user_fns, local_vars) do
     cond do
       # Local variable takes precedence (let binding, function parameter)
       MapSet.member?(local_vars, name) ->
@@ -321,6 +322,20 @@ defmodule Vaisto.CoreEmitter do
       # Zero-arity user function (defval) - call it
       MapSet.member?(user_fns, {name, 0}) ->
         :cerl.c_apply(:cerl.c_fname(name, 0), [])
+
+      # Function reference: variable with function type that's a user function
+      # Create a fun wrapper: fun(Args) -> name(Args) end
+      match?({:fn, _, _}, type) ->
+        {:fn, arg_types, _ret} = type
+        arity = length(arg_types)
+        if MapSet.member?(user_fns, {name, arity}) do
+          # Create wrapper function: fun(X1, X2, ...) -> name(X1, X2, ...) end
+          arg_vars = for i <- 1..arity, do: :cerl.c_var(:"__arg#{i}__")
+          fun_body = :cerl.c_apply(:cerl.c_fname(name, arity), arg_vars)
+          :cerl.c_fun(arg_vars, fun_body)
+        else
+          :cerl.c_var(name)
+        end
 
       # Regular variable
       true ->
