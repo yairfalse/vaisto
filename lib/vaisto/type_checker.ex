@@ -198,16 +198,41 @@ defmodule Vaisto.TypeChecker do
   # If it's in the env (like :state in a handler), it's a variable
   def check(a, env) when is_atom(a) do
     case Map.get(env, a) do
-      nil -> {:ok, {:atom, a}, {:lit, :atom, a}}
-      type -> {:ok, type, {:var, a, type}}
+      nil ->
+        {:ok, {:atom, a}, {:lit, :atom, a}}
+
+      {:fn, params, _ret} = type ->
+        # Function type - check if it's local or module-level
+        if is_local_var?(a, env) do
+          {:ok, type, {:var, a, type}}
+        else
+          # Module-level function - emit fn_ref so emitter can use &name/arity
+          {:ok, type, {:fn_ref, a, length(params), type}}
+        end
+
+      type ->
+        {:ok, type, {:var, a, type}}
     end
   end
 
   # Variable lookup
+  # Distinguishes local variables from module-level function references
   def check({:var, name}, env) do
     case Map.get(env, name) do
-      nil -> {:error, Errors.undefined_variable(name)}
-      type -> {:ok, type, {:var, name, type}}
+      nil ->
+        {:error, Errors.undefined_variable(name)}
+
+      {:fn, params, _ret} = type ->
+        # Function type - check if it's local or module-level
+        if is_local_var?(name, env) do
+          {:ok, type, {:var, name, type}}
+        else
+          # Module-level function - emit fn_ref so emitter can use &name/arity
+          {:ok, type, {:fn_ref, name, length(params), type}}
+        end
+
+      type ->
+        {:ok, type, {:var, name, type}}
     end
   end
 
@@ -366,6 +391,21 @@ defmodule Vaisto.TypeChecker do
         other ->
           {:error, Errors.not_a_list(:length, other)}
       end
+    end
+  end
+
+  # str: variadic string concatenation/conversion
+  # (str arg1 arg2 ...) → string
+  # Converts each argument to string and concatenates them
+  def check({:call, :str, args}, env) when is_list(args) and length(args) > 0 do
+    # Type check all arguments - str accepts any type
+    results = Enum.map(args, &check(&1, env))
+
+    case Enum.find(results, &match?({:error, _}, &1)) do
+      {:error, _} = err -> err
+      nil ->
+        typed_args = Enum.map(results, fn {:ok, _, ast} -> ast end)
+        {:ok, :string, {:call, :str, typed_args, :string}}
     end
   end
 
@@ -616,6 +656,25 @@ defmodule Vaisto.TypeChecker do
   end
 
   # Function call (general case)
+  # If func is a local variable holding a function, emit {:apply, var, args, type}
+  # If func is a module-level function, emit {:call, name, args, type}
+  def check({:call, func, args}, env) when is_atom(func) do
+    with {:ok, func_type} <- lookup_function(func, env),
+         {:ok, arg_types, typed_args} <- check_args(args, env),
+         {:ok, ret_type} <- unify_call(func_type, arg_types) do
+      # Check if this is a local variable (function parameter or let-binding)
+      # vs a module-level defn. Local vars have {:fn, ...} type directly in env.
+      # We check if it's a "local" by seeing if it came from :__local_vars__
+      if is_local_var?(func, env) do
+        # Local function variable - needs f.(args) syntax in Elixir
+        {:ok, ret_type, {:apply, {:var, func, func_type}, typed_args, ret_type}}
+      else
+        # Module-level function - uses func(args) syntax
+        {:ok, ret_type, {:call, func, typed_args, ret_type}}
+      end
+    end
+  end
+
   def check({:call, func, args}, env) do
     with {:ok, func_type} <- lookup_function(func, env),
          {:ok, arg_types, typed_args} <- check_args(args, env),
@@ -701,7 +760,11 @@ defmodule Vaisto.TypeChecker do
 
     # Add the function itself to env for recursion
     self_type = {:fn, param_types, declared_ret_type}
-    extended_env = env |> Map.merge(param_env) |> Map.put(name, self_type)
+    # Mark parameters as local vars so they use f.(x) syntax if called as functions
+    extended_env = env
+      |> Map.merge(param_env)
+      |> Map.put(name, self_type)
+      |> then(fn e -> Enum.reduce(param_names, e, &add_local_var(&2, &1)) end)
 
     case check(body, extended_env) do
       {:ok, inferred_ret_type, typed_body} ->
@@ -1080,6 +1143,18 @@ defmodule Vaisto.TypeChecker do
     end
   end
 
+  # Check if a name is a local variable (parameter or let-bound) vs module-level
+  defp is_local_var?(name, env) do
+    local_vars = Map.get(env, :__local_vars__, MapSet.new())
+    MapSet.member?(local_vars, name)
+  end
+
+  # Add a name to the local vars set
+  defp add_local_var(env, name) do
+    local_vars = Map.get(env, :__local_vars__, MapSet.new())
+    Map.put(env, :__local_vars__, MapSet.put(local_vars, name))
+  end
+
   defp check_bindings([], env, acc) do
     {:ok, env, Enum.reverse(acc)}
   end
@@ -1088,7 +1163,9 @@ defmodule Vaisto.TypeChecker do
   defp check_bindings([{name, expr} | rest], env, acc) when is_atom(name) do
     case check(expr, env) do
       {:ok, type, typed_expr} ->
-        extended_env = Map.put(env, name, type)
+        extended_env = env
+          |> Map.put(name, type)
+          |> add_local_var(name)
         check_bindings(rest, extended_env, [{name, typed_expr, type} | acc])
       error -> error
     end
@@ -1106,6 +1183,32 @@ defmodule Vaisto.TypeChecker do
         # Type the pattern
         typed_pattern = type_pattern({:tuple_pattern, elements}, :any, env)
         check_bindings(rest, extended_env, [{typed_pattern, typed_expr, :any} | acc])
+      error -> error
+    end
+  end
+
+  # Cons pattern destructuring in let: (let [[head | tail] expr] ...)
+  # Represented as {:bracket, {:cons, head, tail}}
+  defp check_bindings([{{:bracket, {:cons, head, tail}}, expr} | rest], env, acc) do
+    case check(expr, env) do
+      {:ok, {:list, elem_type}, typed_expr} ->
+        # head gets elem_type, tail gets list type
+        extended_env = env
+          |> Map.put(head, elem_type)
+          |> add_local_var(head)
+          |> Map.put(tail, {:list, elem_type})
+          |> add_local_var(tail)
+        typed_pattern = {:cons_pattern, head, tail, {:list, elem_type}}
+        check_bindings(rest, extended_env, [{typed_pattern, typed_expr, {:list, elem_type}} | acc])
+      {:ok, type, typed_expr} ->
+        # Expression type not a list - use :any for elements
+        extended_env = env
+          |> Map.put(head, :any)
+          |> add_local_var(head)
+          |> Map.put(tail, {:list, :any})
+          |> add_local_var(tail)
+        typed_pattern = {:cons_pattern, head, tail, type}
+        check_bindings(rest, extended_env, [{typed_pattern, typed_expr, type} | acc])
       error -> error
     end
   end
@@ -1289,6 +1392,11 @@ defmodule Vaisto.TypeChecker do
     Enum.flat_map(elements, fn el -> extract_pattern_bindings(el, :any, env) end)
   end
 
+  # Tuple from parser with location info: {:tuple, elements, loc}
+  defp extract_pattern_bindings({:tuple, elements, %Vaisto.Parser.Loc{}}, _type, env) do
+    Enum.flat_map(elements, fn el -> extract_pattern_bindings(el, :any, env) end)
+  end
+
   # Cons pattern: {:cons, head, tail} - extract bindings from head and tail
   defp extract_pattern_bindings({:cons, head, tail}, _type, env) do
     extract_pattern_bindings(head, :any, env) ++ extract_pattern_bindings(tail, :any, env)
@@ -1385,6 +1493,12 @@ defmodule Vaisto.TypeChecker do
 
   # Tuple pattern: {:tuple_pattern, elements} → {:tuple_pattern, typed_elements, :any}
   defp type_pattern({:tuple_pattern, elements}, _type, env) do
+    typed_elements = Enum.map(elements, fn el -> type_pattern(el, :any, env) end)
+    {:tuple_pattern, typed_elements, :any}
+  end
+
+  # Tuple from parser with location info: {:tuple, elements, loc}
+  defp type_pattern({:tuple, elements, %Vaisto.Parser.Loc{}}, _type, env) do
     typed_elements = Enum.map(elements, fn el -> type_pattern(el, :any, env) end)
     {:tuple_pattern, typed_elements, :any}
   end

@@ -73,8 +73,8 @@
 
 ; --- Main Entry Points ---
 
-; Compile options for compile:forms (typed as List :any to allow mixed atoms)
-(defn compile-opts [] (List :any)
+; Compile options for compile:forms
+(defn compile-opts []
   (cons :from_core (cons :binary (cons :return_errors (list)))))
 
 ; Compile typed AST to BEAM bytecode
@@ -261,7 +261,7 @@
         [(sets/is_element {name 0} user-fns)
           (cerl/c_apply (cerl/c_fname name 0) (list))]
         ; Regular variable
-        [true (cerl/c_var name)])]
+        [:else (cerl/c_var name)])]
 
     ; --- Data Structures ---
     [{:list elements _type}
@@ -366,8 +366,8 @@
         (list (emit-expr lst user-fns local-vars)))]
 
     ; Record construction: (RecordName args...) where type is {:record RecordName ...}
-    [{:call name args {:record name _fields}}
-      (let [elements (cons (cerl/c_atom name)
+    [{:call ctor-name args {:record _rec-name _fields}}
+      (let [elements (cons (cerl/c_atom ctor-name)
                            (lists/map (fn [a] (emit-expr a user-fns local-vars)) args))]
         (cerl/c_tuple elements))]
 
@@ -405,7 +405,7 @@
       [(sets/is_element {func arity} user-fns)
         (cerl/c_apply (cerl/c_fname func arity) arg-cores)]
       ; External (erlang BIF)
-      [true
+      [:else
         (cerl/c_call (cerl/c_atom :erlang) (cerl/c_atom func) arg-cores)])))
 
 ; --- Let Binding Emission ---
@@ -632,7 +632,11 @@
       (lists/append (extract-pattern-vars head) (extract-pattern-vars tail))]
     [{:pattern _name args _type}
       (lists/flatten (lists/map extract-pattern-vars args))]
-    [a (if (and (is-atom? a) (not (== a :_))) (list a) (list))]))
+    [a (if (is-atom? a)
+         (if (not (== a :_))
+           (list a)
+           (list))
+         (list))]))
 
 ; --- Helper Functions ---
 

@@ -39,6 +39,12 @@ defmodule Vaisto.Emitter do
     Macro.var(name, nil)
   end
 
+  # Function reference - module-level function passed as value
+  # Becomes &name/arity in Elixir
+  def to_elixir({:fn_ref, name, arity, _type}) do
+    {:&, [], [{:/, [], [{name, [], nil}, arity]}]}
+  end
+
   # If expression → Elixir if
   def to_elixir({:if, condition, then_branch, else_branch, _type}) do
     cond_ast = to_elixir(condition)
@@ -151,11 +157,27 @@ defmodule Vaisto.Emitter do
     quote do: length(unquote(list_ast))
   end
 
+  # str: convert args to strings and concatenate
+  # Uses Kernel.to_string/1 for conversion and Enum.join for concatenation
+  def to_elixir({:call, :str, args, _type}) do
+    arg_asts = Enum.map(args, &to_elixir/1)
+    # Build: Enum.map_join([arg1, arg2, ...], "", &to_string/1)
+    # Or simpler: to_string(arg1) <> to_string(arg2) <> ...
+    # Using Enum.join for cleaner generated code
+    quote do
+      Enum.map_join(unquote(arg_asts), "", &Kernel.to_string/1)
+    end
+  end
+
   # --- Anonymous functions ---
 
   # Anonymous function: (fn [x] body) → Elixir fn
+  # Params can be atoms (:x) or typed vars ({:var, :x, :any})
   def to_elixir({:fn, params, body, _type}) do
-    param_vars = Enum.map(params, &Macro.var(&1, nil))
+    param_vars = Enum.map(params, fn
+      {:var, name, _type} -> Macro.var(name, nil)
+      name when is_atom(name) -> Macro.var(name, nil)
+    end)
     body_ast = to_elixir(body)
 
     {:fn, [],
@@ -350,6 +372,15 @@ defmodule Vaisto.Emitter do
     nil
   end
 
+  # Apply: calling a function stored in a variable (f.(args) syntax)
+  def to_elixir({:apply, func_var, args, _type}) do
+    func_ast = to_elixir(func_var)
+    args_ast = Enum.map(args, &to_elixir/1)
+    # In Elixir, calling a fn variable uses: f.(arg1, arg2)
+    # AST: {{:., [], [f]}, [], [arg1, arg2]}
+    {{:., [], [func_ast]}, [], args_ast}
+  end
+
   # Generic function call
   def to_elixir({:call, func, args, _type}) do
     {func, [], Enum.map(args, &to_elixir/1)}
@@ -468,6 +499,34 @@ defmodule Vaisto.Emitter do
     end
   end
 
+  # Single defn compilation - place function in module with main as entry point
+  def compile({:defn, name, _params, _body, _type} = defn_ast, module_name) do
+    elixir_ast = to_elixir(defn_ast)
+
+    # If the function is named "main", use it directly. Otherwise add a main that calls it.
+    module_ast = if name == :main do
+      quote do
+        defmodule unquote(module_name) do
+          unquote(elixir_ast)
+        end
+      end
+    else
+      quote do
+        defmodule unquote(module_name) do
+          unquote(elixir_ast)
+          def main, do: unquote(name)()
+        end
+      end
+    end
+
+    try do
+      [{^module_name, bytecode}] = Code.compile_quoted(module_ast)
+      {:ok, module_name, bytecode}
+    rescue
+      e -> {:error, Exception.message(e)}
+    end
+  end
+
   # Single expression compilation - wrap in module
   def compile(typed_ast, module_name) do
     elixir_ast = to_elixir(typed_ast)
@@ -576,7 +635,31 @@ defmodule Vaisto.Emitter do
   end
 
   defp emit_pattern({:lit, :atom, a}), do: a
+  defp emit_pattern({:lit, :int, n}), do: n
   defp emit_pattern({:atom, a}), do: a  # Wrapped atom from parser
+
+  # Empty list pattern: [] → []
+  defp emit_pattern({:list_pattern, [], _type}), do: []
+  defp emit_pattern({:list, [], _type}), do: []
+
+  # Cons pattern: [h | t] → [h | t]
+  defp emit_pattern({:cons_pattern, head, tail, _type}) do
+    head_ast = emit_pattern(head)
+    tail_ast = emit_pattern(tail)
+    [{:|, [], [head_ast, tail_ast]}]
+  end
+  defp emit_pattern({:cons, head, tail, _type}) do
+    head_ast = emit_pattern(head)
+    tail_ast = emit_pattern(tail)
+    [{:|, [], [head_ast, tail_ast]}]
+  end
+
+  # Tuple pattern: {a, b, c} → {a, b, c}
+  defp emit_pattern({:tuple_pattern, elements, _type}) do
+    pattern_elements = Enum.map(elements, &emit_pattern/1)
+    {:{}, [], pattern_elements}
+  end
+
   # Underscore is a wildcard pattern, not a literal atom
   defp emit_pattern(:_), do: Macro.var(:_, nil)
   defp emit_pattern(a) when is_atom(a), do: a

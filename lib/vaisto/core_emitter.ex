@@ -342,6 +342,20 @@ defmodule Vaisto.CoreEmitter do
 
   # Variables
   # If the variable is a zero-arity user function (defval), call it
+  # Explicit function reference - module-level function passed as value
+  # Creates a wrapper function: fun(X1, ...) -> name(X1, ...) end
+  defp to_core_expr({:fn_ref, name, arity, _type}, user_fns, _local_vars) do
+    if MapSet.member?(user_fns, {name, arity}) do
+      # Create wrapper function: fun(X1, X2, ...) -> name(X1, X2, ...) end
+      arg_vars = for i <- 1..arity, do: :cerl.c_var(:"__arg#{i}__")
+      fun_body = :cerl.c_apply(:cerl.c_fname(name, arity), arg_vars)
+      :cerl.c_fun(arg_vars, fun_body)
+    else
+      # External function - just reference by name
+      :cerl.c_fname(name, arity)
+    end
+  end
+
   # If the variable has a function type and is a user function, create a fun reference
   # Otherwise, it's a regular variable reference
   defp to_core_expr({:var, name, type}, user_fns, local_vars) do
@@ -559,6 +573,73 @@ defmodule Vaisto.CoreEmitter do
     )
   end
 
+  # str: string concatenation/conversion
+  # Converts each arg to string and concatenates using erlang:iolist_to_binary/1
+  defp to_core_expr({:call, :str, args, _type}, user_fns, local_vars) do
+    # Convert each arg - strings pass through, others get converted
+    # Build: erlang:iolist_to_binary([convert(a1), convert(a2), ...])
+    # Where convert uses a case to handle strings vs other types
+    converted_args = Enum.map(args, fn arg ->
+      arg_core = to_core_expr(arg, user_fns, local_vars)
+      arg_var = :cerl.c_var(:__str_arg__)
+
+      # case Arg of
+      #   X when is_binary(X) -> X;
+      #   X when is_atom(X) -> atom_to_binary(X);
+      #   X when is_integer(X) -> integer_to_binary(X);
+      #   X when is_float(X) -> float_to_binary(X);
+      #   X -> io_lib:format("~p", [X])
+      # end
+      binary_clause = :cerl.c_clause(
+        [arg_var],
+        :cerl.c_call(:cerl.c_atom(:erlang), :cerl.c_atom(:is_binary), [arg_var]),
+        arg_var
+      )
+      atom_clause = :cerl.c_clause(
+        [arg_var],
+        :cerl.c_call(:cerl.c_atom(:erlang), :cerl.c_atom(:is_atom), [arg_var]),
+        :cerl.c_call(:cerl.c_atom(:erlang), :cerl.c_atom(:atom_to_binary), [arg_var])
+      )
+      integer_clause = :cerl.c_clause(
+        [arg_var],
+        :cerl.c_call(:cerl.c_atom(:erlang), :cerl.c_atom(:is_integer), [arg_var]),
+        :cerl.c_call(:cerl.c_atom(:erlang), :cerl.c_atom(:integer_to_binary), [arg_var])
+      )
+      float_clause = :cerl.c_clause(
+        [arg_var],
+        :cerl.c_call(:cerl.c_atom(:erlang), :cerl.c_atom(:is_float), [arg_var]),
+        :cerl.c_call(:cerl.c_atom(:erlang), :cerl.c_atom(:float_to_binary), [arg_var])
+      )
+      fallback_clause = :cerl.c_clause(
+        [arg_var],
+        :cerl.c_atom(true),
+        :cerl.c_call(
+          :cerl.c_atom(:erlang),
+          :cerl.c_atom(:iolist_to_binary),
+          [:cerl.c_call(
+            :cerl.c_atom(:io_lib),
+            :cerl.c_atom(:format),
+            [:cerl.c_string(~c"~p"), :cerl.c_cons(arg_var, :cerl.c_nil())]
+          )]
+        )
+      )
+
+      :cerl.c_case(arg_core, [binary_clause, atom_clause, integer_clause, float_clause, fallback_clause])
+    end)
+
+    # Now concatenate all the converted strings
+    # Build: erlang:iolist_to_binary([s1, s2, s3, ...])
+    list_of_strings = Enum.reduce(Enum.reverse(converted_args), :cerl.c_nil(), fn elem, acc ->
+      :cerl.c_cons(elem, acc)
+    end)
+
+    :cerl.c_call(
+      :cerl.c_atom(:erlang),
+      :cerl.c_atom(:iolist_to_binary),
+      [list_of_strings]
+    )
+  end
+
   # --- Send operations ---
 
   # Safe send (!) and unsafe send (!!) both compile to erlang:!/2
@@ -687,16 +768,28 @@ defmodule Vaisto.CoreEmitter do
     )
   end
 
-  # fold: lists:foldl/3 with folder function (named function)
+  # Arithmetic/comparison operators that are BIFs, not user functions
+  @bif_operators [:+, :-, :*, :/, :==, :!=, :<, :>, :<=, :>=]
+
+  # fold: lists:foldl/3 with folder function (named function or BIF operator)
   defp to_core_expr({:call, :fold, [func_name, init_expr, list_expr], _type}, user_fns, local_vars) when is_atom(func_name) do
     init_core = to_core_expr(init_expr, user_fns, local_vars)
     list_core = to_core_expr(list_expr, user_fns, local_vars)
-    func_ref = :cerl.c_fname(func_name, 2)
     # lists:foldl expects fun(Elem, Acc) but we defined func(Acc, Elem)
     # so we need to swap the arguments
     elem_var = :cerl.c_var(:__fold_elem__)
     acc_var = :cerl.c_var(:__fold_acc__)
-    fun_body = :cerl.c_apply(func_ref, [acc_var, elem_var])
+
+    # Create the fold function body depending on whether it's a BIF or user function
+    fun_body = if func_name in @bif_operators do
+      # BIF operators - call erlang:op(acc, elem)
+      :cerl.c_call(:cerl.c_atom(:erlang), :cerl.c_atom(func_name), [acc_var, elem_var])
+    else
+      # User-defined function - use c_fname
+      func_ref = :cerl.c_fname(func_name, 2)
+      :cerl.c_apply(func_ref, [acc_var, elem_var])
+    end
+
     fold_fun = :cerl.c_fun([elem_var, acc_var], fun_body)
     :cerl.c_call(
       :cerl.c_atom(:lists),
@@ -820,6 +913,14 @@ defmodule Vaisto.CoreEmitter do
     end
   end
 
+  # Apply: calling a function stored in a variable
+  # The type checker emits {:apply, {:var, name, type}, args, ret_type} for local fn vars
+  defp to_core_expr({:apply, {:var, func_name, _func_type}, args, _type}, user_fns, local_vars) do
+    arg_cores = Enum.map(args, &to_core_expr(&1, user_fns, local_vars))
+    # Use c_apply with the variable - this invokes the function value stored in the variable
+    :cerl.c_apply(:cerl.c_var(func_name), arg_cores)
+  end
+
   # User-defined function call → local apply
   # This clause handles calls that didn't match any specialized patterns above
   defp to_core_expr({:call, func, args, _type}, user_fns, local_vars) do
@@ -879,6 +980,14 @@ defmodule Vaisto.CoreEmitter do
     :cerl.c_case(value, [clause])
   end
 
+  # Cons pattern destructuring: (let [[head | tail] expr] ...)
+  defp emit_let_binding({{:cons_pattern, head, tail, _type}, expr, _expr_type}, body, user_fns, local_vars) do
+    value = to_core_expr(expr, user_fns, local_vars)
+    core_pattern = :cerl.c_cons(:cerl.c_var(head), :cerl.c_var(tail))
+    clause = :cerl.c_clause([core_pattern], body)
+    :cerl.c_case(value, [clause])
+  end
+
   # --- Pattern transformation ---
 
   # Record pattern → tuple pattern {:record_name, var1, var2, ...}
@@ -906,6 +1015,12 @@ defmodule Vaisto.CoreEmitter do
 
   # Tuple pattern: {:tuple_pattern, elements, type}
   defp to_core_pattern({:tuple_pattern, elements, _type}) do
+    pattern_elements = Enum.map(elements, &to_core_pattern/1)
+    :cerl.c_tuple(pattern_elements)
+  end
+
+  # Tuple pattern without type annotation (from anonymous function patterns)
+  defp to_core_pattern({:tuple_pattern, elements}) when is_list(elements) do
     pattern_elements = Enum.map(elements, &to_core_pattern/1)
     :cerl.c_tuple(pattern_elements)
   end

@@ -36,7 +36,7 @@
 ;   subst       - Current substitution map
 ;   env         - Type environment (var -> type/scheme)
 
-(deftype Context [counter :int row-counter :int subst :any env :any])
+(deftype Context [counter :num row-counter :num subst :any env :any])
 
 ; --- Context Creation ---
 
