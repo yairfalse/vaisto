@@ -76,8 +76,6 @@ defmodule Vaisto.CoreBackendParityTest do
       assert {:ok, "with spaces"} = run_both("\"with spaces\"", :string_spaces)
     end
 
-    # Unit () is not implemented yet
-    @tag :skip
     test "unit" do
       assert {:ok, nil} = run_both("()", :unit_lit)
     end

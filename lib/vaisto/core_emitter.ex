@@ -323,6 +323,7 @@ defmodule Vaisto.CoreEmitter do
   defp to_core_expr({:lit, :atom, a}, _user_fns, _local_vars), do: :cerl.c_atom(a)
   defp to_core_expr({:lit, :bool, b}, _user_fns, _local_vars), do: :cerl.c_atom(b)
   defp to_core_expr({:lit, :string, s}, _user_fns, _local_vars), do: :cerl.c_binary(string_to_binary_segments(s))
+  defp to_core_expr({:lit, :unit, _}, _user_fns, _local_vars), do: :cerl.c_atom(nil)
 
   # List literal
   defp to_core_expr({:list, elements, _type}, user_fns, local_vars) do

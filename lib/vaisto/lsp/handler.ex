@@ -5,7 +5,7 @@ defmodule Vaisto.LSP.Handler do
   Dispatches to appropriate handlers based on method name.
   """
 
-  alias Vaisto.LSP.{Protocol, Hover}
+  alias Vaisto.LSP.{Protocol, Hover, Completion, SignatureHelp, References}
   alias Vaisto.{Parser, TypeChecker}
 
   @doc """
@@ -49,6 +49,21 @@ defmodule Vaisto.LSP.Handler do
       "textDocument/documentSymbol" ->
         handle_document_symbol(id, params, state)
 
+      "textDocument/completion" ->
+        handle_completion(id, params, state)
+
+      "textDocument/signatureHelp" ->
+        handle_signature_help(id, params, state)
+
+      "textDocument/references" ->
+        handle_references(id, params, state)
+
+      "textDocument/prepareRename" ->
+        handle_prepare_rename(id, params, state)
+
+      "textDocument/rename" ->
+        handle_rename(id, params, state)
+
       _ ->
         # Unknown method - return method not found for requests, ignore notifications
         if id do
@@ -74,7 +89,19 @@ defmodule Vaisto.LSP.Handler do
       },
       "hoverProvider" => true,
       "definitionProvider" => true,
-      "documentSymbolProvider" => true
+      "documentSymbolProvider" => true,
+      "completionProvider" => %{
+        "triggerCharacters" => ["(", ":", " "],
+        "resolveProvider" => false
+      },
+      "signatureHelpProvider" => %{
+        "triggerCharacters" => [" ", "("],
+        "retriggerCharacters" => [" "]
+      },
+      "referencesProvider" => true,
+      "renameProvider" => %{
+        "prepareProvider" => true
+      }
     }
 
     result = %{
@@ -318,6 +345,114 @@ defmodule Vaisto.LSP.Handler do
         "end" => %{"line" => line, "character" => loc.col - 1 + String.length(to_string(name))}
       }
     }
+  end
+
+  # ============================================================================
+  # Completion
+  # ============================================================================
+
+  defp handle_completion(id, %{"textDocument" => doc, "position" => pos}, state) do
+    uri = doc["uri"]
+    text = state.documents[uri]
+
+    if text do
+      line = pos["line"] + 1
+      col = pos["character"] + 1
+      file = uri_to_path(uri)
+
+      completions = Completion.get_completions(text, line, col, file)
+      {Protocol.response(id, completions), state}
+    else
+      {Protocol.response(id, []), state}
+    end
+  end
+
+  # ============================================================================
+  # Signature Help
+  # ============================================================================
+
+  defp handle_signature_help(id, %{"textDocument" => doc, "position" => pos}, state) do
+    uri = doc["uri"]
+    text = state.documents[uri]
+
+    if text do
+      line = pos["line"] + 1
+      col = pos["character"] + 1
+
+      result = SignatureHelp.get_signature_help(text, line, col)
+      {Protocol.response(id, result), state}
+    else
+      {Protocol.response(id, nil), state}
+    end
+  end
+
+  # ============================================================================
+  # References
+  # ============================================================================
+
+  defp handle_references(id, %{"textDocument" => doc, "position" => pos}, state) do
+    uri = doc["uri"]
+    text = state.documents[uri]
+
+    if text do
+      line = pos["line"] + 1
+      col = pos["character"] + 1
+
+      # Find references in all open documents
+      references = References.find_references(text, line, col, uri, state.documents)
+      {Protocol.response(id, references), state}
+    else
+      {Protocol.response(id, []), state}
+    end
+  end
+
+  # ============================================================================
+  # Rename
+  # ============================================================================
+
+  defp handle_prepare_rename(id, %{"textDocument" => doc, "position" => pos}, state) do
+    uri = doc["uri"]
+    text = state.documents[uri]
+
+    if text do
+      line = pos["line"] + 1
+      col = pos["character"] + 1
+
+      case References.get_symbol_at(text, line, col) do
+        {:ok, symbol, range} ->
+          result = %{
+            "range" => range,
+            "placeholder" => symbol
+          }
+          {Protocol.response(id, result), state}
+
+        :not_found ->
+          {Protocol.response(id, nil), state}
+      end
+    else
+      {Protocol.response(id, nil), state}
+    end
+  end
+
+  defp handle_rename(id, %{"textDocument" => doc, "position" => pos, "newName" => new_name}, state) do
+    uri = doc["uri"]
+    text = state.documents[uri]
+
+    if text do
+      line = pos["line"] + 1
+      col = pos["character"] + 1
+
+      # Get all references and create edit operations
+      case References.prepare_rename(text, line, col, uri, state.documents, new_name) do
+        {:ok, workspace_edit} ->
+          {Protocol.response(id, workspace_edit), state}
+
+        {:error, reason} ->
+          {Protocol.error_response(id, -32602, reason), state}
+      end
+    else
+      {Protocol.error_response(id, -32602, "Document not found"), state}
+    end
   end
 
   # ============================================================================

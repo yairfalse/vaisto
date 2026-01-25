@@ -27,6 +27,7 @@ defmodule Vaisto.Emitter do
   def to_elixir({:lit, :bool, b}), do: b
   def to_elixir({:lit, :atom, a}), do: a
   def to_elixir({:lit, :string, s}), do: s
+  def to_elixir({:lit, :unit, _}), do: nil
 
   # List literal
   def to_elixir({:list, elements, _type}) do

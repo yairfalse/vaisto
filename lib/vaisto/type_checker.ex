@@ -166,6 +166,8 @@ defmodule Vaisto.TypeChecker do
   def check(true, _env), do: {:ok, :bool, {:lit, :bool, true}}
   def check(false, _env), do: {:ok, :bool, {:lit, :bool, false}}
   def check({:string, s}, _env), do: {:ok, :string, {:lit, :string, s}}
+  def check({:unit, _loc}, _env), do: {:ok, :unit, {:lit, :unit, nil}}
+  def check({:unit}, _env), do: {:ok, :unit, {:lit, :unit, nil}}
 
   # List literal: (list 1 2 3) → homogeneous list
   def check({:list, []}, _env), do: {:ok, {:list, :any}, {:list, [], {:list, :any}}}
