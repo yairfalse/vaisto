@@ -7,9 +7,21 @@ defmodule Vaisto.Build do
   - Building dependency graph
   - Topologically sorting for correct compilation order
   - Compiling modules and generating .vsi interface files
+
+  Module names are inferred from file paths:
+  - src/Vaisto/Lexer.va → Elixir.Vaisto.Lexer
+  - std/List.va → Elixir.Std.List
   """
 
   alias Vaisto.{Parser, TypeChecker, CoreEmitter, Emitter, Interface}
+
+  # Source root configuration: {path_prefix, module_prefix}
+  # Files under these directories get their module name derived from the path
+  @default_source_roots [
+    {"src/", ""},       # src/Foo/Bar.va → Foo.Bar
+    {"lib/", ""},       # lib/Foo/Bar.va → Foo.Bar
+    {"std/", "Std."}    # std/List.va → Std.List
+  ]
 
   @doc """
   Build all .va files in a directory.
@@ -18,6 +30,7 @@ defmodule Vaisto.Build do
     - :output_dir - where to write .beam and .vsi files (default: same as source)
     - :backend - :core or :elixir (default: :core)
     - :prelude - prelude source to prepend (default: nil)
+    - :source_roots - list of {path_prefix, module_prefix} tuples for module name inference
 
   Returns {:ok, results} or {:error, reason}
   """
@@ -25,11 +38,12 @@ defmodule Vaisto.Build do
     output_dir = Keyword.get(opts, :output_dir, source_dir)
     backend = Keyword.get(opts, :backend, :core)
     prelude = Keyword.get(opts, :prelude)
+    source_roots = Keyword.get(opts, :source_roots, @default_source_roots)
 
     with {:ok, files} <- scan_files(source_dir),
-         {:ok, graph} <- build_dependency_graph(files),
+         {:ok, graph} <- build_dependency_graph(files, source_roots),
          {:ok, order} <- topological_sort(graph) do
-      compile_in_order(order, files, output_dir, backend, prelude)
+      compile_in_order(order, files, output_dir, backend, prelude, source_roots)
     end
   end
 
@@ -42,6 +56,7 @@ defmodule Vaisto.Build do
     - :prelude - prelude source to prepend (default: nil)
     - :search_paths - directories to search for .vsi interfaces (default: [output_dir])
     - :auto_import - automatically load .vsi files for imports (default: true)
+    - :source_roots - list of {path_prefix, module_prefix} tuples for module name inference
 
   The import_env should contain additional types from imported modules.
   """
@@ -51,6 +66,7 @@ defmodule Vaisto.Build do
     prelude = Keyword.get(opts, :prelude)
     search_paths = Keyword.get(opts, :search_paths, [output_dir])
     auto_import = Keyword.get(opts, :auto_import, true)
+    source_roots = Keyword.get(opts, :source_roots, @default_source_roots)
 
     case File.read(source_path) do
       {:ok, source} ->
@@ -60,9 +76,28 @@ defmodule Vaisto.Build do
         # Parse
         ast = Parser.parse(full_source, file: source_path)
 
-        # Extract module name and imports
-        {module_name, imports} = Interface.extract_declarations(ast)
-        module_name = module_name || infer_module_name(source_path)
+        # Extract declared module name and imports
+        {declared_ns, imports} = Interface.extract_declarations(ast)
+
+        # Infer module name from path
+        inferred_name = infer_module_name(source_path, source_roots)
+
+        # Validate: if (ns ...) is declared, it must match the inferred name (without Elixir. prefix)
+        module_name = case declared_ns do
+          nil ->
+            inferred_name
+
+          _ ->
+            # declared_ns may or may not have Elixir. prefix - normalize both for comparison
+            declared_str = to_string(declared_ns) |> String.replace_prefix("Elixir.", "")
+            inferred_str = to_string(inferred_name) |> String.replace_prefix("Elixir.", "")
+
+            if declared_str == inferred_str do
+              inferred_name
+            else
+              raise "Module name mismatch in #{source_path}: (ns #{declared_ns}) doesn't match inferred name #{inferred_name}"
+            end
+        end
 
         # Load interfaces for imported modules (if auto_import is enabled)
         auto_import_env = if auto_import do
@@ -86,7 +121,7 @@ defmodule Vaisto.Build do
             end
 
             case result do
-              {:ok, mod, bytecode} ->
+              {:ok, _mod, bytecode} ->
                 # Write .beam
                 beam_path = Path.join(output_dir, "#{module_name}.beam")
                 File.mkdir_p!(Path.dirname(beam_path))
@@ -130,14 +165,15 @@ defmodule Vaisto.Build do
     end
   end
 
-  defp build_dependency_graph(files) do
+  defp build_dependency_graph(files, source_roots) do
     # Parse each file to get (ns) and (import) declarations
     graph = Enum.reduce(files, %{}, fn file, acc ->
       case File.read(file) do
         {:ok, source} ->
           ast = Parser.parse(source, file: file)
-          {module_name, imports} = Interface.extract_declarations(ast)
-          module_name = module_name || infer_module_name(file)
+          {_declared_ns, imports} = Interface.extract_declarations(ast)
+          # Always use inferred module name from path
+          module_name = infer_module_name(file, source_roots)
 
           Map.put(acc, module_name, %{
             file: file,
@@ -202,14 +238,21 @@ defmodule Vaisto.Build do
     do_topological_sort(new_queue, new_in_degree, adjacency, graph, new_result)
   end
 
-  defp compile_in_order(order, _files, output_dir, backend, prelude) do
+  defp compile_in_order(order, _files, output_dir, backend, prelude, source_roots) do
     # Build up import environment as we compile
     {results, _final_env} = Enum.reduce(order, {[], %{}}, fn info, {acc, env} ->
       # Load interfaces for imports
       import_env = load_import_env(info.imports, output_dir)
       merged_env = Map.merge(env, import_env)
 
-      case compile_file(info.file, merged_env, output_dir: output_dir, backend: backend, prelude: prelude) do
+      opts = [
+        output_dir: output_dir,
+        backend: backend,
+        prelude: prelude,
+        source_roots: source_roots
+      ]
+
+      case compile_file(info.file, merged_env, opts) do
         {:ok, result} ->
           # Add this module's exports to env for next modules
           case Interface.load(info.module, [output_dir]) do
@@ -254,13 +297,68 @@ defmodule Vaisto.Build do
     load_import_env(imports, [search_dir])
   end
 
-  defp infer_module_name(file_path) do
-    file_path
-    |> Path.basename(".va")
-    |> String.split(~r/[_\-]/)
-    |> Enum.map(&String.capitalize/1)
-    |> Enum.join()
-    |> String.to_atom()
+  @doc """
+  Infer module name from file path using source root configuration.
+
+  Examples:
+    src/Vaisto/Lexer.va → :"Elixir.Vaisto.Lexer"
+    std/List.va → :"Elixir.Std.List"
+    foo.va → :"Elixir.Foo" (fallback: basename)
+  """
+  def infer_module_name(file_path, source_roots \\ @default_source_roots) do
+    {prefix, relative} = find_root_and_relative(file_path, source_roots)
+
+    module_name = relative
+      |> Path.rootname(".va")
+      |> String.replace("/", ".")
+      |> capitalize_segments()
+
+    # Ensure prefix ends with a dot if non-empty
+    full_prefix = case prefix do
+      "" -> ""
+      p when is_binary(p) ->
+        if String.ends_with?(p, "."), do: p, else: p <> "."
+    end
+
+    :"Elixir.#{full_prefix}#{module_name}"
+  end
+
+  defp find_root_and_relative(path, roots) do
+    # Try each root - check both:
+    # 1. Path starts with root (relative paths)
+    # 2. Path contains /root as a directory component (absolute paths)
+    Enum.find_value(roots, fn {root, prefix} ->
+      root_dir = String.trim_trailing(root, "/")
+
+      cond do
+        # Relative path starting with root
+        String.starts_with?(path, root) ->
+          {prefix, Path.relative_to(path, root)}
+
+        # Absolute path containing /root/
+        String.contains?(path, "/#{root_dir}/") ->
+          # Extract everything after /root/
+          [_before, relative_part] = String.split(path, "/#{root_dir}/", parts: 2)
+          {prefix, relative_part}
+
+        true ->
+          nil
+      end
+    end) || {"", Path.basename(path)}
+  end
+
+  defp capitalize_segments(name) do
+    name
+    |> String.split(".")
+    |> Enum.map(fn segment ->
+      case segment do
+        <<first::utf8, rest::binary>> ->
+          String.upcase(<<first::utf8>>) <> rest
+        "" ->
+          ""
+      end
+    end)
+    |> Enum.join(".")
   end
 
   defp extract_bytecode(bytecode) when is_binary(bytecode), do: bytecode

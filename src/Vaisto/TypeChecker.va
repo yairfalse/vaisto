@@ -6,13 +6,13 @@
 ; 1. Collect all signatures (functions, types)
 ; 2. Type-check bodies with full environment
 
-(ns Elixir.Typechecker)
+(ns Vaisto.TypeChecker)
 
-(import Elixir.Tctypes)
-(import Elixir.Tccore)
-(import Elixir.Tccontext)
-(import Elixir.Tcunify)
-(import Elixir.Tcerrors)
+(import Vaisto.TypeChecker.Types)
+(import Vaisto.TypeChecker.Core)
+(import Vaisto.TypeChecker.Context)
+(import Vaisto.TypeChecker.Unify)
+(import Vaisto.TypeChecker.Errors)
 
 ; Erlang FFI
 (extern maps/get [:any :any :any] :any)
@@ -102,7 +102,7 @@
 (defn check-var [name env]
   (let [lookup (maps/get name env :not-found)]
     (match lookup
-      [:not-found (Err (Elixir.Tcerrors/undefined-variable name))]
+      [:not-found (Err (Vaisto.TypeChecker.Errors/undefined-variable name))]
       [t (Ok #{ :type t :ast {:var name t}})])))
 
 (defn check-compound [expr env]
@@ -169,7 +169,7 @@
     [{:import module alias} (Ok #{ :type :import :ast {:import module alias}})]
 
     ; Unknown
-    [_ (Err (Elixir.Tcerrors/make-error "unknown expression"))]))
+    [_ (Err (Vaisto.TypeChecker.Errors/make-error "unknown expression"))]))
 
 ; --- List Type Checking ---
 
@@ -194,7 +194,7 @@
         [(Ok result)
           (if (types-match? elem-type (. result :type))
             (check-list-elements rest elem-type env (cons (. result :ast) acc))
-            (Err (Elixir.Tcerrors/list-type-mismatch elem-type (. result :type))))]
+            (Err (Vaisto.TypeChecker.Errors/list-type-mismatch elem-type (. result :type))))]
         [(Err err) (Err err)])]))
 
 ; --- Tuple Expression (Erlang Interop) ---
@@ -251,14 +251,14 @@
   (match record-type
     [{:record _name fields}
       (match (lists/keyfind field 1 fields)
-        [false (Err (Elixir.Tcerrors/make-error "field not found"))]
+        [false (Err (Vaisto.TypeChecker.Errors/make-error "field not found"))]
         [{_ field-type} (Ok field-type)])]
     [{:row fields _tail}
       (match (lists/keyfind field 1 fields)
         [false (Ok :any)]  ; Row polymorphism - field might be in tail
         [{_ field-type} (Ok field-type)])]
     [:any (Ok :any)]
-    [_ (Err (Elixir.Tcerrors/make-error "field access requires record type"))]))
+    [_ (Err (Vaisto.TypeChecker.Errors/make-error "field access requires record type"))]))
 
 ; --- If Expression ---
 
@@ -266,7 +266,7 @@
   (match (check-expr cond-expr env)
     [(Ok cond-result)
       (if (not (types-match? :bool (. cond-result :type)))
-        (Err (Elixir.Tcerrors/type-mismatch :bool (. cond-result :type)))
+        (Err (Vaisto.TypeChecker.Errors/type-mismatch :bool (. cond-result :type)))
         (match (check-expr then-expr env)
           [(Ok then-result)
             (match (check-expr else-expr env)
@@ -274,7 +274,7 @@
                 (if (types-match? (. then-result :type) (. else-result :type))
                   (Ok #{ :type (. then-result :type)
                        :ast {:if (. cond-result :ast) (. then-result :ast) (. else-result :ast) (. then-result :type)}})
-                  (Err (Elixir.Tcerrors/branch-type-mismatch (. then-result :type) (. else-result :type))))]
+                  (Err (Vaisto.TypeChecker.Errors/branch-type-mismatch (. then-result :type) (. else-result :type))))]
               [(Err e) (Err e)])]
           [(Err e) (Err e)]))]
     [(Err e) (Err e)]))
@@ -316,7 +316,7 @@
 
 (defn check-match-clauses [clauses expr-type env]
   (match clauses
-    [[] (Err (Elixir.Tcerrors/make-error "empty match"))]
+    [[] (Err (Vaisto.TypeChecker.Errors/make-error "empty match"))]
     [[{pattern body} | rest]
       (match (check-match-clause pattern body expr-type env)
         [(Ok first-result)
@@ -343,7 +343,7 @@
         [(Ok result)
           (if (types-match? expected-type (. result :body-type))
             (check-remaining-clauses rest expr-type expected-type env (cons (. result :clause) acc))
-            (Err (Elixir.Tcerrors/branch-type-mismatch expected-type (. result :body-type))))]
+            (Err (Vaisto.TypeChecker.Errors/branch-type-mismatch expected-type (. result :body-type))))]
         [(Err e) (Err e)])]))
 
 ; --- Do Block ---
@@ -355,7 +355,7 @@
 
 (defn check-do-exprs [exprs env acc]
   (match exprs
-    [[] (Err (Elixir.Tcerrors/make-error "empty do block"))]
+    [[] (Err (Vaisto.TypeChecker.Errors/make-error "empty do block"))]
     [[last-expr]
       (match (check-expr last-expr env)
         [(Ok result)
@@ -413,7 +413,7 @@
 (defn lookup-function [func env]
   (let [result (maps/get func env :not-found)]
     (match result
-      [:not-found (Err (Elixir.Tcerrors/unknown-function func))]
+      [:not-found (Err (Vaisto.TypeChecker.Errors/unknown-function func))]
       [t (Ok t)])))
 
 (defn check-args [args env]
@@ -434,12 +434,12 @@
   (match func-type
     [{:fn expected-args ret-type}
       (if (!= (erlang/length expected-args) (erlang/length arg-types))
-        (Err (Elixir.Tcerrors/arity-mismatch :function (erlang/length expected-args) (erlang/length arg-types)))
+        (Err (Vaisto.TypeChecker.Errors/arity-mismatch :function (erlang/length expected-args) (erlang/length arg-types)))
         (match (check-arg-types expected-args arg-types)
           [(Ok _) (Ok ret-type)]
           [(Err e) (Err e)]))]
     [:any (Ok :any)]
-    [_ (Err (Elixir.Tcerrors/not-a-function :call func-type))]))
+    [_ (Err (Vaisto.TypeChecker.Errors/not-a-function :call func-type))]))
 
 (defn check-arg-types [expected actual]
   (match {expected actual}
@@ -447,8 +447,8 @@
     [{[e | erest] [a | arest]}
       (if (types-match? e a)
         (check-arg-types erest arest)
-        (Err (Elixir.Tcerrors/type-mismatch e a)))]
-    [_ (Err (Elixir.Tcerrors/make-error "arg count mismatch"))]))
+        (Err (Vaisto.TypeChecker.Errors/type-mismatch e a)))]
+    [_ (Err (Vaisto.TypeChecker.Errors/make-error "arg count mismatch"))]))
 
 ; --- Function Definition ---
 
@@ -476,7 +476,7 @@
           (let [func-type {:fn param-types (. body-result :type)}]
             (Ok #{ :type func-type
                  :ast {:defn name param-names (. body-result :ast) func-type}}))
-          (Err (Elixir.Tcerrors/return-type-mismatch ret-type (. body-result :type))))]
+          (Err (Vaisto.TypeChecker.Errors/return-type-mismatch ret-type (. body-result :type))))]
       [(Err e) (Err e)])))
 
 ; --- Type Definition ---

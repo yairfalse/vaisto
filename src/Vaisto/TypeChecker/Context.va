@@ -6,10 +6,10 @@
 ; - Substitution accumulation
 ; - Environment extension for let-polymorphism
 
-(ns Elixir.Tccontext)
+(ns Vaisto.TypeChecker.Context)
 
-(import Elixir.Tccore)
-(import Elixir.Tcunify)
+(import Vaisto.TypeChecker.Core)
+(import Vaisto.TypeChecker.Unify)
 
 ; Erlang FFI
 (extern maps/get [:any :any :any] :any)
@@ -41,7 +41,7 @@
 ; --- Context Creation ---
 
 (defn new-context [env]
-  (Context 0 0 (Elixir.Tccore/empty-subst) env))
+  (Context 0 0 (Vaisto.TypeChecker.Core/empty-subst) env))
 
 (defn new-context-with-primitives []
   (new-context (primitives-env)))
@@ -121,16 +121,16 @@
   (Context
     (. ctx :counter)
     (. ctx :row-counter)
-    (Elixir.Tccore/compose-subst (. ctx :subst) new-subst)
+    (Vaisto.TypeChecker.Core/compose-subst (. ctx :subst) new-subst)
     (. ctx :env)))
 
 (defn apply-ctx [ctx t]
-  (Elixir.Tccore/apply-subst (. ctx :subst) t))
+  (Vaisto.TypeChecker.Core/apply-subst (. ctx :subst) t))
 
 ; --- Unification in Context ---
 
 (defn unify-types [ctx t1 t2]
-  (match (Elixir.Tcunify/unify t1 t2 (. ctx :subst) (. ctx :row-counter))
+  (match (Vaisto.TypeChecker.Unify/unify t1 t2 (. ctx :subst) (. ctx :row-counter))
     [(Ok result)
       (Ok (Context
             (. ctx :counter)
@@ -147,7 +147,7 @@
     [{:forall vars inner-type}
       (let [{fresh-vars new-ctx} (fresh-vars ctx (erlang/length vars))
             subst (make-subst-from-pairs (lists/zip vars fresh-vars))
-            instantiated (Elixir.Tccore/apply-subst subst inner-type)]
+            instantiated (Vaisto.TypeChecker.Core/apply-subst subst inner-type)]
         {instantiated new-ctx})]
     ; Non-polymorphic type, return as-is
     [_ {scheme ctx}]))
@@ -166,7 +166,7 @@
 
 (defn generalize [ctx t]
   (let [applied-type (apply-ctx ctx t)
-        type-vars (Elixir.Tccore/free-vars applied-type)
+        type-vars (Vaisto.TypeChecker.Core/free-vars applied-type)
         env-vars (env-free-vars ctx)
         quantified (sets/to_list (sets/subtract type-vars env-vars))]
     (if (== (erlang/length quantified) 0)
@@ -176,15 +176,15 @@
 (defn env-free-vars [ctx]
   (maps/fold
     (fn [_name type acc]
-      (let [applied (Elixir.Tccore/apply-subst (. ctx :subst) type)]
+      (let [applied (Vaisto.TypeChecker.Core/apply-subst (. ctx :subst) type)]
         (match applied
           [{:forall vars inner}
             ; Exclude forall-bound variables
-            (let [inner-free (Elixir.Tccore/free-vars inner)
+            (let [inner-free (Vaisto.TypeChecker.Core/free-vars inner)
                   bound (sets/from_list vars)]
               (sets/union acc (sets/subtract inner-free bound)))]
           [_
-            (sets/union acc (Elixir.Tccore/free-vars applied))])))
+            (sets/union acc (Vaisto.TypeChecker.Core/free-vars applied))])))
     (sets/new)
     (. ctx :env)))
 

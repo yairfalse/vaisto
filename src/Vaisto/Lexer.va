@@ -1,17 +1,17 @@
 ; Vaisto Self-Hosted Lexer
 ; Transforms source text into a stream of tokens
 ;
-; The lexer maintains position state (line, col) and uses Elixir.Regex
+; The lexer maintains position state (line, col) and uses Std.Regex
 ; for pattern matching. It's designed to produce helpful error messages
 ; with accurate source locations.
 
-(ns Elixir.Lexer)
+(ns Vaisto.Lexer)
 
-(import Elixir.Regex)
-(import Elixir.State)
-(import Elixir.String)
-(import Elixir.File)
-(import Elixir.Lexertypes)
+(import Std.Regex)
+(import Std.State)
+(import Std.String)
+(import Std.File)
+(import Vaisto.Lexer.Types)
 
 ; Erlang/BEAM primitives
 (extern erlang/byte_size [:binary] :int)
@@ -28,25 +28,25 @@
 ; Keys: :lex-line, :lex-col, :lex-file
 
 (defn init-state! [filename]
-  (Elixir.State/set! :lex-file filename)
-  (Elixir.State/set! :lex-line 1)
-  (Elixir.State/set! :lex-col 1))
+  (Std.State/set! :lex-file filename)
+  (Std.State/set! :lex-line 1)
+  (Std.State/set! :lex-col 1))
 
 (defn current-loc []
-  (Elixir.Lexertypes/loc
-    (Elixir.State/get-or :lex-file "<unknown>")
-    (Elixir.State/get-or :lex-line 1)
-    (Elixir.State/get-or :lex-col 1)))
+  (Vaisto.Lexer.Types/loc
+    (Std.State/get-or :lex-file "<unknown>")
+    (Std.State/get-or :lex-line 1)
+    (Std.State/get-or :lex-col 1)))
 
 (defn advance-pos! [text]
   ; Update line/col based on consumed text
-  (let [lines (Elixir.Regex/count-newlines text)
+  (let [lines (Std.Regex/count-newlines text)
         len (erlang/byte_size text)]
     (if (> lines 0)
       (do
-        (Elixir.State/update! :lex-line (fn [l] (+ l lines)))
-        (Elixir.State/set! :lex-col (+ 1 (Elixir.Regex/last-line-length text))))
-      (Elixir.State/update! :lex-col (fn [c] (+ c len))))))
+        (Std.State/update! :lex-line (fn [l] (+ l lines)))
+        (Std.State/set! :lex-col (+ 1 (Std.Regex/last-line-length text))))
+      (Std.State/update! :lex-col (fn [c] (+ c len))))))
 
 ; --- Token Pattern Type ---
 (deftype TokenPattern [type :any pattern :string])
@@ -116,20 +116,20 @@
 
 (defn symbol-to-keyword-token [loc name]
   (cond
-    [(== name "def") (Elixir.Lexertypes/KwDef loc)]
-    [(== name "defn") (Elixir.Lexertypes/KwDefn loc)]
-    [(== name "deftype") (Elixir.Lexertypes/KwDeftype loc)]
-    [(== name "defrecord") (Elixir.Lexertypes/KwDefrecord loc)]
-    [(== name "let") (Elixir.Lexertypes/KwLet loc)]
-    [(== name "if") (Elixir.Lexertypes/KwIf loc)]
-    [(== name "cond") (Elixir.Lexertypes/KwCond loc)]  ; Added cond
-    [(== name "match") (Elixir.Lexertypes/KwMatch loc)]
-    [(== name "fn") (Elixir.Lexertypes/KwFn loc)]
-    [(== name "do") (Elixir.Lexertypes/KwDo loc)]
-    [(== name "ns") (Elixir.Lexertypes/KwNs loc)]
-    [(== name "import") (Elixir.Lexertypes/KwImport loc)]
-    [(== name "extern") (Elixir.Lexertypes/KwExtern loc)]
-    [:else (Elixir.Lexertypes/Symbol loc name)]))
+    [(== name "def") (Vaisto.Lexer.Types/KwDef loc)]
+    [(== name "defn") (Vaisto.Lexer.Types/KwDefn loc)]
+    [(== name "deftype") (Vaisto.Lexer.Types/KwDeftype loc)]
+    [(== name "defrecord") (Vaisto.Lexer.Types/KwDefrecord loc)]
+    [(== name "let") (Vaisto.Lexer.Types/KwLet loc)]
+    [(== name "if") (Vaisto.Lexer.Types/KwIf loc)]
+    [(== name "cond") (Vaisto.Lexer.Types/KwCond loc)]  ; Added cond
+    [(== name "match") (Vaisto.Lexer.Types/KwMatch loc)]
+    [(== name "fn") (Vaisto.Lexer.Types/KwFn loc)]
+    [(== name "do") (Vaisto.Lexer.Types/KwDo loc)]
+    [(== name "ns") (Vaisto.Lexer.Types/KwNs loc)]
+    [(== name "import") (Vaisto.Lexer.Types/KwImport loc)]
+    [(== name "extern") (Vaisto.Lexer.Types/KwExtern loc)]
+    [:else (Vaisto.Lexer.Types/Symbol loc name)]))
 
 ; --- Core Lexer Logic ---
 
@@ -150,37 +150,37 @@
       [(== typ :comment) (Skip rest)]
 
       ; Delimiters
-      [(== typ :lparen) (Got (Elixir.Lexertypes/LParen loc) rest)]
-      [(== typ :rparen) (Got (Elixir.Lexertypes/RParen loc) rest)]
-      [(== typ :lbracket) (Got (Elixir.Lexertypes/LBracket loc) rest)]
-      [(== typ :rbracket) (Got (Elixir.Lexertypes/RBracket loc) rest)]
-      [(== typ :lbrace) (Got (Elixir.Lexertypes/LBrace loc) rest)]
-      [(== typ :rbrace) (Got (Elixir.Lexertypes/RBrace loc) rest)]
+      [(== typ :lparen) (Got (Vaisto.Lexer.Types/LParen loc) rest)]
+      [(== typ :rparen) (Got (Vaisto.Lexer.Types/RParen loc) rest)]
+      [(== typ :lbracket) (Got (Vaisto.Lexer.Types/LBracket loc) rest)]
+      [(== typ :rbracket) (Got (Vaisto.Lexer.Types/RBracket loc) rest)]
+      [(== typ :lbrace) (Got (Vaisto.Lexer.Types/LBrace loc) rest)]
+      [(== typ :rbrace) (Got (Vaisto.Lexer.Types/RBrace loc) rest)]
 
       ; Pipe symbol (for cons patterns)
-      [(== typ :pipe) (Got (Elixir.Lexertypes/Symbol loc "|") rest)]
+      [(== typ :pipe) (Got (Vaisto.Lexer.Types/Symbol loc "|") rest)]
 
       ; Literals
       [(== typ :integer)
-       (Got (Elixir.Lexertypes/IntLit loc (erlang/binary_to_integer full)) rest)]
+       (Got (Vaisto.Lexer.Types/IntLit loc (erlang/binary_to_integer full)) rest)]
       [(== typ :float)
-       (Got (Elixir.Lexertypes/FloatLit loc (erlang/binary_to_float full)) rest)]
+       (Got (Vaisto.Lexer.Types/FloatLit loc (erlang/binary_to_float full)) rest)]
       [(== typ :string)
-       (Got (Elixir.Lexertypes/StringLit loc (erlang/hd groups)) rest)]
+       (Got (Vaisto.Lexer.Types/StringLit loc (erlang/hd groups)) rest)]
 
       ; Character literals
       [(== typ :char-named)
-       (Got (Elixir.Lexertypes/CharLit loc (char-name-to-code (erlang/hd groups))) rest)]
+       (Got (Vaisto.Lexer.Types/CharLit loc (char-name-to-code (erlang/hd groups))) rest)]
       [(== typ :char-simple)
-       (Got (Elixir.Lexertypes/CharLit loc (Elixir.String/first-char (erlang/hd groups))) rest)]
+       (Got (Vaisto.Lexer.Types/CharLit loc (Std.String/first-char (erlang/hd groups))) rest)]
 
       ; Keywords and symbols
       [(== typ :keyword)
-       (Got (Elixir.Lexertypes/Keyword loc (erlang/hd groups)) rest)]
+       (Got (Vaisto.Lexer.Types/Keyword loc (erlang/hd groups)) rest)]
       [(== typ :symbol)
        (Got (symbol-to-keyword-token loc full) rest)]
       [(== typ :dot)
-       (Got (Elixir.Lexertypes/Symbol loc ".") rest)]
+       (Got (Vaisto.Lexer.Types/Symbol loc ".") rest)]
 
       [:else (erlang/error {:unknown-token-type typ})])))
 
@@ -188,11 +188,11 @@
 ; Returns LexResult: either (Skip rest) or (Got token rest)
 (defn next-token [input]
   (if (== (erlang/byte_size input) 0)
-    (Got (Elixir.Lexertypes/EOF (current-loc)) "")
+    (Got (Vaisto.Lexer.Types/EOF (current-loc)) "")
     (match (try-patterns input token-patterns)
       [(Some result) (make-token result)]
       [(None) (erlang/error {:unexpected-char
-                             :char (Elixir.Regex/peek input 1)
+                             :char (Std.Regex/peek input 1)
                              :loc (current-loc)})])))
 
 ; Try patterns in order until one matches
@@ -202,7 +202,7 @@
     [[pat | rest]
       (let [t (erlang/element 2 pat)   ; :type field is at index 2
             p (erlang/element 3 pat)]  ; :pattern field is at index 3
-        (match (Elixir.Regex/match-groups input p)
+        (match (Std.Regex/match-groups input p)
           [(Some m) (Some #{ :type t
                              :full (. m :full)
                              :groups (. m :groups)
@@ -213,7 +213,7 @@
 
 ; Tokenize a string, returning a list of tokens
 (defn tokenize [source filename]
-  (Elixir.State/with-isolated-state
+  (Std.State/with-isolated-state
     (fn []
       (init-state! filename)
       (tokenize-loop source (list)))))
@@ -237,6 +237,6 @@
 
 ; Convenience: tokenize from a file
 (defn tokenize-file [path]
-  (match (Elixir.File/read-file path)
+  (match (Std.File/read-file path)
     [(Ok content) (Ok (tokenize content path))]
     [(Err e) (Err e)]))

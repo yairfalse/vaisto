@@ -9,8 +9,7 @@
 (ns Vaisto.CLI)
 
 ; Import the Compiler module
-; Note: For bootstrapped builds, module names use short form (Compiler, not Vaisto.Compiler)
-(import Compiler)
+(import Vaisto.Compiler)
 
 ; --- Erlang FFI ---
 
@@ -72,7 +71,7 @@
   (let [module-name (path-to-module input)]
     (match (file/read_file input)
       [{:ok source}
-        (match (Elixir.Compiler/compile source module-name)
+        (match (Vaisto.Compiler/compile source module-name)
           [{:ok _mod bytecode}
             (do
               (file/write_file output bytecode)
@@ -100,7 +99,7 @@
 
 (defn eval-code [code]
   (let [wrapped (wrap-in-main code)]
-    (match (Elixir.Compiler/compile wrapped :VaistoEval)
+    (match (Vaisto.Compiler/compile wrapped :VaistoEval)
       [{:ok mod bytecode}
         (do
           ; code:load_binary requires charlist filename, not binary

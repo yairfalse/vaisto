@@ -23,8 +23,8 @@ defmodule Vaisto.CLI do
       {:compile, input, output, backend} ->
         compile_file(input, output, backend)
 
-      {:build, source_dir, output_dir, backend} ->
-        build_project(source_dir, output_dir, backend)
+      {:build, source_dir, output_dir, backend, src_roots} ->
+        build_project(source_dir, output_dir, backend, src_roots)
 
       {:eval, code, backend} ->
         eval_code(code, backend)
@@ -51,11 +51,40 @@ defmodule Vaisto.CLI do
   defp parse_args(["lsp"]), do: :lsp
 
   # Build project (all .va files in directory)
-  defp parse_args(["build"]), do: {:build, ".", ".", :core}
-  defp parse_args(["build", dir]), do: {:build, dir, dir, :core}
-  defp parse_args(["build", dir, "-o", out_dir]), do: {:build, dir, out_dir, :core}
-  defp parse_args(["build", dir, "--backend", backend]), do: {:build, dir, dir, parse_backend(backend)}
-  defp parse_args(["build", dir, "-o", out_dir, "--backend", backend]), do: {:build, dir, out_dir, parse_backend(backend)}
+  defp parse_args(["build" | rest]) do
+    parse_build_opts(rest, %{dir: ".", output: nil, backend: :core, src_roots: []})
+  end
+
+  # Parse build command options
+  defp parse_build_opts([], acc) do
+    output = acc.output || acc.dir
+    {:build, acc.dir, output, acc.backend, acc.src_roots}
+  end
+
+  defp parse_build_opts(["--src", root | rest], acc) do
+    # Parse --src root:prefix or --src root (prefix defaults to "")
+    {path, prefix} = case String.split(root, ":", parts: 2) do
+      [path, prefix] -> {path, prefix}
+      [path] -> {path, ""}
+    end
+    parse_build_opts(rest, %{acc | src_roots: acc.src_roots ++ [{path, prefix}]})
+  end
+
+  defp parse_build_opts(["-o", out_dir | rest], acc) do
+    parse_build_opts(rest, %{acc | output: out_dir})
+  end
+
+  defp parse_build_opts(["--backend", backend | rest], acc) do
+    parse_build_opts(rest, %{acc | backend: parse_backend(backend)})
+  end
+
+  defp parse_build_opts(["-" <> _ = unknown | _], _acc) do
+    {:error, "unknown build option: #{unknown}"}
+  end
+
+  defp parse_build_opts([dir | rest], acc) do
+    parse_build_opts(rest, %{acc | dir: dir})
+  end
 
   defp parse_args(["--eval", code]), do: {:eval, code, :core}
   defp parse_args(["-e", code]), do: {:eval, code, :core}
@@ -141,10 +170,14 @@ defmodule Vaisto.CLI do
     end
   end
 
-  defp build_project(source_dir, output_dir, backend) do
+  defp build_project(source_dir, output_dir, backend, src_roots) do
     IO.puts("Building project in #{source_dir}...")
 
-    case Vaisto.Build.build(source_dir, output_dir: output_dir, backend: backend, prelude: @prelude) do
+    # Use custom source roots if provided, otherwise use defaults
+    opts = [output_dir: output_dir, backend: backend, prelude: @prelude]
+    opts = if src_roots != [], do: Keyword.put(opts, :source_roots, src_roots), else: opts
+
+    case Vaisto.Build.build(source_dir, opts) do
       {:ok, results} ->
         Enum.each(results, fn result ->
           IO.puts("✓ Compiled #{result.module} → #{result.beam}")
@@ -217,6 +250,7 @@ defmodule Vaisto.CLI do
       vaistoc <file.va> --backend <backend> Use specific backend (core|elixir)
       vaistoc build [dir]                   Build all .va files in directory
       vaistoc build [dir] -o <output_dir>   Build with custom output directory
+      vaistoc build [dir] --src <root:prefix> Add source root for module naming
       vaistoc --eval "<code>"               Evaluate expression
       vaistoc repl                          Start interactive REPL
       vaistoc lsp                           Start Language Server Protocol server
@@ -226,9 +260,21 @@ defmodule Vaisto.CLI do
       core    - Direct Core Erlang compilation (default, smaller output)
       elixir  - Compile via Elixir AST (more features, larger output)
 
+    Module Naming:
+      Module names are inferred from file paths:
+        src/Vaisto/Lexer.va → Elixir.Vaisto.Lexer
+        std/List.va         → Elixir.Std.List
+
+      Default source roots:
+        src/ → (no prefix)    lib/ → (no prefix)    std/ → Std.
+
+      Custom source roots with --src:
+        --src mylib:MyLib     mylib/Foo.va → Elixir.MyLib.Foo
+        --src vendor          vendor/Bar.va → Elixir.Bar
+
     Module System:
-      (ns MyModule)                         Declare module name
-      (import Std.List)                     Import another module
+      (ns Vaisto.Lexer)                     Optional: validates against path
+      (import Vaisto.Lexer.Types)           Import another module
       (import Std.List :as L)               Import with alias
       (Std.List/fold xs 0 +)                Call imported function
 
@@ -237,6 +283,7 @@ defmodule Vaisto.CLI do
       vaistoc counter.va -o build/Counter.beam
       vaistoc main.va --backend elixir
       vaistoc build src/ -o build/
+      vaistoc build . --src src --src std:Std -o build/
       vaistoc --eval "(+ 1 2)"
       vaistoc --eval "(deftype Result (Ok v) (Error e)) (Ok 42)"
     """)

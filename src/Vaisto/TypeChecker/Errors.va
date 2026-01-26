@@ -6,9 +6,9 @@
 ; - Expected vs actual types
 ; - Hints for fixing
 
-(ns Elixir.Tcerrors)
+(ns Vaisto.TypeChecker.Errors)
 
-(import Elixir.Tctypes)
+(import Vaisto.TypeChecker.Types)
 
 ; Erlang FFI
 (extern erlang/iolist_to_binary [(List :any)] :string)
@@ -170,9 +170,9 @@
 (defn infinite-type [tvar-id t]
   ; Format with context so the tvar shows as 'a not t452
   (let [tvar {:tvar tvar-id}
-        ctx (Elixir.Tctypes/build-display-ctx (list tvar t))
-        tvar-str (Elixir.Tctypes/format-type-with-ctx tvar ctx)
-        type-str (Elixir.Tctypes/format-type-with-ctx t ctx)]
+        ctx (Vaisto.TypeChecker.Types/build-display-ctx (list tvar t))
+        tvar-str (Vaisto.TypeChecker.Types/format-type-with-ctx tvar ctx)
+        type-str (Vaisto.TypeChecker.Types/format-type-with-ctx t ctx)]
     (-> (make-error "infinite type")
         (with-note (erlang/iolist_to_binary
                      (list tvar-str " cannot contain itself (found in " type-str ")")))
@@ -196,7 +196,7 @@
   (if (== value :none)
     ""
     (erlang/iolist_to_binary
-      (list label (Elixir.Tctypes/format-type-with-ctx value ctx)))))
+      (list label (Vaisto.TypeChecker.Types/format-type-with-ctx value ctx)))))
 
 (defn identity [x] x)
 
@@ -209,7 +209,7 @@
         hint (. err :hint)
         ; Build context from both types so 'a, 'b are consistent
         types-to-normalize (collect-types-from-error expected actual)
-        ctx (Elixir.Tctypes/build-display-ctx types-to-normalize)]
+        ctx (Vaisto.TypeChecker.Types/build-display-ctx types-to-normalize)]
     (erlang/iolist_to_binary
       (list
         "error: " msg

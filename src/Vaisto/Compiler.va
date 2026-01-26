@@ -6,12 +6,11 @@
 
 (ns Vaisto.Compiler)
 
-; Import modules using Elixir. prefix for bootstrapped builds
-; (Module names derive from filename only, not namespace path)
-(import Elixir.Lexer)
-(import Elixir.Parser)
-(import Elixir.Typechecker)
-(import Elixir.Coreemitter)
+; Import self-hosted compiler modules
+(import Vaisto.Lexer)
+(import Vaisto.Parser)
+(import Vaisto.TypeChecker)
+(import Vaisto.Compiler.CoreEmitter)
 
 ; Erlang FFI
 (extern file/read_file [:string] :any)
@@ -32,7 +31,7 @@
   (match (compile source module-name)
     [{:ok mod binary}
       (do
-        (Elixir.Coreemitter/compile-and-load binary mod)
+        (Vaisto.Compiler.CoreEmitter/compile-and-load binary mod)
         {:ok mod})]
     [error error]))
 
@@ -49,20 +48,20 @@
 ; Stage 1: Lexing
 ; Lexer takes source string and filename, returns token list
 (defn lex [source filename]
-  (Elixir.Lexer/tokenize source (atom-to-string filename)))
+  (Vaisto.Lexer/tokenize source (atom-to-string filename)))
 
 ; Stage 2: Parsing
 (defn parse-tokens [tokens]
   (match tokens
     [{:error reason} {:error reason}]
-    [toks (Elixir.Parser/parse toks)]))
+    [toks (Vaisto.Parser/parse toks)]))
 
 ; Stage 3: Type Checking
 (defn type-check [ast]
   (match ast
     [{:error reason} {:error reason}]
     [forms
-      (match (Elixir.Typechecker/check-module forms (primitives-env))
+      (match (Vaisto.TypeChecker/check-module forms (primitives-env))
         [(Ok result) (. result :ast)]
         [(Err err) {:error err}])]))
 
@@ -97,7 +96,7 @@
 (defn emit-core [typed-ast module-name]
   (match typed-ast
     [{:error reason} {:error reason}]
-    [ast (Elixir.Coreemitter/compile ast module-name)]))
+    [ast (Vaisto.Compiler.CoreEmitter/compile ast module-name)]))
 
 ; --- Utility Functions ---
 

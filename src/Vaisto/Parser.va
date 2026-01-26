@@ -7,10 +7,10 @@
 ; - Braces: { ... } → Erlang tuples (patterns)
 ; - Map literals: #{ ... } → maps
 
-(ns Elixir.Parser)
+(ns Vaisto.Parser)
 
-(import Elixir.Types)
-(import Elixir.Ast)
+(import Vaisto.Lexer.Types)
+(import Vaisto.Parser.AST)
 
 ; Erlang primitives
 (extern lists/reverse [(List :any)] (List :any))
@@ -58,7 +58,7 @@
 
     ; Keywords: :foo → {:atom :foo}
     [[{:Keyword loc name} | rest]
-      {rest (Elixir.Ast/keyword-node (string-to-atom name))}]
+      {rest (Vaisto.Parser.AST/keyword-node (string-to-atom name))}]
 
     ; Symbols: foo → :foo (atom)
     [[{:Symbol loc name} | rest]
@@ -130,16 +130,16 @@
 (defn analyze-list [items loc]
   (match items
     ; Empty: () → unit
-    [[] (Elixir.Ast/unit-node loc)]
+    [[] (Vaisto.Parser.AST/unit-node loc)]
 
     ; --- Special Forms ---
 
     ; (ns ModuleName)
-    [[:ns name] (Elixir.Ast/ns-node name loc)]
+    [[:ns name] (Vaisto.Parser.AST/ns-node name loc)]
 
     ; (import Module) or (import Module Alias)
-    [[:import module] (Elixir.Ast/import-node module :none loc)]
-    [[:import module alias] (Elixir.Ast/import-node module alias loc)]
+    [[:import module] (Vaisto.Parser.AST/import-node module :none loc)]
+    [[:import module alias] (Vaisto.Parser.AST/import-node module alias loc)]
 
     ; (defn name [params] body) or (defn name [params] :type body)
     [[:defn name {:bracket params} | rest]
@@ -147,42 +147,42 @@
 
     ; (defn name [[pat1] body1] [[pat2] body2]) - multi-clause
     [[:defn name | clauses]
-      (Elixir.Ast/defn-multi-node name (parse-clauses clauses) loc)]
+      (Vaisto.Parser.AST/defn-multi-node name (parse-clauses clauses) loc)]
 
     ; (def name value)
-    [[:def name value] (Elixir.Ast/def-node name value loc)]
+    [[:def name value] (Vaisto.Parser.AST/def-node name value loc)]
 
     ; (deftype Name [field :type ...]) - record
     [[:deftype name {:bracket fields}]
-      (Elixir.Ast/deftype-record-node name fields loc)]
+      (Vaisto.Parser.AST/deftype-record-node name fields loc)]
 
     ; (deftype Name (Ctor1 a) (Ctor2 b c)) - sum type
     [[:deftype name | variants]
-      (Elixir.Ast/deftype-sum-node name variants loc)]
+      (Vaisto.Parser.AST/deftype-sum-node name variants loc)]
 
     ; (fn [params] body)
     [[:fn {:bracket params} | body]
-      (Elixir.Ast/fn-node params (block-body body loc) loc)]
+      (Vaisto.Parser.AST/fn-node params (block-body body loc) loc)]
 
     ; (let [bindings] body)
     [[:let {:bracket bindings} | body]
-      (Elixir.Ast/let-node (parse-bindings bindings) (block-body body loc) loc)]
+      (Vaisto.Parser.AST/let-node (parse-bindings bindings) (block-body body loc) loc)]
 
     ; (if cond then else)
     [[:if cond then else]
-      (Elixir.Ast/if-node cond then else loc)]
+      (Vaisto.Parser.AST/if-node cond then else loc)]
 
     ; (cond [test1 body1] [test2 body2] ...)
     [[:cond | clauses]
-      (Elixir.Ast/cond-node (parse-clauses clauses) loc)]
+      (Vaisto.Parser.AST/cond-node (parse-clauses clauses) loc)]
 
     ; (match expr [pat1 body1] [pat2 body2] ...)
     [[:match expr | clauses]
-      (Elixir.Ast/match-node expr (parse-clauses clauses) loc)]
+      (Vaisto.Parser.AST/match-node expr (parse-clauses clauses) loc)]
 
     ; (do expr1 expr2 ...)
     [[:do | exprs]
-      (Elixir.Ast/do-node exprs loc)]
+      (Vaisto.Parser.AST/do-node exprs loc)]
 
     ; (extern mod/func [arg-types] ret-type)
     [[:extern qualified-name {:bracket arg-types} ret-type]
@@ -190,7 +190,7 @@
 
     ; (. record :field) - field access
     [[:. record field]
-      (Elixir.Ast/field-access-node record field loc)]
+      (Vaisto.Parser.AST/field-access-node record field loc)]
 
     ; (-> x (f a) (g b)) - threading macro
     [[:-> | forms]
@@ -198,16 +198,16 @@
 
     ; (list a b c) - explicit list
     [[:list | elements]
-      (Elixir.Ast/list-node elements loc)]
+      (Vaisto.Parser.AST/list-node elements loc)]
 
     ; (tuple a b c) - explicit tuple
     [[:tuple | elements]
-      (Elixir.Ast/tuple-node elements loc)]
+      (Vaisto.Parser.AST/tuple-node elements loc)]
 
     ; Default: function call (check for qualified mod/func)
     [[func | args]
       (let [qualified-func (maybe-qualify func)]
-        (Elixir.Ast/call-node qualified-func args loc))]))
+        (Vaisto.Parser.AST/call-node qualified-func args loc))]))
 
 ; --- Helper Functions ---
 
@@ -216,21 +216,21 @@
   (match rest
     ; With return type annotation: (defn foo [x] :int body)
     [[{:atom type} | body]
-      (Elixir.Ast/defn-node name params (block-body body loc) type loc)]
+      (Vaisto.Parser.AST/defn-node name params (block-body body loc) type loc)]
     ; Check if first is a keyword atom
     [[type | body]
       (if (keyword? type)
-        (Elixir.Ast/defn-node name params (block-body body loc) type loc)
-        (Elixir.Ast/defn-node name params (block-body rest loc) :any loc))]
+        (Vaisto.Parser.AST/defn-node name params (block-body body loc) type loc)
+        (Vaisto.Parser.AST/defn-node name params (block-body rest loc) :any loc))]
     ; No return type
     [body
-      (Elixir.Ast/defn-node name params (block-body body loc) :any loc)]))
+      (Vaisto.Parser.AST/defn-node name params (block-body body loc) :any loc)]))
 
 ; Wrap multiple body expressions in (do ...) if needed
 (defn block-body [exprs loc]
   (match exprs
     [[single] single]
-    [_ (Elixir.Ast/do-node exprs loc)]))
+    [_ (Vaisto.Parser.AST/do-node exprs loc)]))
 
 ; Parse let bindings: [x 1 y 2] → [{x 1} {y 2}]
 (defn parse-bindings [items]
@@ -258,7 +258,7 @@
     ; Symbol like erlang/hd
     [sym
       (let [parts (split-qualified sym)]
-        (Elixir.Ast/extern-node
+        (Vaisto.Parser.AST/extern-node
           (tuple-elem parts 0)
           (tuple-elem parts 1)
           arg-types

@@ -7,7 +7,7 @@
 ; Core Erlang is not text - it's a tree of :cerl nodes built via the
 ; cerl module from the Erlang compiler application.
 
-(ns Elixir.Coreemitter)
+(ns Vaisto.Compiler.CoreEmitter)
 
 ; --- The Toolbelt: cerl module constructors ---
 ; These build Core Erlang AST nodes

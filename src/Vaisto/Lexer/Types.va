@@ -4,7 +4,7 @@
 ; Design: Each token carries its source location for error messages.
 ; Location is represented as a map #{ :file :line :col }
 
-(ns Elixir.Types)
+(ns Vaisto.Lexer.Types)
 
 ; --- Erlang FFI for string operations ---
 (extern erlang/iolist_to_binary [(List :any)] :string)

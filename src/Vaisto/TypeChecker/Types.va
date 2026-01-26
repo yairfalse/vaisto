@@ -4,9 +4,9 @@
 ; This module defines how types are represented internally.
 ; Uses sum types (ADTs) for type-safe pattern matching.
 
-(ns Elixir.Types)
+(ns Vaisto.TypeChecker.Types)
 
-(import Elixir.String)
+(import Std.String)
 
 ; Erlang FFI
 (extern erlang/iolist_to_binary [(List :any)] :string)

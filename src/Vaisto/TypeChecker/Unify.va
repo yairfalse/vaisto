@@ -4,10 +4,10 @@
 ; Unification finds a substitution that makes two types equal.
 ; For example, unifying {:tvar 0} with :int produces {0 => :int}.
 
-(ns Elixir.Tcunify)
+(ns Vaisto.TypeChecker.Unify)
 
-(import Elixir.Tccore)
-(import Elixir.Tctypes)
+(import Vaisto.TypeChecker.Core)
+(import Vaisto.TypeChecker.Types)
 
 ; Erlang FFI
 (extern maps/get [:any :any :any] :any)
@@ -31,8 +31,8 @@
 
 (defn unify [t1 t2 subst row-counter]
   ; Apply current substitutions first
-  (let [t1-applied (Elixir.Tccore/apply-subst subst t1)
-        t2-applied (Elixir.Tccore/apply-subst subst t2)]
+  (let [t1-applied (Vaisto.TypeChecker.Core/apply-subst subst t1)
+        t2-applied (Vaisto.TypeChecker.Core/apply-subst subst t2)]
     (unify-applied t1-applied t2-applied subst row-counter)))
 
 (defn unify-applied [t1 t2 subst row-counter]
@@ -118,7 +118,7 @@
   (match tvar
     [{:tvar id}
       ; Occurs check
-      (if (Elixir.Tccore/occurs? id t)
+      (if (Vaisto.TypeChecker.Core/occurs? id t)
         (Err {:infinite-type id t})
         (Ok {:subst (maps/put id t subst) :counter row-counter}))]))
 
@@ -126,7 +126,7 @@
   (match rvar
     [{:rvar id}
       ; Occurs check for row variables
-      (if (Elixir.Tccore/row-occurs? id t)
+      (if (Vaisto.TypeChecker.Core/row-occurs? id t)
         (Err {:infinite-row-type id t})
         (Ok {:subst (maps/put {:row id} t subst) :counter row-counter}))]))
 

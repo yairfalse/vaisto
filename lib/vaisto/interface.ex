@@ -132,12 +132,20 @@ defmodule Vaisto.Interface do
   # Private helpers
 
   defp interface_path(module_name, dir) do
-    filename = module_name |> to_string() |> String.replace(".", "/")
+    # Strip Elixir. prefix for file paths: Elixir.Vaisto.Lexer → Vaisto/Lexer.vsi
+    filename = module_name
+      |> to_string()
+      |> String.replace_prefix("Elixir.", "")
+      |> String.replace(".", "/")
     Path.join(dir, "#{filename}.vsi")
   end
 
   defp find_interface(module_name, search_paths) do
-    filename = module_name |> to_string() |> String.replace(".", "/")
+    # Strip Elixir. prefix for file paths: Elixir.Vaisto.Lexer → Vaisto/Lexer.vsi
+    filename = module_name
+      |> to_string()
+      |> String.replace_prefix("Elixir.", "")
+      |> String.replace(".", "/")
 
     Enum.find_value(search_paths, :not_found, fn dir ->
       path = Path.join(dir, "#{filename}.vsi")

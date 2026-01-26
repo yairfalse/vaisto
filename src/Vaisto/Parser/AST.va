@@ -5,7 +5,7 @@
 ;
 ; The AST format mirrors the Elixir parser output for compatibility.
 
-(ns Elixir.Ast)
+(ns Vaisto.Parser.AST)
 
 ; --- Primitive Nodes ---
 
