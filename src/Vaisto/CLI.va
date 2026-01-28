@@ -87,9 +87,9 @@
 
 (defn default-output [input]
   (let [dir (filename/dirname input)
-        base (filename/basename input ".va")
-        module (to-camelcase base)]
-    (filename/join dir (string-append module ".beam"))))
+        module-name (path-to-module input)
+        module-str (erlang/atom_to_binary module-name :utf8)]
+    (filename/join dir (string-append module-str ".beam"))))
 
 ; Convert snake_case to CamelCase
 ; e.g., "prelude_test" -> "PreludeTest"
@@ -99,8 +99,10 @@
     (erlang/iolist_to_binary titled)))
 
 (defn path-to-module [path]
-  (let [base (filename/basename path ".va")]
-    (erlang/binary_to_atom (to-camelcase base) :utf8)))
+  ; Module naming: CamelCase basename with Elixir. prefix
+  (let [base (filename/basename path ".va")
+        camelcased (to-camelcase base)]
+    (erlang/binary_to_atom (string-append "Elixir." camelcased) :utf8)))
 
 ; --- Eval Mode ---
 

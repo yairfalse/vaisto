@@ -333,8 +333,10 @@
 
     ; Qualified call: Module/func (must be checked before other call patterns!)
     [{:call {:qualified mod func} args _type}
-      (let [arg-cores (lists/map (fn [a] (emit-expr a user-fns local-vars)) args)]
-        (cerl/c_call (cerl/c_atom mod) (cerl/c_atom func) arg-cores))]
+      (let [arg-cores (lists/map (fn [a] (emit-expr a user-fns local-vars)) args)
+            ; Vaisto/Elixir modules need Elixir. prefix
+            full-mod (elixir-module-name mod)]
+        (cerl/c_call (cerl/c_atom full-mod) (cerl/c_atom func) arg-cores))]
 
     ; Arithmetic and comparison operators
     [{:call op [left right] _type}
@@ -813,4 +815,52 @@
     [[] true]
     [[_ | _] true]
     [_ false]))
+
+; --- Module Name Resolution ---
+; Vaisto/Elixir modules need Elixir. prefix, Erlang modules don't
+
+(extern string/slice [:string :int :int] :string)
+(extern string/length [:string] :int)
+
+(defn elixir-module-name [mod]
+  (let [mod-str (erlang/atom_to_binary mod :utf8)]
+    (cond
+      ; Already has Elixir. prefix
+      [(starts-with? mod-str "Elixir.")
+        mod]
+      ; Vaisto module: starts with uppercase or contains a dot
+      [(is-vaisto-module? mod-str)
+        (erlang/binary_to_atom
+          (erlang/iolist_to_binary (list "Elixir." mod-str))
+          :utf8)]
+      ; Erlang module (lowercase, no dots)
+      [:else mod])))
+
+(defn starts-with? [str prefix]
+  (let [prefix-len (string/length prefix)]
+    (if (< (string/length str) prefix-len)
+      false
+      (string/equal (string/slice str 0 prefix-len) prefix))))
+
+(defn is-vaisto-module? [mod-str]
+  ; A Vaisto module starts with uppercase or contains a dot
+  (if (string-contains? mod-str ".")
+    true
+    (is-uppercase? (first-char mod-str))))
+
+(extern binary/first [:string] :int)
+(defn first-char [s]
+  (binary/first s))
+
+(defn is-uppercase? [char-code]
+  ; A-Z is 65-90
+  (if (>= char-code 65)
+    (<= char-code 90)
+    false))
+
+(extern binary/match [:string :string] :any)
+(defn string-contains? [haystack needle]
+  (match (binary/match haystack needle)
+    [:nomatch false]
+    [_ true]))
 

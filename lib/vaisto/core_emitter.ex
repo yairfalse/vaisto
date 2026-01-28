@@ -829,6 +829,11 @@ defmodule Vaisto.CoreEmitter do
   # Field access on record → erlang:element(index, tuple)
   # Records are stored as {:record_name, field1, field2, ...}
   # So field at position N (0-indexed) in field list is at tuple index N+2 (1-indexed, after tag)
+  # New 5-element format: {:field_access, record_expr, field, field_type, record_type}
+  defp to_core_expr({:field_access, record_expr, field, _field_type, _record_type}, user_fns, local_vars) do
+    to_core_expr({:field_access, record_expr, field, :any}, user_fns, local_vars)
+  end
+
   defp to_core_expr({:field_access, record_expr, field, _type}, user_fns, local_vars) do
     record_core = to_core_expr(record_expr, user_fns, local_vars)
 
@@ -877,7 +882,7 @@ defmodule Vaisto.CoreEmitter do
       # Regular qualified call that happens to return a sum type
       arg_cores = Enum.map(args, &to_core_expr(&1, user_fns, local_vars))
       :cerl.c_call(
-        :cerl.c_atom(mod),
+        :cerl.c_atom(elixir_module_name(mod)),
         :cerl.c_atom(ctor),
         arg_cores
       )
@@ -888,7 +893,7 @@ defmodule Vaisto.CoreEmitter do
   defp to_core_expr({:call, {:qualified, mod, func}, args, _type}, user_fns, local_vars) do
     arg_cores = Enum.map(args, &to_core_expr(&1, user_fns, local_vars))
     :cerl.c_call(
-      :cerl.c_atom(mod),
+      :cerl.c_atom(elixir_module_name(mod)),
       :cerl.c_atom(func),
       arg_cores
     )
@@ -958,6 +963,7 @@ defmodule Vaisto.CoreEmitter do
   # Extract type from a typed AST node
   defp extract_type({:var, _name, type}), do: type
   defp extract_type({:call, _func, _args, type}), do: type
+  defp extract_type({:field_access, _expr, _field, field_type, _record_type}), do: field_type
   defp extract_type({:field_access, _expr, _field, type}), do: type
   defp extract_type({:let, _bindings, _body, type}), do: type
   defp extract_type({:if, _cond, _then, _else, type}), do: type
@@ -1160,5 +1166,34 @@ defmodule Vaisto.CoreEmitter do
     end)
     |> List.flatten()
     |> Enum.join("\n")
+  end
+
+  # --- Module name resolution ---
+  # Vaisto/Elixir modules need Elixir. prefix, Erlang modules don't
+
+  defp elixir_module_name(mod) when is_atom(mod) do
+    mod_str = Atom.to_string(mod)
+
+    cond do
+      # Already has Elixir. prefix
+      String.starts_with?(mod_str, "Elixir.") ->
+        mod
+
+      # Vaisto module: starts with uppercase or contains a dot
+      vaisto_module?(mod_str) ->
+        String.to_atom("Elixir.#{mod_str}")
+
+      # Erlang module (lowercase, no dots)
+      true ->
+        mod
+    end
+  end
+
+  defp vaisto_module?(mod_str) do
+    # A Vaisto module starts with uppercase or contains a dot
+    String.contains?(mod_str, ".") or
+      (String.length(mod_str) > 0 and
+         String.first(mod_str) == String.upcase(String.first(mod_str)) and
+         String.first(mod_str) =~ ~r/[A-Z]/)
   end
 end

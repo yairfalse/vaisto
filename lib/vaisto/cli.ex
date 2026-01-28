@@ -119,7 +119,8 @@ defmodule Vaisto.CLI do
 
   defp default_output(input) do
     dir = Path.dirname(input)
-    module_name = input |> Path.basename(".va") |> camelize()
+    # Use path-based module naming
+    module_name = Vaisto.Build.infer_module_name(input)
     # BEAM files must match the module name exactly
     Path.join(dir, Atom.to_string(module_name) <> ".beam")
   end
@@ -127,7 +128,8 @@ defmodule Vaisto.CLI do
   defp compile_file(input, output, backend) do
     case File.read(input) do
       {:ok, source} ->
-        module_name = input |> Path.basename(".va") |> camelize()
+        # Use path-based module naming
+        module_name = Vaisto.Build.infer_module_name(input)
 
         case compile(source, module_name, backend) do
           {:ok, _module, bytecode} when is_binary(bytecode) ->
