@@ -80,8 +80,14 @@
 
 (extern io/format [:string (List :any)] :atom)
 
+; Print a string with newline
 (defn println [s]
   (io/format "~s~n" (list s)))
 
-(defn print [x]
+; Print a string without newline
+(defn print [s]
+  (io/format "~s" (list s)))
+
+; Print any value (for debugging) - shows Erlang term representation
+(defn inspect [x]
   (io/format "~p" (list x)))

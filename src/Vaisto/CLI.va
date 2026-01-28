@@ -8,8 +8,9 @@
 
 (ns Vaisto.CLI)
 
-; Import the Compiler module
+; Import the Compiler and Prelude modules
 (import Vaisto.Compiler)
+(import Vaisto.Prelude)
 
 ; --- Erlang FFI ---
 
@@ -22,6 +23,7 @@
 (extern filename/dirname [:string] :string)
 (extern filename/join [:string :string] :string)
 (extern string/titlecase [:string] :string)
+(extern string/split [:string :string :atom] (List :string))
 (extern code/load_binary [:atom :string :any] :any)
 (extern code/purge [:atom] :any)
 (extern code/delete [:atom] :any)
@@ -68,28 +70,37 @@
     (compile-file-to input output)))
 
 (defn compile-file-to [input output]
-  (let [module-name (path-to-module input)]
+  (let [module-name (path-to-module input)
+        prelude (Vaisto.Prelude/source)]
     (match (file/read_file input)
       [{:ok source}
-        (match (Vaisto.Compiler/compile source module-name)
-          [{:ok _mod bytecode}
-            (do
-              (file/write_file output bytecode)
-              (print-success input output))]
-          [{:error reason}
-            (print-error reason)])]
+        (let [full-source (string-append prelude (string-append "\n\n" source))]
+          (match (Vaisto.Compiler/compile full-source module-name)
+            [{:ok _mod bytecode}
+              (do
+                (file/write_file output bytecode)
+                (print-success input output))]
+            [{:error reason}
+              (print-error reason)]))]
       [{:error reason}
         (error (format-read-error input reason))])))
 
 (defn default-output [input]
   (let [dir (filename/dirname input)
         base (filename/basename input ".va")
-        module (string/titlecase base)]
+        module (to-camelcase base)]
     (filename/join dir (string-append module ".beam"))))
+
+; Convert snake_case to CamelCase
+; e.g., "prelude_test" -> "PreludeTest"
+(defn to-camelcase [name]
+  (let [parts (string/split name "_" :all)
+        titled (lists/map (fn [p] (string/titlecase p)) parts)]
+    (erlang/iolist_to_binary titled)))
 
 (defn path-to-module [path]
   (let [base (filename/basename path ".va")]
-    (erlang/binary_to_atom (string/titlecase base) :utf8)))
+    (erlang/binary_to_atom (to-camelcase base) :utf8)))
 
 ; --- Eval Mode ---
 
@@ -98,8 +109,10 @@
   (string-append "(defn main [] " (string-append code ")")))
 
 (defn eval-code [code]
-  (let [wrapped (wrap-in-main code)]
-    (match (Vaisto.Compiler/compile wrapped :VaistoEval)
+  (let [prelude (Vaisto.Prelude/source)
+        wrapped (wrap-in-main code)
+        full-source (string-append prelude (string-append "\n\n" wrapped))]
+    (match (Vaisto.Compiler/compile full-source :VaistoEval)
       [{:ok mod bytecode}
         (do
           ; code:load_binary requires charlist filename, not binary

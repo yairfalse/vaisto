@@ -34,14 +34,7 @@
 (extern file/make_dir [:string] :any)
 
 ; Higher-level helpers
-
-; Print a line (string with newline)
-(defn println [s]
-  (io/format "~s~n" (list s)))
-
-; Print any value (for debugging)
-(defn print [x]
-  (io/format "~p" (list x)))
+; Note: println and print are defined in prelude for convenience
 
 ; Read file, returning Result
 (defn read-file [path]

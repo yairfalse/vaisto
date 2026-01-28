@@ -331,8 +331,8 @@
         typed-pattern (type-pattern pattern expr-type env)]
     (match (check-expr body extended-env)
       [(Ok body-result)
-        (Ok {:clause {typed-pattern (. body-result :ast) (. body-result :type)}
-             :body-type (. body-result :type)})]
+        (Ok #{ :clause {typed-pattern (. body-result :ast) (. body-result :type)}
+               :body-type (. body-result :type)})]
       [(Err e) (Err e)])))
 
 (defn check-remaining-clauses [clauses expr-type expected-type env acc]
@@ -521,6 +521,17 @@
         [{:defn name params _body ret-type}
           (let [param-types (lists/map extract-param-type params)]
             (maps/put name {:fn param-types ret-type} acc-env))]
+        ; deftype with location (4-tuple): tag name fields loc
+        [{:deftype name {:product fields} _loc}
+          (let [field-types (lists/map (fn [f] (match f [{_ t} t])) fields)
+                record-type {:record name fields}
+                ctor-type {:fn field-types record-type}]
+            (maps/put name ctor-type acc-env))]
+        [{:deftype name {:sum variants} _loc}
+          (let [sum-type {:sum name variants}
+                env-with-type (maps/put name sum-type acc-env)]
+            (register-variant-ctors variants sum-type env-with-type))]
+        ; deftype without location (3-tuple)
         [{:deftype name {:product fields}}
           (let [field-types (lists/map (fn [f] (match f [{_ t} t])) fields)
                 record-type {:record name fields}
@@ -563,7 +574,10 @@
     (fn [variant acc]
       (match variant
         [{ctor-name field-types}
-          (maps/put ctor-name {:fn field-types sum-type} acc)]))
+          ; For polymorphic types, treat type variables as :any
+          ; e.g. (Ok v) → Ok : (fn [:any] sum-type)
+          (let [normalized-fields (lists/map (fn [_t] :any) field-types)]
+            (maps/put ctor-name {:fn normalized-fields sum-type} acc))]))
     env
     variants))
 
@@ -660,7 +674,10 @@
       (lists/append
         (extract-pattern-bindings head :any env)
         (extract-pattern-bindings tail :any env))]
-    ; Constructor pattern (ADT variant or record)
+    ; Constructor pattern with location (4-tuple from parser)
+    [{:call ctor-name args _loc}
+      (extract-ctor-pattern-bindings ctor-name args expr-type env)]
+    ; Constructor pattern without location (3-tuple)
     [{:call ctor-name args}
       (extract-ctor-pattern-bindings ctor-name args expr-type env)]
     ; Atom literal
@@ -706,7 +723,10 @@
               (if (erlang/is_atom arg)
                 (if (== arg :_)
                   acc
-                  (cons {arg field-type} acc))
+                  ; For polymorphic types, field-type is a type variable (bare atom like 'v')
+                  ; Treat these as :any since we don't have full type inference yet
+                  (let [actual-type (if (erlang/is_atom field-type) :any field-type)]
+                    (cons {arg actual-type} acc)))
                 acc)]))
         (list)
         (lists/zip args field-types))]))
@@ -728,6 +748,10 @@
       {:tuple_pattern (lists/map (fn [e] (type-pattern e :any env)) elements) :any}]
     [{:cons head tail}
       {:cons_pattern (type-pattern head :any env) (type-pattern tail :any env) :any}]
+    ; Constructor pattern with location (4-tuple from parser)
+    [{:call ctor-name args _loc}
+      {:pattern ctor-name (lists/map (fn [a] (type-pattern a :any env)) args) expr-type}]
+    ; Constructor pattern without location (3-tuple)
     [{:call ctor-name args}
       {:pattern ctor-name (lists/map (fn [a] (type-pattern a :any env)) args) expr-type}]
     [{:atom a}

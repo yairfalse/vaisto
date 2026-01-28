@@ -69,7 +69,7 @@
 (extern sets/union [:any :any] :any)
 (extern compile/forms [:any (List :any)] :any)
 (extern code/load_binary [:any :any :any] :any)
-(extern system/unique_integer [(List :any)] :int)
+(extern erlang/unique_integer [(List :any)] :int)
 
 ; --- Main Entry Points ---
 
@@ -384,7 +384,7 @@
 
     ; Sum type constructor
     [{:call name args {:sum _sum-name variants}}
-      (if (lists/keymember name 0 variants)
+      (if (lists/keymember name 1 variants)
         ; Constructor → tagged tuple
         (let [elements (cons (cerl/c_atom name)
                              (lists/map (fn [a] (emit-expr a user-fns local-vars)) args))]
@@ -584,7 +584,7 @@
 
     ; Wildcard - generate unique variable
     [:_
-      (let [unique-id (system/unique_integer (list :positive))]
+      (let [unique-id (erlang/unique_integer (list :positive))]
         (cerl/c_var (make-wildcard-name unique-id)))]
 
     ; Raw integer
@@ -620,7 +620,7 @@
 
     ; Wildcard
     [:_
-      (let [unique-id (system/unique_integer (list :positive))]
+      (let [unique-id (erlang/unique_integer (list :positive))]
         (cerl/c_var (make-wildcard-name unique-id)))]
 
     ; Raw values
