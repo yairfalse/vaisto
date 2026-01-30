@@ -114,9 +114,9 @@ defmodule Vaisto.Build do
         # Type check
         case TypeChecker.check(ast, env) do
           {:ok, _type, typed_ast} ->
-            # Compile
+            # Compile (don't load into VM to avoid shadowing bootstrap modules)
             result = case backend do
-              :core -> CoreEmitter.compile(typed_ast, module_name)
+              :core -> CoreEmitter.compile(typed_ast, module_name, load: false)
               :elixir -> Emitter.compile(typed_ast, module_name)
             end
 

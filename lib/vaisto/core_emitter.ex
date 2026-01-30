@@ -12,24 +12,27 @@ defmodule Vaisto.CoreEmitter do
   @doc """
   Compile typed AST directly to BEAM bytecode.
 
+  Options:
+    - :load - whether to load the module into the VM (default: true)
+
   Returns {:ok, module_name, binary} or {:error, reason}
   """
-  def compile(typed_ast, module_name \\ :VaistoModule) do
+  def compile(typed_ast, module_name \\ :VaistoModule, opts \\ [])
+
+  def compile(typed_ast, module_name, opts) when is_list(opts) do
+    load? = Keyword.get(opts, :load, true)
     core_ast = to_core(typed_ast, module_name)
 
     case :compile.forms(core_ast, [:from_core, :binary, :return_errors]) do
       {:ok, ^module_name, binary} ->
-        # Load the module into the VM (matching Emitter's behavior)
-        :code.load_binary(module_name, ~c"vaisto", binary)
+        if load?, do: :code.load_binary(module_name, ~c"vaisto", binary)
         {:ok, module_name, binary}
 
       {:ok, ^module_name, binary, _warnings} ->
-        # Load the module into the VM (matching Emitter's behavior)
-        :code.load_binary(module_name, ~c"vaisto", binary)
+        if load?, do: :code.load_binary(module_name, ~c"vaisto", binary)
         {:ok, module_name, binary}
 
       {:error, errors, _warnings} ->
-        # Try to format errors, but if that fails, return raw errors
         formatted = try do
           format_errors(errors)
         rescue

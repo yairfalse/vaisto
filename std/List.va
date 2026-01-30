@@ -139,3 +139,30 @@
   (if (empty? xs)
     (None)
     (Some (fold (fn [acc x] (if (< x acc) x acc)) (head xs) (tail xs)))))
+
+; --- Sorting ---
+
+; Erlang FFI for sorting
+(extern lists/sort [(List :any)] (List :any))
+(extern lists/sort [:any (List :any)] (List :any))
+
+; sort: (sort list)
+; Returns list sorted in ascending order
+(defn sort [xs]
+  (lists/sort xs))
+
+; sort-desc: (sort-desc list)
+; Returns list sorted in descending order
+(defn sort-desc [xs]
+  (lists/sort (fn [a b] (> a b)) xs))
+
+; sort-by: (sort-by key-fn list)
+; Sorts list by the result of applying key-fn to each element
+(defn sort-by [key-fn xs]
+  (lists/sort (fn [a b] (< (key-fn a) (key-fn b))) xs))
+
+; sort-with: (sort-with compare-fn list)
+; Sorts list using custom comparison function
+; compare-fn should return true if first arg should come before second
+(defn sort-with [cmp xs]
+  (lists/sort cmp xs))

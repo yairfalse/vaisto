@@ -778,8 +778,8 @@
   ; Try to get human-readable message from the module
   ; Most Erlang compiler modules have format_error/1
   (match (safe-format-error mod term)
-    [{:ok msg} msg]
-    [:error (erlang/iolist_to_binary (list "compilation error: " (format-term term)))]))
+    [(Ok msg) msg]
+    [(Err _) (erlang/iolist_to_binary (list "compilation error: " (format-term term)))]))
 
 (extern erlang/apply [:any :any (List :any)] :any)
 (extern erlang/function_exported [:any :any :int] :bool)
@@ -788,8 +788,8 @@
   ; Check if module exports format_error/1
   (if (erlang/function_exported mod :format_error 1)
     (let [result (erlang/apply mod :format_error (list term))]
-      {:ok (erlang/iolist_to_binary result)})
-    :error))
+      (Ok (erlang/iolist_to_binary result)))
+    (Err :not-exported)))
 
 (defn format-term [term]
   ; Convert term to string representation

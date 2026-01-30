@@ -1,0 +1,165 @@
+; Std.Math - Mathematical functions
+(ns Std.Math)
+
+; --- Constants ---
+
+(extern math/pi [] :float)
+(extern math/e [] :float)
+
+; Pi (3.14159...)
+(defn pi [] :float
+  (math/pi))
+
+; Euler's number e (2.71828...)
+(defn e [] :float
+  (math/e))
+
+; --- Basic Functions ---
+
+(extern math/sqrt [:float] :float)
+(extern math/pow [:float :float] :float)
+(extern math/exp [:float] :float)
+(extern math/log [:float] :float)
+(extern math/log10 [:float] :float)
+(extern math/log2 [:float] :float)
+
+; Square root
+(defn sqrt [x] :float
+  (math/sqrt x))
+
+; Power: x^y
+(defn pow [x y] :float
+  (math/pow x y))
+
+; Natural exponential: e^x
+(defn exp [x] :float
+  (math/exp x))
+
+; Natural logarithm (base e)
+(defn log [x] :float
+  (math/log x))
+
+; Base-10 logarithm
+(defn log10 [x] :float
+  (math/log10 x))
+
+; Base-2 logarithm
+(defn log2 [x] :float
+  (math/log2 x))
+
+; --- Trigonometric Functions ---
+
+(extern math/sin [:float] :float)
+(extern math/cos [:float] :float)
+(extern math/tan [:float] :float)
+(extern math/asin [:float] :float)
+(extern math/acos [:float] :float)
+(extern math/atan [:float] :float)
+(extern math/atan2 [:float :float] :float)
+
+; Sine
+(defn sin [x] :float
+  (math/sin x))
+
+; Cosine
+(defn cos [x] :float
+  (math/cos x))
+
+; Tangent
+(defn tan [x] :float
+  (math/tan x))
+
+; Arc sine (inverse sine)
+(defn asin [x] :float
+  (math/asin x))
+
+; Arc cosine (inverse cosine)
+(defn acos [x] :float
+  (math/acos x))
+
+; Arc tangent (inverse tangent)
+(defn atan [x] :float
+  (math/atan x))
+
+; Two-argument arc tangent (atan2)
+(defn atan2 [y x] :float
+  (math/atan2 y x))
+
+; --- Hyperbolic Functions ---
+
+(extern math/sinh [:float] :float)
+(extern math/cosh [:float] :float)
+(extern math/tanh [:float] :float)
+(extern math/asinh [:float] :float)
+(extern math/acosh [:float] :float)
+(extern math/atanh [:float] :float)
+
+; Hyperbolic sine
+(defn sinh [x] :float
+  (math/sinh x))
+
+; Hyperbolic cosine
+(defn cosh [x] :float
+  (math/cosh x))
+
+; Hyperbolic tangent
+(defn tanh [x] :float
+  (math/tanh x))
+
+; Inverse hyperbolic sine
+(defn asinh [x] :float
+  (math/asinh x))
+
+; Inverse hyperbolic cosine
+(defn acosh [x] :float
+  (math/acosh x))
+
+; Inverse hyperbolic tangent
+(defn atanh [x] :float
+  (math/atanh x))
+
+; --- Rounding ---
+
+(extern math/floor [:float] :float)
+(extern math/ceil [:float] :float)
+(extern erlang/round [:float] :int)
+(extern erlang/trunc [:float] :int)
+(extern erlang/abs [:any] :any)
+
+; Floor: largest integer <= x
+(defn floor [x] :float
+  (math/floor x))
+
+; Ceiling: smallest integer >= x
+(defn ceil [x] :float
+  (math/ceil x))
+
+; Round to nearest integer
+(defn round [x] :int
+  (erlang/round x))
+
+; Truncate toward zero
+(defn trunc [x] :int
+  (erlang/trunc x))
+
+; Absolute value
+(defn abs [x]
+  (erlang/abs x))
+
+; --- Helpers ---
+
+; Convert degrees to radians
+(defn deg-to-rad [deg]
+  (* deg (/ (math/pi) 180.0)))
+
+; Convert radians to degrees
+(defn rad-to-deg [rad]
+  (* rad (/ 180.0 (math/pi))))
+
+; Clamp value between min and max
+(defn clamp [x min-val max-val]
+  (if (< x min-val)
+    min-val
+    (if (> x max-val)
+      max-val
+      x)))

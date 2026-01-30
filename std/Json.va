@@ -1,0 +1,36 @@
+; Std.Json - JSON encoding and decoding
+; Wraps the Jason library for JSON operations
+(ns Std.Json)
+
+; --- Erlang/Elixir FFI ---
+; Jason is an Elixir library, so we call it as 'Elixir.Jason'
+(extern Elixir.Jason/encode [:any] :any)
+(extern Elixir.Jason/encode [:any :any] :any)
+(extern Elixir.Jason/decode [:string] :any)
+(extern Elixir.Jason/decode [:string :any] :any)
+
+; --- Encoding ---
+
+; encode: Encode a value to JSON string
+; Returns (Ok json-string) or (Err reason)
+(defn encode [value]
+  (from-erlang-result (Elixir.Jason/encode value)))
+
+; encode-pretty: Encode with indentation for readability
+; Returns (Ok json-string) or (Err reason)
+(defn encode-pretty [value]
+  (from-erlang-result (Elixir.Jason/encode value #{:pretty true})))
+
+; --- Decoding ---
+
+; decode: Decode a JSON string to a value
+; Returns (Ok value) or (Err reason)
+; Note: Objects become maps with string keys
+(defn decode [json-string]
+  (from-erlang-result (Elixir.Jason/decode json-string)))
+
+; decode-atoms: Decode with atom keys for objects
+; Warning: Only use with trusted input (atoms are not garbage collected)
+; Returns (Ok value) or (Err reason)
+(defn decode-atoms [json-string]
+  (from-erlang-result (Elixir.Jason/decode json-string #{:keys :atoms})))

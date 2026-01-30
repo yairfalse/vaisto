@@ -99,3 +99,58 @@
   (match (string/find s needle)
     [:nomatch false]
     [_ true]))
+
+; --- Trim variants ---
+
+; Trim with direction (Erlang FFI)
+(extern string/trim [:string :atom] :string)
+
+; Trim whitespace from start of string
+(defn trim-leading [s]
+  (string/trim s :leading))
+
+; Trim whitespace from end of string
+(defn trim-trailing [s]
+  (string/trim s :trailing))
+
+; --- Case detection ---
+
+; Check if string is all uppercase
+(defn upper? [s]
+  (== s (string/uppercase s)))
+
+; Check if string is all lowercase
+(defn lower? [s]
+  (== s (string/lowercase s)))
+
+; Check if character (codepoint) is uppercase letter
+(defn char-upper? [c]
+  (if (< c 65)
+    false
+    (if (> c 90)
+      false
+      true)))
+
+; Check if character (codepoint) is lowercase letter
+(defn char-lower? [c]
+  (if (< c 97)
+    false
+    (if (> c 122)
+      false
+      true)))
+
+; Check if character (codepoint) is a digit
+(defn char-digit? [c]
+  (if (< c 48)
+    false
+    (if (> c 57)
+      false
+      true)))
+
+; Check if character (codepoint) is whitespace
+(defn char-whitespace? [c]
+  (if (== c 32) true     ; space
+    (if (== c 9) true    ; tab
+      (if (== c 10) true ; newline
+        (if (== c 13) true ; carriage return
+          false)))))
