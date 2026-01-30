@@ -56,6 +56,9 @@ defmodule Vaisto.TypeChecker do
   def check_with_source(ast, source, env \\ @primitives) do
     case check(ast, env) do
       {:ok, _, _} = success -> success
+      {:errors, errors} ->
+        # Multiple errors - format all
+        {:error, Vaisto.ErrorFormatter.format_all(errors, source)}
       {:error, %Error{} = error} ->
         # Structured error - format with rich display
         {:error, Vaisto.ErrorFormatter.format(error, source)}
@@ -1958,7 +1961,7 @@ defmodule Vaisto.TypeChecker do
     end)
 
     # Second pass: type-check each form with full environment
-    check_module_forms(forms, env_with_signatures, [])
+    check_module_forms(forms, env_with_signatures, [], [])
   end
 
   # Signature collection helpers
@@ -2070,51 +2073,60 @@ defmodule Vaisto.TypeChecker do
     Map.put(env, extern_name, func_type)
   end
 
-  defp check_module_forms([], _env, acc) do
-    {:ok, :module, {:module, Enum.reverse(acc)}}
+  defp check_module_forms([], _env, acc, errors) do
+    case errors do
+      [] -> {:ok, :module, {:module, Enum.reverse(acc)}}
+      _ -> {:errors, Enum.reverse(errors)}
+    end
   end
 
-  defp check_module_forms([form | rest], env, acc) do
+  defp check_module_forms([form | rest], env, acc, errors) do
     case check(form, env) do
       {:ok, _type, typed_form} ->
         # Update env with more precise types after checking
-        new_env = case typed_form do
-          {:process, name, _init, _handlers, process_type} ->
-            Map.put(env, name, process_type)
+        new_env = update_env_from_typed_form(typed_form, env)
+        check_module_forms(rest, new_env, [typed_form | acc], errors)
 
-          {:deftype, name, {:product, fields}, record_type} ->
-            # Product type: register single constructor
-            field_types = Enum.map(fields, fn {_name, type} -> type end)
-            constructor_type = {:fn, field_types, record_type}
-            Map.put(env, name, constructor_type)
+      {:error, err} ->
+        # Continue checking remaining forms, accumulate error
+        check_module_forms(rest, env, acc, [err | errors])
+    end
+  end
 
-          {:deftype, name, {:sum, variants}, sum_type} ->
-            # Sum type: register constructor for each variant
-            # Also register the sum type itself for type annotations
-            env_with_type = Map.put(env, name, sum_type)
-            Enum.reduce(variants, env_with_type, fn {ctor_name, field_types}, acc_env ->
-              constructor_type = {:fn, field_types, sum_type}
-              Map.put(acc_env, ctor_name, constructor_type)
-            end)
+  # Extract env updates from a typed form
+  defp update_env_from_typed_form(typed_form, env) do
+    case typed_form do
+      {:process, name, _init, _handlers, process_type} ->
+        Map.put(env, name, process_type)
 
-          {:defn, name, _params, _body, func_type} ->
-            Map.put(env, name, func_type)
+      {:deftype, name, {:product, fields}, record_type} ->
+        # Product type: register single constructor
+        field_types = Enum.map(fields, fn {_name, type} -> type end)
+        constructor_type = {:fn, field_types, record_type}
+        Map.put(env, name, constructor_type)
 
-          {:defn_multi, name, _arity, _clauses, func_type} ->
-            Map.put(env, name, func_type)
+      {:deftype, name, {:sum, variants}, sum_type} ->
+        # Sum type: register constructor for each variant
+        # Also register the sum type itself for type annotations
+        env_with_type = Map.put(env, name, sum_type)
+        Enum.reduce(variants, env_with_type, fn {ctor_name, field_types}, acc_env ->
+          constructor_type = {:fn, field_types, sum_type}
+          Map.put(acc_env, ctor_name, constructor_type)
+        end)
 
-          {:extern, mod, func, func_type} ->
-            # Extern already registered in first pass, but keep in typed forms
-            extern_name = :"#{mod}:#{func}"
-            Map.put(env, extern_name, func_type)
+      {:defn, name, _params, _body, func_type} ->
+        Map.put(env, name, func_type)
 
-          _ ->
-            env
-        end
-        check_module_forms(rest, new_env, [typed_form | acc])
+      {:defn_multi, name, _arity, _clauses, func_type} ->
+        Map.put(env, name, func_type)
 
-      {:error, _} = err ->
-        err
+      {:extern, mod, func, func_type} ->
+        # Extern already registered in first pass, but keep in typed forms
+        extern_name = :"#{mod}:#{func}"
+        Map.put(env, extern_name, func_type)
+
+      _ ->
+        env
     end
   end
 

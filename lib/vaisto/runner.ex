@@ -202,7 +202,11 @@ defmodule Vaisto.Runner do
   end
 
   defp typecheck(ast) do
-    Vaisto.TypeChecker.check(ast)
+    case Vaisto.TypeChecker.check(ast) do
+      {:ok, _, _} = success -> success
+      {:errors, [first | _]} -> {:error, first}  # Return first error for with-clause
+      {:error, _} = err -> err
+    end
   end
 
   defp emit(typed_ast, module_name, backend) do

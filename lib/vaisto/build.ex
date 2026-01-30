@@ -138,8 +138,15 @@ defmodule Vaisto.Build do
                 {:error, "Compilation error: #{reason}"}
             end
 
+          {:errors, errors} ->
+            # Multiple type errors - format all with source context
+            formatted = Vaisto.ErrorFormatter.format_all(errors, full_source)
+            {:error, formatted}
+
           {:error, %Vaisto.Error{} = error} ->
-            {:error, "Type error: #{inspect(error)}"}
+            # Single structured error - format with source context
+            formatted = Vaisto.ErrorFormatter.format(error, full_source)
+            {:error, formatted}
 
           {:error, reason} ->
             {:error, "Type error: #{reason}"}
@@ -273,7 +280,9 @@ defmodule Vaisto.Build do
     if errors == [] do
       {:ok, Enum.reverse(results) |> Enum.map(fn {:ok, r} -> r end)}
     else
-      {:error, errors}
+      # Format as summary - join all error messages
+      error_msgs = Enum.map(errors, fn {:error, msg} -> msg end)
+      {:error, Enum.join(error_msgs, "\n\n")}
     end
   end
 

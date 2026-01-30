@@ -111,11 +111,13 @@ defmodule Vaisto.TypeCheckerTest do
       """
       ast = Vaisto.Parser.parse(code)
       result = TypeChecker.check(ast)
-      assert {:error, error} = result
-      if is_binary(error) do
-        assert error =~ "does not accept message :reset"
-      else
-        assert error.note =~ "does not accept `:reset`"
+      case result do
+        {:error, error} when is_binary(error) ->
+          assert error =~ "does not accept message :reset"
+        {:error, error} ->
+          assert error.note =~ "does not accept `:reset`"
+        {:errors, [error | _]} ->
+          assert error.note =~ "does not accept `:reset`"
       end
     end
   end
@@ -253,6 +255,24 @@ defmodule Vaisto.TypeCheckerTest do
       result = TypeChecker.check_with_source(ast, code)
 
       assert {:ok, :int, _} = result
+    end
+
+    test "collects multiple errors from module" do
+      code = """
+      (defn foo [x :int] :string x)
+      (defn bar [] :int (+ 1 "hello"))
+      """
+      ast = Vaisto.Parser.parse(code)
+
+      # check returns {:errors, list} for multiple errors
+      result = TypeChecker.check(ast)
+      assert {:errors, errors} = result
+      assert length(errors) == 2
+
+      # check_with_source formats all errors
+      {:error, formatted} = TypeChecker.check_with_source(ast, code)
+      assert formatted =~ "return type mismatch"
+      assert formatted =~ "type mismatch"
     end
   end
 
