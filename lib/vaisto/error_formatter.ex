@@ -50,6 +50,14 @@ defmodule Vaisto.ErrorFormatter do
     format_legacy(error, source)
   end
 
+  # Plain string error - try to parse or return as-is
+  def format(error, source) when is_binary(error) do
+    case parse_legacy_error(error) do
+      nil -> error
+      parsed -> format_legacy(parsed, source)
+    end
+  end
+
   @doc """
   Formats multiple errors with source context.
   """

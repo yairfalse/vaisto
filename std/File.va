@@ -87,3 +87,114 @@
   (if (file? path)
     true
     (dir? path)))
+
+; --- Additional Operations ---
+
+; Append to file (creates if doesn't exist)
+(extern file/write_file [:string :string (List :atom)] :any)
+
+; Append contents to a file
+; (append "path" "contents") -> (Ok :ok) | (Err reason)
+(defn append [path contents]
+  (from-erlang-result (file/write_file path contents (list :append))))
+
+; Copy a file
+(extern file/copy [:string :string] :any)
+
+; Copy a file to a new location
+; (copy "src" "dest") -> (Ok bytes-copied) | (Err reason)
+(defn copy [src dest]
+  (from-erlang-result (file/copy src dest)))
+
+; Rename/move a file
+(extern file/rename [:string :string] :any)
+
+; Rename or move a file
+; (rename "old" "new") -> (Ok :ok) | (Err reason)
+(defn rename [old-path new-path]
+  (from-erlang-result (file/rename old-path new-path)))
+
+; Alias for rename
+(defn move [src dest]
+  (rename src dest))
+
+; Ensure directory exists (creates parent dirs if needed)
+(extern filelib/ensure_dir [:string] :any)
+
+; Create directory and all parent directories
+; (mkdir-p "path/to/dir") -> (Ok :ok) | (Err reason)
+; Note: ensure_dir expects a FILE path, creates parent dirs
+(defn mkdir-p [path]
+  ; Add trailing slash to treat as dir, then ensure parent exists
+  (match (from-erlang-result (filelib/ensure_dir (path-join path ".")))
+    [(Ok _) (mkdir path)]
+    [(Err e) (Err e)]))
+
+; --- Path Operations ---
+
+(extern filename/join [(List :string)] :string)
+(extern filename/dirname [:string] :string)
+(extern filename/basename [:string] :string)
+(extern filename/extension [:string] :string)
+(extern filename/rootname [:string] :string)
+
+; Join path segments
+; (path-join "foo" "bar" "baz") -> "foo/bar/baz"
+(defn path-join [a b]
+  (filename/join (list a b)))
+
+; Join list of path segments
+; (path-join-all ["foo" "bar" "baz"]) -> "foo/bar/baz"
+(defn path-join-all [parts]
+  (filename/join parts))
+
+; Get directory part of path
+; (dirname "/foo/bar/baz.txt") -> "/foo/bar"
+(defn dirname [path]
+  (filename/dirname path))
+
+; Get filename part of path
+; (basename "/foo/bar/baz.txt") -> "baz.txt"
+(defn basename [path]
+  (filename/basename path))
+
+; Get file extension (includes dot)
+; (extension "/foo/bar.txt") -> ".txt"
+(defn extension [path]
+  (filename/extension path))
+
+; Get path without extension
+; (rootname "/foo/bar.txt") -> "/foo/bar"
+(defn rootname [path]
+  (filename/rootname path))
+
+; --- Reading Variants ---
+
+(extern binary/split [:string :string] (List :string))
+
+; Read file as list of lines
+; (read-lines "path") -> (Ok ["line1" "line2" ...]) | (Err reason)
+(defn read-lines [path]
+  (match (read-file path)
+    [(Ok contents) (Ok (binary/split contents "\n"))]
+    [(Err e) (Err e)]))
+
+; --- Temporary Files ---
+
+(extern filelib/safe_relative_path [:string :string] :any)
+
+; Create a temp directory path (doesn't create the dir)
+(extern filename/basedir [:atom :string] :string)
+
+; Get system temp directory
+(defn tmp-dir []
+  "/tmp")
+
+; Generate a unique temp file path
+(extern erlang/unique_integer [] :int)
+(extern erlang/integer_to_list [:int] (List :int))
+(extern erlang/list_to_binary [(List :int)] :string)
+
+(defn tmp-path [prefix]
+  (let [unique (erlang/list_to_binary (erlang/integer_to_list (erlang/unique_integer)))]
+    (path-join (tmp-dir) (str prefix unique))))
