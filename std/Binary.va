@@ -111,7 +111,8 @@
 (defn load-module [name filename bytecode]
   (match (code/load_binary name filename bytecode)
     [{:module mod} (Ok mod)]
-    [{:error reason} (Err reason)]))
+    [{:error reason} (Err reason)]
+    [other (Err other)]))
 
 ; --- File I/O for BEAM files ---
 
