@@ -9,6 +9,7 @@ defmodule Vaisto.LSP.Hover do
   alias Vaisto.Parser
   alias Vaisto.TypeChecker
   alias Vaisto.Error
+  alias Vaisto.LSP.ASTAnalyzer
 
   # Delimiters that separate tokens
   @delimiters [?(, ?), ?[, ?], ?{, ?}, ?\s, ?\t, ?\n, ?\r]
@@ -250,183 +251,13 @@ defmodule Vaisto.LSP.Hover do
 
     try do
       ast = Parser.parse(source, file: file)
-      forms = if is_list(ast), do: ast, else: [ast]
-
-      # First, search top-level definitions
-      case find_top_level_def(forms, token_atom) do
-        {:ok, _} = found -> found
-        :not_found ->
-          # Search for local definitions (let bindings, params)
-          find_local_def(forms, token_atom)
-      end
+      ASTAnalyzer.find_definition_at(ast, token_atom)
     rescue
       _ -> :not_found
     end
   end
 
-  # Search top-level forms for a definition
-  defp find_top_level_def([], _name), do: :not_found
-
-  defp find_top_level_def([{:defn, name, _params, _body, _ret, loc} | _rest], name) do
-    {:ok, definition_loc(:defn, loc)}
-  end
-
-  defp find_top_level_def([{:defn, name, _params, _body, loc} | _rest], name) when is_struct(loc, Parser.Loc) do
-    {:ok, definition_loc(:defn, loc)}
-  end
-
-  defp find_top_level_def([{:defn_multi, name, _clauses, loc} | _rest], name) do
-    {:ok, definition_loc(:defn, loc)}
-  end
-
-  defp find_top_level_def([{:defval, name, _expr, loc} | _rest], name) do
-    {:ok, definition_loc(:defval, loc)}
-  end
-
-  defp find_top_level_def([{:process, name, _init, _handlers, loc} | _rest], name) do
-    {:ok, definition_loc(:process, loc)}
-  end
-
-  defp find_top_level_def([{:deftype, type_name, {:sum, variants}, loc} | _rest], name) do
-    # Check if it's the type name
-    if type_name == name do
-      {:ok, definition_loc(:deftype, loc)}
-    else
-      # Check if it's a constructor name
-      case Enum.find(variants, fn {ctor, _} -> ctor == name end) do
-        {^name, _} -> {:ok, definition_loc(:deftype, loc)}
-        nil -> :not_found
-      end
-    end
-  end
-
-  defp find_top_level_def([{:deftype, name, _def, loc} | _rest], name) do
-    {:ok, definition_loc(:deftype, loc)}
-  end
-
-  defp find_top_level_def([{:extern, _mod, func, _args, _ret, loc} | _rest], func) do
-    {:ok, definition_loc(:extern, loc)}
-  end
-
-  defp find_top_level_def([_ | rest], name), do: find_top_level_def(rest, name)
-
-  # Calculate the actual location of the name within the definition
-  # Offset depends on the keyword: "(defn " = 6, "(deftype " = 9, etc.
-  @keyword_offsets %{
-    defn: 6,      # "(defn "
-    defval: 6,    # "(def " - defval is parsed from (def name value)
-    deftype: 9,   # "(deftype "
-    process: 9,   # "(process "
-    extern: 8     # "(extern " - but extern has module:func format
-  }
-
-  defp definition_loc(keyword, %Parser.Loc{} = loc) do
-    offset = Map.get(@keyword_offsets, keyword, 6)
-    %{line: loc.line, col: loc.col + offset}
-  end
-
-  # Search for local definitions (let bindings, function params)
-  defp find_local_def(forms, name) do
-    Enum.find_value(forms, :not_found, fn form ->
-      case search_local_in_form(form, name) do
-        {:ok, _} = found -> found
-        :not_found -> nil
-      end
-    end)
-  end
-
-  # Search within a form for local variable definitions
-  defp search_local_in_form({:defn, _fname, params, body, _ret, loc}, name) do
-    # Check params first
-    case find_in_params(params, name, loc) do
-      {:ok, _} = found -> found
-      :not_found -> search_local_in_expr(body, name)
-    end
-  end
-
-  defp search_local_in_form({:defn, _fname, params, body, loc}, name) when is_struct(loc, Parser.Loc) do
-    case find_in_params(params, name, loc) do
-      {:ok, _} = found -> found
-      :not_found -> search_local_in_expr(body, name)
-    end
-  end
-
-  defp search_local_in_form({:let, bindings, body, loc}, name) do
-    case find_in_let_bindings(bindings, name, loc) do
-      {:ok, _} = found -> found
-      :not_found -> search_local_in_expr(body, name)
-    end
-  end
-
-  defp search_local_in_form({:fn, params, body, _loc}, name) do
-    # Anonymous functions - params are just atoms without location info
-    # Go-to-definition for fn params would require parser changes
-    case Enum.find_index(params, &(&1 == name)) do
-      nil -> search_local_in_expr(body, name)
-      _idx -> :not_found
-    end
-  end
-
-  defp search_local_in_form({:call, _func, args, _loc}, name) do
-    Enum.find_value(args, :not_found, fn arg ->
-      case search_local_in_expr(arg, name) do
-        {:ok, _} = found -> found
-        :not_found -> nil
-      end
-    end)
-  end
-
-  defp search_local_in_form({:if, cond, then_b, else_b, _loc}, name) do
-    search_local_in_expr(cond, name) ||
-    search_local_in_expr(then_b, name) ||
-    search_local_in_expr(else_b, name) ||
-    :not_found
-  end
-
-  defp search_local_in_form({:do, exprs, _loc}, name) do
-    Enum.find_value(exprs, :not_found, fn expr ->
-      case search_local_in_expr(expr, name) do
-        {:ok, _} = found -> found
-        :not_found -> nil
-      end
-    end)
-  end
-
-  defp search_local_in_form(_, _name), do: :not_found
-
-  defp search_local_in_expr(expr, name), do: search_local_in_form(expr, name)
-
-  # Find a parameter in the params list
-  # Params are [{name, type}, ...] with types
-  # NOTE: Column calculation is approximate - assumes standard formatting.
-  # A more robust solution would store exact positions during parsing.
-  defp find_in_params(params, name, defn_loc) do
-    case Enum.find_index(params, fn
-      {pname, _type} -> pname == name
-      pname when is_atom(pname) -> pname == name
-      _ -> false
-    end) do
-      nil -> :not_found
-      idx ->
-        # Approximate: "(defn name [" is ~14 chars, each "x :type " is ~2 per param
-        {:ok, %{line: defn_loc.line, col: defn_loc.col + 14 + idx * 2}}
-    end
-  end
-
-  # Find a variable in let bindings
-  # Bindings from parser are [{name, value}, ...] or keyword list
-  defp find_in_let_bindings(bindings, name, let_loc) do
-    case Enum.find(bindings, fn
-      {bname, _value} -> bname == name
-      _ -> false
-    end) do
-      nil -> :not_found
-      _ ->
-        # We cannot reliably compute the exact column of a binding from formatting,
-        # so return the location of the let form itself as an approximate definition.
-        {:ok, %{line: let_loc.line, col: let_loc.col}}
-    end
-  end
+  # Definition finding is now handled by ASTAnalyzer
 
   defp lookup_in_checked_source(source, token, file) do
     try do

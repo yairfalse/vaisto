@@ -10,6 +10,8 @@ defmodule Vaisto.LSP.Completion do
   """
 
   alias Vaisto.Parser
+  alias Vaisto.LSP.ASTAnalyzer
+  alias Vaisto.TypeFormatter
 
   # LSP CompletionItemKind constants
   @kind_keyword 14
@@ -219,70 +221,43 @@ defmodule Vaisto.LSP.Completion do
   defp user_function_completions(text) do
     try do
       ast = Parser.parse(text)
-      forms = if is_list(ast), do: ast, else: [ast]
 
-      forms
-      |> Enum.flat_map(&extract_definitions/1)
-      |> Enum.map(fn {name, kind, detail} ->
-        %{
-          "label" => to_string(name),
-          "kind" => kind,
-          "detail" => detail,
-          "insertText" => to_string(name)
-        }
-      end)
+      ast
+      |> ASTAnalyzer.extract_definitions()
+      |> Enum.map(&definition_to_completion/1)
     rescue
       _ -> []
     end
   end
 
-  defp extract_definitions({:defn, name, params, _body, _loc}) do
-    arity = length(params)
-    [{name, @kind_function, "function/#{arity}"}]
+  # Convert ASTAnalyzer definition to LSP completion item
+  defp definition_to_completion(%{name: name, kind: kind, arity: arity, type: type}) do
+    {lsp_kind, detail} = case kind do
+      :function -> {@kind_function, "function/#{arity || 0}"}
+      :type -> {@kind_type, type_detail(type)}
+      :constructor -> {@kind_function, "constructor/#{arity || 0}"}
+      :variable -> {@kind_variable, "value"}
+      :process -> {@kind_function, "process"}
+      :extern -> {@kind_function, format_extern_type(type)}
+    end
+
+    %{
+      "label" => to_string(name),
+      "kind" => lsp_kind,
+      "detail" => detail,
+      "insertText" => to_string(name)
+    }
   end
 
-  defp extract_definitions({:defn, name, params, _body, _ret, _loc}) do
-    arity = length(params)
-    [{name, @kind_function, "function/#{arity}"}]
+  defp type_detail({:sum, _variants}), do: "sum type"
+  defp type_detail({:record, _fields}), do: "record type"
+  defp type_detail(_), do: "type"
+
+  defp format_extern_type({:fn, args, ret}) do
+    arg_str = args |> Enum.map(&TypeFormatter.format/1) |> Enum.join(", ")
+    "(#{arg_str}) → #{TypeFormatter.format(ret)}"
   end
-
-  defp extract_definitions({:defn_multi, name, arity, _clauses, _loc}) do
-    [{name, @kind_function, "function/#{arity}"}]
-  end
-
-  defp extract_definitions({:deftype, name, {:sum, variants}, _loc}) do
-    type_completion = {name, @kind_type, "sum type"}
-    constructor_completions = Enum.map(variants, fn {ctor_name, args} ->
-      arity = length(args)
-      {ctor_name, @kind_function, "constructor/#{arity}"}
-    end)
-    [type_completion | constructor_completions]
-  end
-
-  defp extract_definitions({:deftype, name, {:record, _fields}, _loc}) do
-    [{name, @kind_type, "record type"}]
-  end
-
-  defp extract_definitions({:defval, name, _expr, _loc}) do
-    [{name, @kind_variable, "value"}]
-  end
-
-  defp extract_definitions({:process, name, _init, _handlers, _loc}) do
-    [{name, @kind_function, "process"}]
-  end
-
-  defp extract_definitions({:extern, _mod, func, args, ret, _loc}) do
-    arg_types = Enum.map_join(args, ", ", &format_type/1)
-    ret_type = format_type(ret)
-    [{func, @kind_function, "(#{arg_types}) → #{ret_type}"}]
-  end
-
-  defp extract_definitions(_), do: []
-
-  defp format_type(type) when is_atom(type), do: ":#{type}"
-  defp format_type({:list, t}), do: "[#{format_type(t)}]"
-  defp format_type({:fn, args, ret}), do: "(#{Enum.map_join(args, ", ", &format_type/1)}) → #{format_type(ret)}"
-  defp format_type(other), do: inspect(other)
+  defp format_extern_type(_), do: "extern"
 
   # ============================================================================
   # Filtering

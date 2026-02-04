@@ -87,24 +87,108 @@ defmodule Vaisto.Error do
 
   @doc """
   Format a type for display in error messages.
+
+  Delegates to `Vaisto.TypeFormatter.format/1` for consistent formatting
+  across the codebase.
   """
-  def format_type(:int), do: "Int"
-  def format_type(:float), do: "Float"
-  def format_type(:bool), do: "Bool"
-  def format_type(:string), do: "String"
-  def format_type(:atom), do: "Atom"
-  def format_type(:any), do: "Any"
-  def format_type(:unit), do: "()"
-  def format_type({:list, elem}), do: "List(#{format_type(elem)})"
-  def format_type({:fn, args, ret}) do
-    arg_str = args |> Enum.map(&format_type/1) |> Enum.join(", ")
-    "(#{arg_str}) -> #{format_type(ret)}"
+  defdelegate format_type(type), to: Vaisto.TypeFormatter, as: :format
+
+  @doc """
+  Create an Error from a plain string message.
+
+  Useful for normalizing legacy error formats.
+
+  ## Examples
+
+      iex> Vaisto.Error.from_string("something went wrong")
+      %Vaisto.Error{message: "something went wrong"}
+  """
+  @spec from_string(String.t()) :: t()
+  def from_string(message) when is_binary(message) do
+    %__MODULE__{message: message}
   end
-  def format_type({:pid, name, _}), do: "Pid(#{name})"
-  def format_type({:process, state, _}), do: "Process(#{format_type(state)})"
-  def format_type({:sum, name, _}), do: "#{name}"
-  def format_type({:record, name, _}), do: "#{name}"
-  def format_type({:atom, a}), do: ":#{a}"
-  def format_type(other) when is_atom(other), do: "#{other}"
-  def format_type(other), do: inspect(other)
+
+  @doc """
+  Wrap an error tuple, normalizing to structured format.
+
+  Handles all common error formats:
+  - `{:error, %Error{}}` - already structured, returns as-is
+  - `{:error, "string"}` - converts to structured
+  - `{:errors, [list]}` - returns first error normalized
+
+  ## Examples
+
+      iex> Vaisto.Error.wrap({:error, "bad input"})
+      {:error, %Vaisto.Error{message: "bad input"}}
+
+      iex> Vaisto.Error.wrap({:error, %Vaisto.Error{message: "typed"}})
+      {:error, %Vaisto.Error{message: "typed"}}
+  """
+  @spec wrap(term()) :: {:error, t()} | {:ok, term()}
+  def wrap({:error, %__MODULE__{} = error}), do: {:error, error}
+  def wrap({:error, msg}) when is_binary(msg), do: {:error, from_string(msg)}
+  def wrap({:errors, [first | _]}), do: wrap({:error, first})
+  def wrap({:errors, []}), do: {:error, from_string("unknown error")}
+  def wrap({:ok, _} = success), do: success
+  def wrap(other), do: {:error, from_string(inspect(other))}
+
+  @doc """
+  Normalize an error value to a structured Error.
+
+  Unlike `wrap/1`, this takes just the error value (not the tuple).
+
+  ## Examples
+
+      iex> Vaisto.Error.normalize("string error")
+      %Vaisto.Error{message: "string error"}
+
+      iex> Vaisto.Error.normalize(%Vaisto.Error{message: "typed"})
+      %Vaisto.Error{message: "typed"}
+  """
+  @spec normalize(term()) :: t()
+  def normalize(%__MODULE__{} = error), do: error
+  def normalize(msg) when is_binary(msg), do: from_string(msg)
+  def normalize(other), do: from_string(inspect(other))
+
+  @doc """
+  Check if a value is an Error struct.
+  """
+  @spec error?(term()) :: boolean()
+  def error?(%__MODULE__{}), do: true
+  def error?(_), do: false
+
+  @doc """
+  Extract the message from any error format.
+
+  ## Examples
+
+      iex> Vaisto.Error.message(%Vaisto.Error{message: "foo"})
+      "foo"
+
+      iex> Vaisto.Error.message("plain string")
+      "plain string"
+  """
+  @spec message(t() | String.t()) :: String.t()
+  def message(%__MODULE__{message: msg}), do: msg
+  def message(msg) when is_binary(msg), do: msg
+  def message(other), do: inspect(other)
+
+  @doc """
+  Convert an error to a full text representation including all fields.
+
+  This is useful for pattern matching in tests.
+  """
+  @spec to_string(t()) :: String.t()
+  def to_string(%__MODULE__{} = error) do
+    parts = [error.message]
+    parts = if error.note, do: parts ++ [error.note], else: parts
+    parts = if error.hint, do: parts ++ [error.hint], else: parts
+    Enum.join(parts, " ")
+  end
+
+  # Allow string pattern matching on Error structs
+  defimpl String.Chars do
+    def to_string(error), do: Vaisto.Error.to_string(error)
+  end
 end
+

@@ -6,6 +6,8 @@ defmodule Vaisto.LSP.References do
   documents and supports safe renaming with workspace edits.
   """
 
+  alias Vaisto.LSP.Position
+
   # ============================================================================
   # Public API
   # ============================================================================
@@ -39,10 +41,7 @@ defmodule Vaisto.LSP.References do
     # Find word boundaries around cursor
     case find_word_at(current_line, col) do
       {:ok, word, start_col, end_col} ->
-        range = %{
-          "start" => %{"line" => line - 1, "character" => start_col - 1},
-          "end" => %{"line" => line - 1, "character" => end_col - 1}
-        }
+        range = Position.line_range(line, start_col, end_col)
         {:ok, word, range}
 
       :not_found ->

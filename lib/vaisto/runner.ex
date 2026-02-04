@@ -197,15 +197,15 @@ defmodule Vaisto.Runner do
       ast = Vaisto.Parser.parse(source)
       {:ok, ast}
     rescue
-      e -> {:error, "Parse error: #{Exception.message(e)}"}
+      e -> {:error, Vaisto.Error.new("parse error", note: Exception.message(e))}
     end
   end
 
   defp typecheck(ast) do
     case Vaisto.TypeChecker.check(ast) do
       {:ok, _, _} = success -> success
-      {:errors, [first | _]} -> {:error, first}  # Return first error for with-clause
-      {:error, _} = err -> err
+      {:errors, [first | _]} -> {:error, Vaisto.Error.normalize(first)}
+      {:error, err} -> {:error, Vaisto.Error.normalize(err)}
     end
   end
 
@@ -213,7 +213,10 @@ defmodule Vaisto.Runner do
     case backend do
       :core -> Vaisto.CoreEmitter.compile(typed_ast, module_name)
       :elixir -> Vaisto.Emitter.compile(typed_ast, module_name)
-      other -> {:error, "Unknown backend: #{inspect(other)}. Use :core or :elixir"}
+      other -> {:error, Vaisto.Error.new("unknown backend",
+        note: "#{inspect(other)} is not valid",
+        hint: "use :core or :elixir"
+      )}
     end
   end
 end

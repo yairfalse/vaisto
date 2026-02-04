@@ -8,6 +8,8 @@ defmodule Vaisto.LSP.SignatureHelp do
   """
 
   alias Vaisto.Parser
+  alias Vaisto.LSP.ASTAnalyzer
+  alias Vaisto.TypeFormatter
 
   # ============================================================================
   # Built-in Function Signatures
@@ -422,24 +424,39 @@ defmodule Vaisto.LSP.SignatureHelp do
   defp get_user_signature(func_name, text) do
     try do
       ast = Parser.parse(text)
-      forms = if is_list(ast), do: ast, else: [ast]
-
       func_atom = String.to_atom(func_name)
 
-      forms
-      |> Enum.find_value(fn
-        {:defn, ^func_atom, params, _body, _loc} ->
-          build_user_signature(func_name, params, nil)
-
-        {:defn, ^func_atom, params, _body, ret_type, _loc} ->
-          build_user_signature(func_name, params, ret_type)
-
-        _ -> nil
-      end)
+      # Use ASTAnalyzer to find the function definition
+      case ASTAnalyzer.find_definition_at(ast, func_atom) do
+        {:ok, _loc} ->
+          # Found it - now extract params from the definition
+          defs = ASTAnalyzer.extract_definitions(ast)
+          case Enum.find(defs, &(&1.name == func_atom && &1.kind == :function)) do
+            %{arity: arity} ->
+              # Get params from AST directly for signature building
+              find_function_params(ast, func_atom)
+            _ -> nil
+          end
+        :not_found -> nil
+      end
     rescue
       _ -> nil
     end
   end
+
+  defp find_function_params(ast, func_name) when is_list(ast) do
+    Enum.find_value(ast, &find_function_params(&1, func_name))
+  end
+
+  defp find_function_params({:defn, name, params, _body, _loc}, name) do
+    build_user_signature(to_string(name), params, nil)
+  end
+
+  defp find_function_params({:defn, name, params, _body, ret_type, _loc}, name) do
+    build_user_signature(to_string(name), params, ret_type)
+  end
+
+  defp find_function_params(_, _), do: nil
 
   defp build_user_signature(name, params, ret_type) do
     param_strs = Enum.map(params, fn
@@ -470,10 +487,7 @@ defmodule Vaisto.LSP.SignatureHelp do
     }
   end
 
-  defp format_type(type) when is_atom(type), do: ":#{type}"
-  defp format_type({:list, t}), do: "[#{format_type(t)}]"
-  defp format_type({:fn, args, ret}), do: "(#{Enum.map_join(args, ", ", &format_type/1)}) → #{format_type(ret)}"
-  defp format_type(other), do: inspect(other)
+  defp format_type(type), do: TypeFormatter.format(type)
 
   # ============================================================================
   # Response Building

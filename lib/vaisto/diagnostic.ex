@@ -134,17 +134,6 @@ defmodule Vaisto.Diagnostic do
     new(loc, msg, span_length: String.length(to_string(message)) + 1, hint: hint)
   end
 
-  # Format types for display
-  defp format_type(:int), do: "Int"
-  defp format_type(:float), do: "Float"
-  defp format_type(:bool), do: "Bool"
-  defp format_type(:string), do: "String"
-  defp format_type(:any), do: "Any"
-  defp format_type(:ok), do: "Ok"
-  defp format_type({:atom, a}), do: "Atom(:#{a})"
-  defp format_type({:list, t}), do: "List(#{format_type(t)})"
-  defp format_type({:pid, name, _}), do: "Pid(#{name})"
-  defp format_type({:record, name, _}), do: "#{name}"
-  defp format_type({:fn, args, ret}), do: "(#{Enum.map_join(args, ", ", &format_type/1)}) -> #{format_type(ret)}"
-  defp format_type(other), do: inspect(other)
+  # Delegate to TypeFormatter for consistent type display
+  defp format_type(type), do: Vaisto.TypeFormatter.format(type)
 end

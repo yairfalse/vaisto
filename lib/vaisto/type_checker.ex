@@ -661,7 +661,7 @@ defmodule Vaisto.TypeChecker do
           {:ok, ret_type, {:call, {:qualified, mod, func}, typed_args, ret_type}}
         end
       other ->
-        {:error, "#{mod}:#{func} is not a function, got: #{inspect(other)}"}
+        {:error, Errors.extern_not_a_function(mod, func, other)}
     end
   end
 
@@ -951,13 +951,12 @@ defmodule Vaisto.TypeChecker do
 
   # Handle parse errors (propagate them as type errors with location info)
   def check({:error, msg, %Vaisto.Parser.Loc{} = loc}, _env) do
-    file = if loc.file, do: "#{loc.file}:", else: ""
-    {:error, "#{file}#{loc.line}:#{loc.col}: #{msg}"}
+    {:error, Errors.parse_error(msg, span: Error.span_from_loc(loc), file: loc.file)}
   end
 
   # Fallback
   def check(other, _env) do
-    {:error, "Unknown expression: #{inspect(other)}"}
+    {:error, Errors.unknown_expression(other)}
   end
 
   # Parse type expressions from extern declarations and type annotations
@@ -990,18 +989,16 @@ defmodule Vaisto.TypeChecker do
     {:error, %{error | file: error.file || loc.file}}
   end
 
-  # Legacy string error - add location prefix
-  defp with_loc({:error, msg}, %Vaisto.Parser.Loc{line: line, col: col, file: file}) when is_binary(msg) do
+  # Legacy string error - convert to structured Error with location
+  defp with_loc({:error, msg}, %Vaisto.Parser.Loc{} = loc) when is_binary(msg) do
     # Check if error already has location (format: "line:col:" or "file:line:col:")
     if String.match?(msg, ~r/^\d+:\d+:/) or String.match?(msg, ~r/^[^:]+:\d+:\d+:/) do
-      # Error already has location, pass through
-      {:error, msg}
+      # Error already has location, convert to Error struct as-is
+      {:error, Error.from_string(msg)}
     else
-      prefix = case file do
-        nil -> "#{line}:#{col}"
-        f -> "#{f}:#{line}:#{col}"
-      end
-      {:error, "#{prefix}: #{msg}"}
+      # Add location to the error
+      span = Error.span_from_loc(loc)
+      {:error, %Error{message: msg, file: loc.file, primary_span: span}}
     end
   end
 
@@ -1299,8 +1296,7 @@ defmodule Vaisto.TypeChecker do
       if MapSet.size(missing) == 0 do
         :ok
       else
-        missing_list = missing |> MapSet.to_list() |> Enum.join(", ")
-        {:error, "Non-exhaustive pattern match on #{type_name}. Missing variants: #{missing_list}"}
+        {:error, Errors.non_exhaustive_sum(type_name, MapSet.to_list(missing))}
       end
     end
   end
@@ -1328,8 +1324,7 @@ defmodule Vaisto.TypeChecker do
 
       # Only error if using result-like tags without covering both
       if has_result_tags and MapSet.size(missing_result_tags) > 0 do
-        missing_str = missing_result_tags |> MapSet.to_list() |> Enum.map(&":#{&1}") |> Enum.join(", ")
-        {:error, "Non-exhaustive pattern match on result tuple. Missing patterns for: #{missing_str}"}
+        {:error, Errors.non_exhaustive_result(MapSet.to_list(missing_result_tags))}
       else
         :ok
       end
@@ -1887,7 +1882,7 @@ defmodule Vaisto.TypeChecker do
   defp validate_strategy(strategy) when strategy in [:one_for_one, :all_for_one, :rest_for_one] do
     :ok
   end
-  defp validate_strategy(strategy), do: {:error, "Unknown supervision strategy: #{inspect(strategy)}"}
+  defp validate_strategy(strategy), do: {:error, Errors.unknown_supervision_strategy(strategy)}
 
   defp check_children(children, _env) do
     # For now, just validate they're well-formed

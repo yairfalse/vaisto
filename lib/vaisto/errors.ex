@@ -171,6 +171,56 @@ defmodule Vaisto.Errors do
     Error.new(message, opts)
   end
 
+  @doc "Unknown expression type"
+  def unknown_expression(expr, opts \\ []) do
+    Error.new("unknown expression",
+      Keyword.merge(opts, [
+        note: "cannot type check: #{inspect(expr)}"
+      ])
+    )
+  end
+
+  @doc "Non-exhaustive pattern match on sum type"
+  def non_exhaustive_sum(type_name, missing_variants, opts \\ []) do
+    missing_list = missing_variants |> Enum.map(&to_string/1) |> Enum.join(", ")
+    Error.new("non-exhaustive pattern match",
+      Keyword.merge(opts, [
+        note: "match on `#{type_name}` does not cover all variants",
+        hint: "missing variants: #{missing_list}"
+      ])
+    )
+  end
+
+  @doc "Non-exhaustive pattern match on result tuples"
+  def non_exhaustive_result(missing_tags, opts \\ []) do
+    missing_str = missing_tags |> Enum.map(&":#{&1}") |> Enum.join(", ")
+    Error.new("non-exhaustive pattern match",
+      Keyword.merge(opts, [
+        note: "result-like match is not exhaustive",
+        hint: "missing patterns for: #{missing_str}"
+      ])
+    )
+  end
+
+  @doc "Unknown supervision strategy"
+  def unknown_supervision_strategy(strategy, opts \\ []) do
+    Error.new("unknown supervision strategy",
+      Keyword.merge(opts, [
+        note: "`#{inspect(strategy)}` is not a valid strategy",
+        hint: "valid strategies are :one_for_one, :all_for_one, :rest_for_one"
+      ])
+    )
+  end
+
+  @doc "Extern function lookup failed"
+  def extern_not_a_function(mod, func, actual, opts \\ []) do
+    Error.new("extern is not a function",
+      Keyword.merge(opts, [
+        note: "`#{mod}:#{func}` resolved to #{inspect(actual)}, not a function type"
+      ])
+    )
+  end
+
   # ============================================================================
   # Process/Concurrency Errors
   # ============================================================================

@@ -1,6 +1,11 @@
 defmodule Vaisto.ADTTest do
   use ExUnit.Case
   alias Vaisto.Runner
+  alias Vaisto.Error
+
+  # Helper to extract full error text from either string or Error struct
+  defp error_text(%Error{} = err), do: Error.to_string(err)
+  defp error_text(msg) when is_binary(msg), do: msg
 
   describe "sum type definition" do
     test "parses sum type syntax" do
@@ -121,9 +126,10 @@ defmodule Vaisto.ADTTest do
         [(Ok v) v])
       """
       result = Runner.compile_and_load(code, :NonExhaustive)
-      assert {:error, msg} = result
-      assert msg =~ "Non-exhaustive"
-      assert msg =~ "Error"
+      assert {:error, err} = result
+      text = error_text(err)
+      assert text =~ "non-exhaustive" or text =~ "Non-exhaustive"
+      assert text =~ "Error"
     end
 
     test "accepts exhaustive match" do
@@ -165,10 +171,11 @@ defmodule Vaisto.ADTTest do
         [(Red) 1])
       """
       result = Runner.compile_and_load(code, :MissingMultiple)
-      assert {:error, msg} = result
-      assert msg =~ "Non-exhaustive"
+      assert {:error, err} = result
+      text = error_text(err)
+      assert text =~ "non-exhaustive" or text =~ "Non-exhaustive"
       # Should mention both missing variants
-      assert msg =~ "Green" or msg =~ "Blue"
+      assert text =~ "Green" or text =~ "Blue"
     end
   end
 

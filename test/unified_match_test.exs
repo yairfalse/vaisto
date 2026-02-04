@@ -11,7 +11,7 @@ defmodule Vaisto.UnifiedMatchTest do
   No more match-tuple. One construct to rule them all.
   """
   use ExUnit.Case
-  alias Vaisto.{Parser, TypeChecker, CoreEmitter}
+  alias Vaisto.{Parser, TypeChecker, CoreEmitter, Error}
 
   # Helper to compile and run code, returning the result
   defp run(code, mod_name) do
@@ -217,9 +217,10 @@ defmodule Vaisto.UnifiedMatchTest do
       """
       # Should error: {:ok ...} without {:error ...} pattern
       ast = Parser.parse(code)
-      assert {:error, msg} = TypeChecker.check(ast)
-      assert msg =~ "Non-exhaustive pattern match"
-      assert msg =~ ":error"
+      assert {:error, err} = TypeChecker.check(ast)
+      text = Error.to_string(err)
+      assert text =~ "non-exhaustive" or text =~ "Non-exhaustive"
+      assert text =~ ":error"
     end
 
     @tag :unified_match

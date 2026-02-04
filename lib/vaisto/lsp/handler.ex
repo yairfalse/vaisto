@@ -5,7 +5,7 @@ defmodule Vaisto.LSP.Handler do
   Dispatches to appropriate handlers based on method name.
   """
 
-  alias Vaisto.LSP.{Protocol, Hover, Completion, SignatureHelp, References}
+  alias Vaisto.LSP.{Protocol, Hover, Completion, SignatureHelp, References, Position}
   alias Vaisto.{Parser, TypeChecker}
 
   @doc """
@@ -216,8 +216,7 @@ defmodule Vaisto.LSP.Handler do
     text = state.documents[uri]
 
     if text do
-      line = pos["line"] + 1  # LSP is 0-indexed
-      col = pos["character"] + 1
+      {line, col} = Position.lsp_to_vaisto(pos["line"], pos["character"])
       file = uri_to_path(uri)
 
       result = case Hover.get_hover(text, line, col, file) do
@@ -227,10 +226,7 @@ defmodule Vaisto.LSP.Handler do
               "kind" => "markdown",
               "value" => hover.contents
             },
-            "range" => %{
-              "start" => %{"line" => hover.range.line - 1, "character" => hover.range.col - 1},
-              "end" => %{"line" => hover.range.line - 1, "character" => hover.range.col - 1 + hover.range.length}
-            }
+            "range" => Position.to_lsp_range(hover.range.line, hover.range.col, hover.range.length)
           }
 
         :not_found ->
@@ -252,18 +248,14 @@ defmodule Vaisto.LSP.Handler do
     text = state.documents[uri]
 
     if text do
-      line = pos["line"] + 1
-      col = pos["character"] + 1
+      {line, col} = Position.lsp_to_vaisto(pos["line"], pos["character"])
       file = uri_to_path(uri)
 
       result = case Hover.get_definition(text, line, col, file) do
         {:ok, loc} ->
           %{
             "uri" => uri,
-            "range" => %{
-              "start" => %{"line" => loc.line - 1, "character" => loc.col - 1},
-              "end" => %{"line" => loc.line - 1, "character" => loc.col - 1}
-            }
+            "range" => Position.to_lsp_range(loc.line, loc.col, 0)
           }
 
         :not_found ->
@@ -335,18 +327,16 @@ defmodule Vaisto.LSP.Handler do
   defp symbol_from_form(_), do: nil
 
   defp make_symbol(name, kind, %Parser.Loc{} = loc) do
-    line = loc.line - 1
+    {lsp_line, _lsp_col} = Position.vaisto_to_lsp(loc.line, loc.col)
+    name_str = to_string(name)
     %{
-      "name" => to_string(name),
+      "name" => name_str,
       "kind" => kind,
       "range" => %{
-        "start" => %{"line" => line, "character" => 0},
-        "end" => %{"line" => line, "character" => 0}
+        "start" => %{"line" => lsp_line, "character" => 0},
+        "end" => %{"line" => lsp_line, "character" => 0}
       },
-      "selectionRange" => %{
-        "start" => %{"line" => line, "character" => loc.col - 1},
-        "end" => %{"line" => line, "character" => loc.col - 1 + String.length(to_string(name))}
-      }
+      "selectionRange" => Position.to_lsp_range(loc.line, loc.col, String.length(name_str))
     }
   end
 
@@ -359,8 +349,7 @@ defmodule Vaisto.LSP.Handler do
     text = state.documents[uri]
 
     if text do
-      line = pos["line"] + 1
-      col = pos["character"] + 1
+      {line, col} = Position.lsp_to_vaisto(pos["line"], pos["character"])
       file = uri_to_path(uri)
 
       completions = Completion.get_completions(text, line, col, file)
@@ -379,8 +368,7 @@ defmodule Vaisto.LSP.Handler do
     text = state.documents[uri]
 
     if text do
-      line = pos["line"] + 1
-      col = pos["character"] + 1
+      {line, col} = Position.lsp_to_vaisto(pos["line"], pos["character"])
 
       result = SignatureHelp.get_signature_help(text, line, col)
       {Protocol.response(id, result), state}
@@ -398,8 +386,7 @@ defmodule Vaisto.LSP.Handler do
     text = state.documents[uri]
 
     if text do
-      line = pos["line"] + 1
-      col = pos["character"] + 1
+      {line, col} = Position.lsp_to_vaisto(pos["line"], pos["character"])
 
       # Find references in all open documents
       references = References.find_references(text, line, col, uri, state.documents)
@@ -418,8 +405,7 @@ defmodule Vaisto.LSP.Handler do
     text = state.documents[uri]
 
     if text do
-      line = pos["line"] + 1
-      col = pos["character"] + 1
+      {line, col} = Position.lsp_to_vaisto(pos["line"], pos["character"])
 
       case References.get_symbol_at(text, line, col) do
         {:ok, symbol, range} ->
@@ -442,8 +428,7 @@ defmodule Vaisto.LSP.Handler do
     text = state.documents[uri]
 
     if text do
-      line = pos["line"] + 1
-      col = pos["character"] + 1
+      {line, col} = Position.lsp_to_vaisto(pos["line"], pos["character"])
 
       # Get all references and create edit operations
       case References.prepare_rename(text, line, col, uri, state.documents, new_name) do
