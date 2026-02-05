@@ -24,6 +24,8 @@ defmodule Vaisto.Build do
       std/List.va → Elixir.Std.List
   """
 
+  require Logger
+
   alias Vaisto.Build.{ModuleNaming, DependencyResolver, Compiler}
   alias Vaisto.Interface
 
@@ -55,6 +57,7 @@ defmodule Vaisto.Build do
     with {:ok, files} <- scan_files(source_dir),
          {:ok, graph} <- DependencyResolver.build_graph(files, source_roots: source_roots),
          {:ok, order} <- DependencyResolver.topological_sort(graph) do
+      Logger.debug("build: #{length(files)} files, compile order: #{inspect(Enum.map(order, & &1.module))}")
       compile_in_order(order, output_dir, opts)
     end
   end

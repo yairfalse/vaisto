@@ -23,6 +23,8 @@ defmodule Vaisto.Compilation do
       {:ok, module, bytecode} = Compilation.compile(source, MyModule, backend: :elixir)
   """
 
+  require Logger
+
   alias Vaisto.{Parser, TypeChecker, Backend, Error, ErrorFormatter}
 
   @type compile_opts :: [
@@ -54,6 +56,8 @@ defmodule Vaisto.Compilation do
   @spec compile(String.t(), atom(), compile_opts()) ::
           {:ok, atom(), binary() | [{atom(), binary()}]} | {:error, term()}
   def compile(source, module_name, opts \\ []) do
+    Logger.debug("compile: parsing #{module_name}")
+
     prelude = Keyword.get(opts, :prelude)
     backend = Keyword.get(opts, :backend, :core)
     env = Keyword.get(opts, :env, TypeChecker.primitives())
@@ -63,9 +67,13 @@ defmodule Vaisto.Compilation do
     full_source = prepend_prelude(source, prelude)
     line_offset = if prelude, do: prelude_line_count(prelude), else: 0
 
-    with {:ok, ast} <- parse(full_source),
-         {:ok, _type, typed_ast} <- typecheck(ast, env, full_source, line_offset, format_errors) do
-      emit(typed_ast, module_name, backend, load: load)
+    with {:ok, ast} <- parse(full_source) do
+      Logger.debug("compile: type checking #{module_name}")
+
+      with {:ok, _type, typed_ast} <- typecheck(ast, env, full_source, line_offset, format_errors) do
+        Logger.debug("compile: emitting #{module_name} (backend: #{backend})")
+        emit(typed_ast, module_name, backend, load: load)
+      end
     end
   end
 

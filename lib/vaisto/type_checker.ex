@@ -7,6 +7,8 @@ defmodule Vaisto.TypeChecker do
     (+ 1 2)     → :int
   """
 
+  require Logger
+
   alias Vaisto.Error
   alias Vaisto.Errors
   alias Vaisto.TypeEnv
@@ -1906,6 +1908,7 @@ defmodule Vaisto.TypeChecker do
   end
 
   defp check_module(forms, env, acc) when is_list(forms) and acc == [] do
+    Logger.debug("typecheck: checking module with #{length(forms)} forms")
     # First pass: collect all signatures
     # Patterns handle both with and without location metadata
     env_with_signatures = Enum.reduce(forms, env, fn form, acc_env ->
