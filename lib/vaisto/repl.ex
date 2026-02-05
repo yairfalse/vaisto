@@ -280,7 +280,7 @@ defmodule Vaisto.REPL do
     end
   end
 
-  defp format_error({:type_errors, errors}) do
+  defp format_error(errors) when is_list(errors) do
     errors
     |> Enum.map(&Vaisto.Error.normalize/1)
     |> Enum.map(& &1.message)

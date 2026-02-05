@@ -46,18 +46,12 @@ defmodule Vaisto.TypeChecker do
   def check_with_source(ast, source, env \\ @primitives) do
     case check(ast, env) do
       {:ok, _, _} = success -> success
-      {:errors, errors} ->
+      {:error, errors} when is_list(errors) ->
         # Multiple errors - format all
         {:error, Vaisto.ErrorFormatter.format_all(errors, source)}
       {:error, %Error{} = error} ->
         # Structured error - format with rich display
         {:error, Vaisto.ErrorFormatter.format(error, source)}
-      {:error, msg} when is_binary(msg) ->
-        # Legacy string error - try to parse and format
-        case Vaisto.ErrorFormatter.parse_legacy_error(msg) do
-          nil -> {:error, msg}
-          error_map -> {:error, Vaisto.ErrorFormatter.format(error_map, source)}
-        end
     end
   end
 
@@ -2074,7 +2068,7 @@ defmodule Vaisto.TypeChecker do
   defp check_module_forms([], _env, acc, errors) do
     case errors do
       [] -> {:ok, :module, {:module, Enum.reverse(acc)}}
-      _ -> {:errors, Enum.reverse(errors)}
+      _ -> {:error, Enum.reverse(errors)}
     end
   end
 

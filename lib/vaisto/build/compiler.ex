@@ -145,16 +145,13 @@ defmodule Vaisto.Build.Compiler do
       {:ok, _type, typed_ast} ->
         {:ok, typed_ast}
 
-      {:error, {:type_errors, errors}} ->
+      {:error, errors} when is_list(errors) ->
         formatted = Vaisto.ErrorFormatter.format_all(errors, source)
         {:error, formatted}
 
       {:error, %Vaisto.Error{} = error} ->
         formatted = Vaisto.ErrorFormatter.format(error, source)
         {:error, formatted}
-
-      {:error, reason} ->
-        {:error, "Type error: #{reason}"}
     end
   end
 

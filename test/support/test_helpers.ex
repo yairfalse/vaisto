@@ -38,8 +38,8 @@ defmodule Vaisto.TestHelpers do
     ast = parse!(code)
     case TypeChecker.check(ast) do
       {:ok, type, _typed_ast} -> {:ok, type}
+      {:error, [first | _]} -> {:error, first}
       {:error, _} = err -> err
-      {:errors, errors} -> {:error, hd(errors)}
     end
   end
 
@@ -131,9 +131,6 @@ defmodule Vaisto.TestHelpers do
 
       {:error, _} = err ->
         err
-
-      {:errors, errors} ->
-        {:error, hd(errors)}
     end
   end
 

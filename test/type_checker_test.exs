@@ -114,9 +114,9 @@ defmodule Vaisto.TypeCheckerTest do
       case result do
         {:error, error} when is_binary(error) ->
           assert error =~ "does not accept message :reset"
-        {:error, error} ->
+        {:error, [error | _]} ->
           assert error.note =~ "does not accept `:reset`"
-        {:errors, [error | _]} ->
+        {:error, %Vaisto.Error{} = error} ->
           assert error.note =~ "does not accept `:reset`"
       end
     end
@@ -264,9 +264,9 @@ defmodule Vaisto.TypeCheckerTest do
       """
       ast = Vaisto.Parser.parse(code)
 
-      # check returns {:errors, list} for multiple errors
+      # check returns {:error, list} for multiple errors
       result = TypeChecker.check(ast)
-      assert {:errors, errors} = result
+      assert {:error, errors} = result
       assert length(errors) == 2
 
       # check_with_source formats all errors

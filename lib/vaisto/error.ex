@@ -113,8 +113,8 @@ defmodule Vaisto.Error do
 
   Handles all common error formats:
   - `{:error, %Error{}}` - already structured, returns as-is
+  - `{:error, [list]}` - returns first error normalized
   - `{:error, "string"}` - converts to structured
-  - `{:errors, [list]}` - returns first error normalized
 
   ## Examples
 
@@ -126,9 +126,9 @@ defmodule Vaisto.Error do
   """
   @spec wrap(term()) :: {:error, t()} | {:ok, term()}
   def wrap({:error, %__MODULE__{} = error}), do: {:error, error}
+  def wrap({:error, [first | _]}), do: wrap({:error, first})
+  def wrap({:error, []}), do: {:error, from_string("unknown error")}
   def wrap({:error, msg}) when is_binary(msg), do: {:error, from_string(msg)}
-  def wrap({:errors, [first | _]}), do: wrap({:error, first})
-  def wrap({:errors, []}), do: {:error, from_string("unknown error")}
   def wrap({:ok, _} = success), do: success
   def wrap(other), do: {:error, from_string(inspect(other))}
 
