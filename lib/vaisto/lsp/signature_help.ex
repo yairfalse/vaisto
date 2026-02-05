@@ -432,7 +432,7 @@ defmodule Vaisto.LSP.SignatureHelp do
           # Found it - now extract params from the definition
           defs = ASTAnalyzer.extract_definitions(ast)
           case Enum.find(defs, &(&1.name == func_atom && &1.kind == :function)) do
-            %{arity: arity} ->
+            %{arity: _arity} ->
               # Get params from AST directly for signature building
               find_function_params(ast, func_atom)
             _ -> nil

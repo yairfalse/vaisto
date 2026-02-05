@@ -63,25 +63,30 @@ defmodule Vaisto.Runner do
   def compile_and_load(source, module_name, opts) when is_binary(source) do
     backend = Keyword.get(opts, :backend, :elixir)
 
-    with {:ok, ast} <- parse(source),
-         {:ok, _type, typed_ast} <- typecheck(ast),
-         {:ok, actual_name, results} <- emit(typed_ast, module_name, backend) do
-      # Results can be:
-      # - bytecode (binary) for single expressions or processes
-      # - [{module, bytecode}, ...] list for modules
-      case results do
-        bytecode when is_binary(bytecode) ->
-          # Single expression or process - already compiled and loaded
-          {:ok, actual_name}
+    case Vaisto.Compilation.compile(source, module_name,
+           backend: backend,
+           format_errors: false
+         ) do
+      {:ok, actual_name, results} ->
+        # Results can be:
+        # - bytecode (binary) for single expressions or processes
+        # - [{module, bytecode}, ...] list for modules
+        case results do
+          bytecode when is_binary(bytecode) ->
+            # Single expression or process - already compiled and loaded
+            {:ok, actual_name}
 
-        [{mod, _bytecode} | _] ->
-          # Module compilation - return first module name
-          {:ok, mod}
+          [{mod, _bytecode} | _] ->
+            # Module compilation - return first module name
+            {:ok, mod}
 
-        list when is_list(list) ->
-          # Module compilation with no results (shouldn't happen)
-          {:ok, actual_name}
-      end
+          list when is_list(list) ->
+            # Module compilation with no results (shouldn't happen)
+            {:ok, actual_name}
+        end
+
+      {:error, reason} ->
+        {:error, normalize_error(reason)}
     end
   end
 
@@ -162,16 +167,8 @@ defmodule Vaisto.Runner do
       # => {:ok, 100}
   """
   def run(source, opts \\ []) when is_binary(source) do
-    # Generate a unique module name to avoid conflicts
-    module_name = :"VaistoRun_#{:erlang.unique_integer([:positive])}"
-
-    with {:ok, ^module_name} <- compile_and_load(source, module_name, opts) do
-      result = call(module_name, :main)
-      # Clean up the module
-      :code.purge(module_name)
-      :code.delete(module_name)
-      {:ok, result}
-    end
+    backend = Keyword.get(opts, :backend, :elixir)
+    Vaisto.Compilation.run(source, backend: backend, format_errors: false)
   end
 
   @doc """
@@ -190,33 +187,8 @@ defmodule Vaisto.Runner do
     :ok
   end
 
-  # Private helpers
-
-  defp parse(source) do
-    try do
-      ast = Vaisto.Parser.parse(source)
-      {:ok, ast}
-    rescue
-      e -> {:error, Vaisto.Error.new("parse error", note: Exception.message(e))}
-    end
-  end
-
-  defp typecheck(ast) do
-    case Vaisto.TypeChecker.check(ast) do
-      {:ok, _, _} = success -> success
-      {:errors, [first | _]} -> {:error, Vaisto.Error.normalize(first)}
-      {:error, err} -> {:error, Vaisto.Error.normalize(err)}
-    end
-  end
-
-  defp emit(typed_ast, module_name, backend) do
-    case backend do
-      :core -> Vaisto.Backend.Core.compile(typed_ast, module_name)
-      :elixir -> Vaisto.Backend.Elixir.compile(typed_ast, module_name)
-      other -> {:error, Vaisto.Error.new("unknown backend",
-        note: "#{inspect(other)} is not valid",
-        hint: "use :core or :elixir"
-      )}
-    end
-  end
+  # Normalize error format for API compatibility
+  defp normalize_error({:type_errors, [first | _]}), do: Vaisto.Error.normalize(first)
+  defp normalize_error(%Vaisto.Error{} = err), do: err
+  defp normalize_error(err), do: Vaisto.Error.normalize(err)
 end

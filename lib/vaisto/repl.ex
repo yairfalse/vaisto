@@ -208,11 +208,10 @@ defmodule Vaisto.REPL do
   end
 
   defp parse(input) do
-    try do
-      ast = Vaisto.Parser.parse(input)
-      {:ok, ast}
-    rescue
-      e -> {:error, Exception.message(e)}
+    case Vaisto.Compilation.parse(input) do
+      {:ok, ast} -> {:ok, ast}
+      {:error, %Vaisto.Error{} = err} -> {:error, err.message}
+      {:error, msg} -> {:error, msg}
     end
   end
 
@@ -264,23 +263,33 @@ defmodule Vaisto.REPL do
   defp build_module_ast(form), do: [form]
 
   defp typecheck(ast, _env) do
-    Vaisto.TypeChecker.check(ast)
+    Vaisto.Compilation.typecheck(ast)
   end
 
   defp compile_and_run(ast, module_name) do
-    with {:ok, _type, typed_ast} <- Vaisto.TypeChecker.check(ast),
-         # Use Core backend for consistency with compiled code
-         {:ok, ^module_name, _binary} <- Vaisto.Backend.Core.compile(typed_ast, module_name) do
+    with {:ok, _type, typed_ast} <- Vaisto.Compilation.typecheck(ast),
+         {:ok, ^module_name, _binary} <- Vaisto.Compilation.emit(typed_ast, module_name, :core) do
       result = apply(module_name, :main, [])
       # Clean up
       :code.purge(module_name)
       :code.delete(module_name)
       {:ok, result}
     else
-      {:error, msg} -> {:error, msg}
+      {:error, msg} -> {:error, format_error(msg)}
       other -> {:error, "Unexpected: #{inspect(other)}"}
     end
   end
+
+  defp format_error({:type_errors, errors}) do
+    errors
+    |> Enum.map(&Vaisto.Error.normalize/1)
+    |> Enum.map(& &1.message)
+    |> Enum.join("; ")
+  end
+
+  defp format_error(%Vaisto.Error{message: msg}), do: msg
+  defp format_error(msg) when is_binary(msg), do: msg
+  defp format_error(other), do: inspect(other)
 
   defp extract_definition_type({:module, forms}, original_form) do
     # Find the typed form that matches our definition

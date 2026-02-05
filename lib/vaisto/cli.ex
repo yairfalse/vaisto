@@ -12,15 +12,11 @@ defmodule Vaisto.CLI do
   The standard prelude (Result, Option types) is automatically included.
   """
 
-  alias Vaisto.{Parser, TypeChecker, Backend}
+  alias Vaisto.Compilation
 
   # Embed the prelude at compile time
   @external_resource Path.join(__DIR__, "../../std/prelude.va")
   @prelude File.read!(Path.join(__DIR__, "../../std/prelude.va"))
-  # Prelude line count for error offset
-  # We join with "\n\n", adding 2 newlines between prelude and user code
-  # User line 1 starts after: prelude lines + separator newlines
-  @prelude_line_count length(String.split(@prelude, "\n")) + 1
 
   def main(args) do
     case parse_args(args) do
@@ -203,41 +199,10 @@ defmodule Vaisto.CLI do
   end
 
   defp compile(source, module_name, backend) do
-    # Prepend prelude to get standard types (Result, Option) and helpers
-    full_source = @prelude <> "\n\n" <> source
-
-    with {:ok, ast} <- parse(full_source),
-         {:ok, _type, typed_ast} <- check_with_offset(ast, full_source) do
-      case backend do
-        :core -> Backend.Core.compile(typed_ast, module_name)
-        :elixir -> Backend.Elixir.compile(typed_ast, module_name)
-        {:error, msg} -> {:error, msg}
-      end
-    end
-  end
-
-  # Type check and format errors with prelude line offset
-  defp check_with_offset(ast, full_source) do
-    case TypeChecker.check(ast) do
-      {:ok, _, _} = success ->
-        success
-      {:errors, errors} ->
-        formatted = Vaisto.ErrorFormatter.format_all(errors, full_source, line_offset: @prelude_line_count)
-        {:error, formatted}
-      {:error, %Vaisto.Error{} = error} ->
-        formatted = Vaisto.ErrorFormatter.format(error, full_source, line_offset: @prelude_line_count)
-        {:error, formatted}
-      {:error, msg} when is_binary(msg) ->
-        {:error, msg}
-    end
-  end
-
-  defp parse(source) do
-    try do
-      {:ok, Parser.parse(source)}
-    rescue
-      e -> {:error, Exception.message(e)}
-    end
+    Compilation.compile(source, module_name,
+      prelude: @prelude,
+      backend: backend
+    )
   end
 
   defp start_lsp do
@@ -309,15 +274,5 @@ defmodule Vaisto.CLI do
       vaistoc --eval "(+ 1 2)"
       vaistoc --eval "(deftype Result (Ok v) (Error e)) (Ok 42)"
     """)
-  end
-
-  defp camelize(string) do
-    name =
-      string
-      |> String.split(~r/[_\-]/)
-      |> Enum.map(&String.capitalize/1)
-      |> Enum.join()
-
-    Module.concat([String.to_atom(name)])
   end
 end

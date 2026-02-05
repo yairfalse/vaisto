@@ -91,7 +91,7 @@ defmodule Vaisto.LSP.Protocol do
   end
 
   @doc "Build an LSP Diagnostic from Vaisto error"
-  def diagnostic(error, source) when is_binary(error) do
+  def diagnostic(error, _source) when is_binary(error) do
     # Parse legacy string errors
     case Vaisto.ErrorFormatter.parse_legacy_error(error) do
       nil ->

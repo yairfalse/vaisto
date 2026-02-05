@@ -6,7 +6,7 @@ defmodule Vaisto.TestHelpers do
   Vaisto code within test cases.
   """
 
-  alias Vaisto.{Parser, TypeChecker, CoreEmitter, Runner}
+  alias Vaisto.{Parser, TypeChecker, CoreEmitter}
 
   @doc """
   Parse Vaisto source code and return the AST.
@@ -120,7 +120,7 @@ defmodule Vaisto.TestHelpers do
     case TypeChecker.check(ast) do
       {:ok, _type, typed_ast} ->
         case CoreEmitter.compile(typed_ast, module_name) do
-          {:ok, binary} ->
+          {:ok, _mod, binary} ->
             :code.load_binary(module_name, ~c"test", binary)
             result = apply(module_name, :main, [])
             {:ok, result}
