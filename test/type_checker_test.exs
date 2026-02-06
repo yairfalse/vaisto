@@ -18,12 +18,12 @@ defmodule Vaisto.TypeCheckerTest do
       assert {:ok, :int, _} = TypeChecker.check(ast)
     end
 
-    test "addition with wrong types fails" do
+    test "rejects addition of integer and atom" do
       ast = {:call, :+, [1, :atom]}
       assert {:error, _} = TypeChecker.check(ast)
     end
 
-    test "arity mismatch fails" do
+    test "rejects function call with insufficient arguments" do
       ast = {:call, :+, [1]}
       assert {:error, _} = TypeChecker.check(ast)
     end
@@ -123,7 +123,7 @@ defmodule Vaisto.TypeCheckerTest do
   end
 
   describe "typed record fields" do
-    test "parser creates typed field tuples from bracket syntax" do
+    test "parses typed record syntax into product type with field types" do
       code = "(deftype point [x :int y :int])"
       ast = Vaisto.Parser.parse(code)
       # Product types are now wrapped with {:product, fields}
@@ -153,7 +153,7 @@ defmodule Vaisto.TypeCheckerTest do
       assert {:ok, :module, _} = TypeChecker.check(ast)
     end
 
-    test "pattern matching with typed fields infers correct variable types" do
+    test "infers field types when destructuring typed records in match" do
       code = """
       (deftype point [x :int y :int])
       (match (point 1 2) [(point a b) a])
@@ -277,7 +277,7 @@ defmodule Vaisto.TypeCheckerTest do
   end
 
   describe "Hindley-Milner inference" do
-    test "infers identity function type" do
+    test "infers polymorphic type variable for identity function" do
       # (fn [x] x) should infer a polymorphic type
       ast = {:fn, [:x], :x}
       {:ok, type, _} = TypeChecker.infer(ast)

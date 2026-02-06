@@ -119,16 +119,16 @@ defmodule Vaisto.ParserTest do
   end
 
   describe "edge cases" do
-    test "handles empty input" do
+    test "returns nil for empty source" do
       assert Parser.parse("") == nil
     end
 
-    test "handles whitespace" do
+    test "skips leading whitespace and adjusts column location" do
       # Whitespace is skipped, so location starts at column 3
       assert {:call, :+, [1, 2], %Vaisto.Parser.Loc{line: 1, col: 3}} = Parser.parse("  (+ 1 2)  ")
     end
 
-    test "handles newlines" do
+    test "parses multi-line expressions with correct start location" do
       code = """
       (+ 1
          2)
