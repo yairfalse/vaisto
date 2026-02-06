@@ -123,10 +123,10 @@ defmodule Vaisto.RunnerTest do
         :dec (- state 1)
         :get state)
       """
-      # Process compilation returns the GenServer module name (Counter, not CounterApp)
-      {:ok, Counter} = Runner.compile_and_load(source, :CounterApp)
+      # Process module is scoped under parent: CounterApp.Counter
+      {:ok, mod} = Runner.compile_and_load(source, :CounterApp)
 
-      {:ok, pid} = Runner.spawn_process(Counter, 0)
+      {:ok, pid} = Runner.spawn_process(mod, 0)
       assert is_pid(pid)
 
       assert Runner.send_msg(pid, :get) == 0
