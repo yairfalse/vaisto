@@ -26,7 +26,7 @@ defmodule Vaisto.Build do
 
   require Logger
 
-  alias Vaisto.Build.{ModuleNaming, DependencyResolver, Compiler}
+  alias Vaisto.Build.{ModuleNaming, DependencyResolver, Compiler, Context}
   alias Vaisto.Interface
 
   @type build_opts :: keyword()
@@ -54,14 +54,19 @@ defmodule Vaisto.Build do
   """
   @spec build(String.t(), build_opts()) :: build_result()
   def build(source_dir, opts \\ []) do
+    ctx = Context.new()
     output_dir = Keyword.get(opts, :output_dir, source_dir)
     source_roots = Keyword.get(opts, :source_roots, ModuleNaming.default_source_roots())
+
+    Logger.debug("build[#{ctx.build_id}]: starting in #{source_dir}")
 
     with {:ok, files} <- scan_files(source_dir),
          {:ok, graph} <- DependencyResolver.build_graph(files, source_roots: source_roots),
          {:ok, order} <- DependencyResolver.topological_sort(graph) do
-      Logger.debug("build: #{length(files)} files, compile order: #{inspect(Enum.map(order, & &1.module))}")
-      compile_in_order(order, output_dir, opts)
+      Logger.debug("build[#{ctx.build_id}]: #{length(files)} files, compile order: #{inspect(Enum.map(order, & &1.module))}")
+      result = compile_in_order(order, output_dir, Keyword.put(opts, :build_context, ctx))
+      Logger.debug("build[#{ctx.build_id}]: completed in #{Context.elapsed(ctx)}ms")
+      result
     end
   end
 
