@@ -14,7 +14,80 @@ defmodule Vaisto.TypeChecker do
   alias Vaisto.TypeEnv
 
   @type ast :: term()
-  @type typed_ast :: term()
+
+  @type vaisto_type ::
+          :int
+          | :float
+          | :string
+          | :bool
+          | :atom
+          | :unit
+          | :any
+          | :num
+          | {:atom, atom()}
+          | {:tvar, non_neg_integer()}
+          | {:rvar, non_neg_integer()}
+          | {:fn, [vaisto_type()], vaisto_type()}
+          | {:list, vaisto_type()}
+          | {:record, atom(), [{atom(), vaisto_type()}]}
+          | {:sum, atom(), [{atom(), [vaisto_type()]}]}
+          | {:row, [{atom(), vaisto_type()}], :closed | {:rvar, non_neg_integer()}}
+          | {:pid, atom(), [atom()]}
+          | {:process, vaisto_type(), [atom()]}
+
+  @type typed_pattern ::
+          {:pattern, atom(), [typed_ast()], vaisto_type()}
+          | {:cons_pattern, typed_ast(), typed_ast(), vaisto_type()}
+          | {:list_pattern, [typed_ast()], vaisto_type()}
+          | {:tuple_pattern, [typed_ast()], vaisto_type()}
+          | {:var, atom(), vaisto_type()}
+          | {:lit, atom(), term()}
+          | :_
+          | atom()
+          | integer()
+
+  @type typed_clause :: {typed_pattern(), typed_ast(), vaisto_type()}
+
+  @type typed_ast ::
+          # Literals
+          {:lit, atom(), term()}
+          # Variables and references
+          | {:var, atom(), vaisto_type()}
+          | {:fn_ref, atom(), non_neg_integer(), vaisto_type()}
+          # Collections
+          | {:list, [typed_ast()], vaisto_type()}
+          | {:cons, typed_ast(), typed_ast(), vaisto_type()}
+          | {:tuple, [typed_ast()], vaisto_type()}
+          | {:map, [{typed_ast(), typed_ast()}], vaisto_type()}
+          # Control flow
+          | {:if, typed_ast(), typed_ast(), typed_ast(), vaisto_type()}
+          | {:match, typed_ast(), [typed_clause()], vaisto_type()}
+          | {:receive, [typed_clause()], vaisto_type()}
+          | {:do, [typed_ast()], vaisto_type()}
+          # Bindings
+          | {:let, [term()], typed_ast(), vaisto_type()}
+          | {:fn, [typed_ast() | atom()], typed_ast(), vaisto_type()}
+          # Calls
+          | {:call, atom() | {:qualified, atom(), atom()}, [typed_ast()], vaisto_type()}
+          | {:apply, typed_ast(), [typed_ast()], vaisto_type()}
+          # Definitions
+          | {:defn, atom(), [atom()], typed_ast(), vaisto_type()}
+          | {:defn_multi, atom(), non_neg_integer(), [typed_clause()], vaisto_type()}
+          | {:defval, atom(), typed_ast(), vaisto_type()}
+          | {:deftype, atom(), {:product | :sum, term()}, vaisto_type()}
+          # Process/concurrency
+          | {:process, atom(), typed_ast(), [typed_clause()], vaisto_type()}
+          | {:supervise, term(), [typed_ast()], vaisto_type()}
+          # Field access
+          | {:field_access, typed_ast(), atom(), vaisto_type()}
+          | {:field_access, typed_ast(), atom(), vaisto_type(), vaisto_type()}
+          # Declarations
+          | {:extern, atom(), atom(), vaisto_type()}
+          | {:ns, atom()}
+          | {:import, atom(), atom() | nil}
+          # Module container
+          | {:module, [typed_ast()]}
+
   @type type_env :: map()
 
   # Use TypeEnv for built-in primitives

@@ -122,7 +122,7 @@ defmodule Vaisto.Compilation do
 
   Returns `{:ok, module_name, bytecode}` on success.
   """
-  @spec emit(term(), atom(), :core | :elixir, keyword()) ::
+  @spec emit(TypeChecker.typed_ast(), atom(), :core | :elixir, keyword()) ::
           {:ok, atom(), binary() | [{atom(), binary()}]} | {:error, term()}
   def emit(typed_ast, module_name, backend \\ :core, opts \\ []) do
     case backend do
