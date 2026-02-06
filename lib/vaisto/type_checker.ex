@@ -7,9 +7,15 @@ defmodule Vaisto.TypeChecker do
     (+ 1 2)     → :int
   """
 
+  require Logger
+
   alias Vaisto.Error
   alias Vaisto.Errors
   alias Vaisto.TypeEnv
+
+  @type ast :: term()
+  @type typed_ast :: term()
+  @type type_env :: map()
 
   # Use TypeEnv for built-in primitives
   # Note: spawn and send (!) are handled specially for typed PIDs
@@ -19,11 +25,13 @@ defmodule Vaisto.TypeChecker do
   @doc """
   Return the built-in primitives type environment.
   """
+  @spec primitives() :: type_env()
   def primitives, do: TypeEnv.primitives()
 
   @doc """
   Check types and return the result type. Raises on error.
   """
+  @spec check!(ast(), type_env()) :: typed_ast()
   def check!(ast, env \\ @primitives) do
     case check(ast, env) do
       {:ok, _type, typed_ast} -> typed_ast
@@ -43,21 +51,17 @@ defmodule Vaisto.TypeChecker do
       1 | (+ 1 :atom)
         |      ^^^^^ expected `Int`, found `Atom`
   """
+  @spec check_with_source(ast(), String.t(), type_env()) ::
+          {:ok, term(), typed_ast()} | {:error, String.t()}
   def check_with_source(ast, source, env \\ @primitives) do
     case check(ast, env) do
       {:ok, _, _} = success -> success
-      {:errors, errors} ->
+      {:error, errors} when is_list(errors) ->
         # Multiple errors - format all
         {:error, Vaisto.ErrorFormatter.format_all(errors, source)}
       {:error, %Error{} = error} ->
         # Structured error - format with rich display
         {:error, Vaisto.ErrorFormatter.format(error, source)}
-      {:error, msg} when is_binary(msg) ->
-        # Legacy string error - try to parse and format
-        case Vaisto.ErrorFormatter.parse_legacy_error(msg) do
-          nil -> {:error, msg}
-          error_map -> {:error, Vaisto.ErrorFormatter.format(error_map, source)}
-        end
     end
   end
 
@@ -75,6 +79,7 @@ defmodule Vaisto.TypeChecker do
       iex> TypeChecker.infer({:fn, [:x], {:call, :+, [:x, 1]}})
       {:ok, {:fn, [:int], :int}, _ast}  # inferred int -> int
   """
+  @spec infer(ast(), type_env()) :: {:ok, term(), typed_ast()} | {:error, term()}
   def infer(ast, env \\ @primitives) do
     Vaisto.TypeSystem.Infer.infer(ast, env)
   end
@@ -82,6 +87,8 @@ defmodule Vaisto.TypeChecker do
   @doc """
   Check types and return {:ok, type, typed_ast} or {:error, reason}.
   """
+  @spec check(ast(), type_env()) ::
+          {:ok, term(), typed_ast()} | {:error, Error.t() | [Error.t()]}
   def check(ast, env \\ @primitives)
 
   # Module: list of top-level forms (process, supervise, def)
@@ -1901,6 +1908,7 @@ defmodule Vaisto.TypeChecker do
   end
 
   defp check_module(forms, env, acc) when is_list(forms) and acc == [] do
+    Logger.debug("typecheck: checking module with #{length(forms)} forms")
     # First pass: collect all signatures
     # Patterns handle both with and without location metadata
     env_with_signatures = Enum.reduce(forms, env, fn form, acc_env ->
@@ -2074,7 +2082,7 @@ defmodule Vaisto.TypeChecker do
   defp check_module_forms([], _env, acc, errors) do
     case errors do
       [] -> {:ok, :module, {:module, Enum.reverse(acc)}}
-      _ -> {:errors, Enum.reverse(errors)}
+      _ -> {:error, Enum.reverse(errors)}
     end
   end
 

@@ -19,6 +19,8 @@ defmodule Vaisto.Build.Compiler do
       }}
   """
 
+  require Logger
+
   alias Vaisto.{Parser, TypeChecker, Interface, Compilation}
   alias Vaisto.Build.ModuleNaming
 
@@ -63,6 +65,9 @@ defmodule Vaisto.Build.Compiler do
     search_paths = Keyword.get(opts, :search_paths, [output_dir])
     auto_import = Keyword.get(opts, :auto_import, true)
     source_roots = Keyword.get(opts, :source_roots, ModuleNaming.default_source_roots())
+    ctx = Keyword.get(opts, :build_context)
+
+    if ctx, do: Logger.debug("build[#{ctx.build_id}]: compiling #{source_path}")
 
     with {:ok, source} <- read_source(source_path),
          full_source = prepend_prelude(source, prelude),
@@ -145,16 +150,13 @@ defmodule Vaisto.Build.Compiler do
       {:ok, _type, typed_ast} ->
         {:ok, typed_ast}
 
-      {:error, {:type_errors, errors}} ->
+      {:error, errors} when is_list(errors) ->
         formatted = Vaisto.ErrorFormatter.format_all(errors, source)
         {:error, formatted}
 
       {:error, %Vaisto.Error{} = error} ->
         formatted = Vaisto.ErrorFormatter.format(error, source)
         {:error, formatted}
-
-      {:error, reason} ->
-        {:error, "Type error: #{reason}"}
     end
   end
 

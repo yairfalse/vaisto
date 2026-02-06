@@ -45,72 +45,67 @@ defmodule Vaisto.CLI do
   end
 
   defp parse_args([]), do: :help
-  defp parse_args(["--help"]), do: :help
-  defp parse_args(["-h"]), do: :help
-  defp parse_args(["repl"]), do: :repl
-  defp parse_args(["lsp"]), do: :lsp
+  defp parse_args(["repl" | _]), do: :repl
+  defp parse_args(["lsp" | _]), do: :lsp
+  defp parse_args(["build" | rest]), do: parse_build(rest)
+  defp parse_args(args), do: parse_compile_or_eval(args)
 
-  # Build project (all .va files in directory)
-  defp parse_args(["build" | rest]) do
-    parse_build_opts(rest, %{dir: ".", output: nil, backend: :core, src_roots: []})
-  end
+  defp parse_compile_or_eval(args) do
+    {opts, positional, invalid} =
+      OptionParser.parse(args,
+        strict: [output: :string, backend: :string, eval: :string, help: :boolean],
+        aliases: [o: :output, e: :eval, h: :help]
+      )
 
-  defp parse_args(["--eval", code]), do: {:eval, code, :core}
-  defp parse_args(["-e", code]), do: {:eval, code, :core}
-  defp parse_args(["--eval", code, "--backend", backend]), do: {:eval, code, parse_backend(backend)}
-  defp parse_args(["-e", code, "--backend", backend]), do: {:eval, code, parse_backend(backend)}
+    case invalid do
+      [{flag, _} | _] -> {:error, "unknown option: #{flag}. Use --help for usage."}
+      [] ->
+        cond do
+          opts[:help] ->
+            :help
 
-  defp parse_args([input]) do
-    {:compile, input, default_output(input), :core}
-  end
+          eval = opts[:eval] ->
+            backend = parse_backend(opts[:backend] || "core")
+            {:eval, eval, backend}
 
-  defp parse_args([input, "-o", output]) do
-    {:compile, input, output, :core}
-  end
+          length(positional) == 1 ->
+            [input] = positional
+            backend = parse_backend(opts[:backend] || "core")
+            output = opts[:output] || default_output(input)
+            {:compile, input, output, backend}
 
-  defp parse_args([input, "--backend", backend]) do
-    {:compile, input, default_output(input), parse_backend(backend)}
-  end
-
-  defp parse_args([input, "-o", output, "--backend", backend]) do
-    {:compile, input, output, parse_backend(backend)}
-  end
-
-  defp parse_args([input, "--backend", backend, "-o", output]) do
-    {:compile, input, output, parse_backend(backend)}
-  end
-
-  defp parse_args(_), do: {:error, "invalid arguments. Use --help for usage."}
-
-  # Parse build command options
-  defp parse_build_opts([], acc) do
-    output = acc.output || acc.dir
-    {:build, acc.dir, output, acc.backend, acc.src_roots}
-  end
-
-  defp parse_build_opts(["--src", root | rest], acc) do
-    # Parse --src root:prefix or --src root (prefix defaults to "")
-    {path, prefix} = case String.split(root, ":", parts: 2) do
-      [path, prefix] -> {path, prefix}
-      [path] -> {path, ""}
+          true ->
+            {:error, "invalid arguments. Use --help for usage."}
+        end
     end
-    parse_build_opts(rest, %{acc | src_roots: acc.src_roots ++ [{path, prefix}]})
   end
 
-  defp parse_build_opts(["-o", out_dir | rest], acc) do
-    parse_build_opts(rest, %{acc | output: out_dir})
-  end
+  defp parse_build(args) do
+    {opts, positional, invalid} =
+      OptionParser.parse(args,
+        strict: [output: :string, backend: :string, src: :keep],
+        aliases: [o: :output]
+      )
 
-  defp parse_build_opts(["--backend", backend | rest], acc) do
-    parse_build_opts(rest, %{acc | backend: parse_backend(backend)})
-  end
+    case invalid do
+      [{flag, _} | _] -> {:error, "unknown build option: #{flag}. Use --help for usage."}
+      [] ->
+        dir = List.first(positional) || "."
+        output = opts[:output] || dir
+        backend = parse_backend(opts[:backend] || "core")
 
-  defp parse_build_opts(["-" <> _ = unknown | _], _acc) do
-    {:error, "unknown build option: #{unknown}"}
-  end
+        src_roots =
+          opts
+          |> Keyword.get_values(:src)
+          |> Enum.map(fn root ->
+            case String.split(root, ":", parts: 2) do
+              [path, prefix] -> {path, prefix}
+              [path] -> {path, ""}
+            end
+          end)
 
-  defp parse_build_opts([dir | rest], acc) do
-    parse_build_opts(rest, %{acc | dir: dir})
+        {:build, dir, output, backend, src_roots}
+    end
   end
 
   defp parse_backend("core"), do: :core

@@ -18,6 +18,13 @@ defmodule Vaisto.Parser do
     - length: Span length in characters (for error underlining)
     - file: Optional filename
     """
+    @type t :: %__MODULE__{
+            line: pos_integer(),
+            col: pos_integer(),
+            length: pos_integer(),
+            file: String.t() | nil
+          }
+
     defstruct line: 1, col: 1, length: 1, file: nil
 
     def new(line, col, file \\ nil), do: %__MODULE__{line: line, col: col, length: 1, file: file}
@@ -27,9 +34,12 @@ defmodule Vaisto.Parser do
     end
   end
 
+  @type parse_opts :: [file: String.t()]
+
   @doc """
   Parse a Vaisto source string into an AST with location metadata.
   """
+  @spec parse(String.t(), parse_opts()) :: term()
   def parse(code, opts \\ []) do
     file = Keyword.get(opts, :file)
     code

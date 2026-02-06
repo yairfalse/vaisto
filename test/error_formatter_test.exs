@@ -58,7 +58,7 @@ defmodule Vaisto.ErrorFormatterTest do
       assert result =~ "did you mean `for`?"
     end
 
-    test "handles multiline source" do
+    test "formats error on correct line in multiline source with span indicator" do
       error = %{
         message: "type error",
         file: "test.va",

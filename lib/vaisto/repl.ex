@@ -32,6 +32,8 @@ defmodule Vaisto.REPL do
 
   alias Vaisto.TypeSystem.Core
 
+  @version Mix.Project.config()[:version]
+
   # Built-in primitives for the type environment
   @primitives %{
     :+ => {:fn, [:int, :int], :int},
@@ -56,8 +58,9 @@ defmodule Vaisto.REPL do
   @doc """
   Starts the interactive REPL.
   """
+  @spec start() :: :ok
   def start do
-    IO.puts("Vaisto REPL v0.1 (Algorithm W)")
+    IO.puts("Vaisto REPL v#{@version} (Algorithm W)")
     IO.puts("Type :help for commands, :quit to exit\n")
 
     state = %__MODULE__{
@@ -280,7 +283,7 @@ defmodule Vaisto.REPL do
     end
   end
 
-  defp format_error({:type_errors, errors}) do
+  defp format_error(errors) when is_list(errors) do
     errors
     |> Enum.map(&Vaisto.Error.normalize/1)
     |> Enum.map(& &1.message)

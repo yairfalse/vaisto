@@ -5,6 +5,8 @@ defmodule Vaisto.LSP.Handler do
   Dispatches to appropriate handlers based on method name.
   """
 
+  require Logger
+
   alias Vaisto.LSP.{Protocol, Hover, Completion, SignatureHelp, References, Position}
   alias Vaisto.{Parser, TypeChecker}
 
@@ -13,6 +15,7 @@ defmodule Vaisto.LSP.Handler do
   Returns {response_or_nil, new_state}.
   """
   def handle(%{method: method, id: id, params: params}, state) do
+    Logger.debug("lsp: #{method}")
     case method do
       "initialize" ->
         handle_initialize(id, params, state)
@@ -186,7 +189,7 @@ defmodule Vaisto.LSP.Handler do
       {:error, %Vaisto.Error{} = error} ->
         [Protocol.diagnostic(error, text)]
 
-      {:errors, errors} when is_list(errors) ->
+      {:error, errors} when is_list(errors) ->
         Enum.map(errors, &Protocol.diagnostic(&1, text))
     end
 

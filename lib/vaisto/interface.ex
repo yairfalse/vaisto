@@ -29,6 +29,7 @@ defmodule Vaisto.Interface do
   Takes the module name, the type environment (after type checking),
   and the output directory.
   """
+  @spec save(atom(), map(), map(), String.t()) :: {:ok, String.t()}
   def save(module_name, type_env, types \\ %{}, output_dir) do
     interface = %{
       module: module_name,
@@ -52,6 +53,7 @@ defmodule Vaisto.Interface do
 
   Returns {:ok, interface_map} or {:error, reason}.
   """
+  @spec load(atom(), [String.t()]) :: {:ok, map()} | {:error, String.t()}
   def load(module_name, search_paths) do
     case find_interface(module_name, search_paths) do
       {:ok, path} ->
@@ -79,6 +81,7 @@ defmodule Vaisto.Interface do
   Given a list of loaded interfaces, creates a map suitable for
   the TypeChecker with qualified names using ":" separator: "Math:square"
   """
+  @spec build_env([map()], map()) :: map()
   def build_env(interfaces, aliases \\ %{}) do
     Enum.reduce(interfaces, %{}, fn interface, env ->
       module_name = interface.module
@@ -121,6 +124,7 @@ defmodule Vaisto.Interface do
 
   Returns {module_name, imports} or {:error, reason}
   """
+  @spec extract_declarations(term()) :: {atom() | nil, [term()]}
   def extract_declarations(ast) when is_list(ast) do
     ns = find_ns(ast)
     imports = find_imports(ast)

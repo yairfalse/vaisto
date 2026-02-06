@@ -188,7 +188,7 @@ defmodule Vaisto.Runner do
   end
 
   # Normalize error format for API compatibility
-  defp normalize_error({:type_errors, [first | _]}), do: Vaisto.Error.normalize(first)
+  defp normalize_error(errors) when is_list(errors), do: Vaisto.Error.normalize(hd(errors))
   defp normalize_error(%Vaisto.Error{} = err), do: err
   defp normalize_error(err), do: Vaisto.Error.normalize(err)
 end

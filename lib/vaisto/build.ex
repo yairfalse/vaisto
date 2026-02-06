@@ -24,8 +24,16 @@ defmodule Vaisto.Build do
       std/List.va → Elixir.Std.List
   """
 
-  alias Vaisto.Build.{ModuleNaming, DependencyResolver, Compiler}
+  require Logger
+
+  alias Vaisto.Build.{ModuleNaming, DependencyResolver, Compiler, Context}
   alias Vaisto.Interface
+
+  @type build_opts :: keyword()
+  @type build_result :: {:ok, [map()]} | {:error, term()}
+
+  @source_glob "**/*.va"
+  @prelude_filename "/prelude.va"
 
   @doc """
   Build all .va files in a directory.
@@ -44,14 +52,21 @@ defmodule Vaisto.Build do
     * `{:ok, results}` - list of compilation results
     * `{:error, reason}` - build error
   """
+  @spec build(String.t(), build_opts()) :: build_result()
   def build(source_dir, opts \\ []) do
+    ctx = Context.new()
     output_dir = Keyword.get(opts, :output_dir, source_dir)
     source_roots = Keyword.get(opts, :source_roots, ModuleNaming.default_source_roots())
+
+    Logger.debug("build[#{ctx.build_id}]: starting in #{source_dir}")
 
     with {:ok, files} <- scan_files(source_dir),
          {:ok, graph} <- DependencyResolver.build_graph(files, source_roots: source_roots),
          {:ok, order} <- DependencyResolver.topological_sort(graph) do
-      compile_in_order(order, output_dir, opts)
+      Logger.debug("build[#{ctx.build_id}]: #{length(files)} files, compile order: #{inspect(Enum.map(order, & &1.module))}")
+      result = compile_in_order(order, output_dir, Keyword.put(opts, :build_context, ctx))
+      Logger.debug("build[#{ctx.build_id}]: completed in #{Context.elapsed(ctx)}ms")
+      result
     end
   end
 
@@ -72,6 +87,7 @@ defmodule Vaisto.Build do
     * `{:ok, result}` - compilation result
     * `{:error, reason}` - compilation error
   """
+  @spec compile_file(String.t(), map(), keyword()) :: {:ok, map()} | {:error, term()}
   def compile_file(source_path, import_env, opts \\ []) do
     Compiler.compile(source_path, import_env, opts)
   end
@@ -89,6 +105,7 @@ defmodule Vaisto.Build do
       iex> Vaisto.Build.infer_module_name("std/List.va")
       :"Elixir.Std.List"
   """
+  @spec infer_module_name(String.t(), [{String.t(), String.t()}]) :: atom()
   def infer_module_name(file_path, source_roots \\ ModuleNaming.default_source_roots()) do
     ModuleNaming.infer(file_path, source_roots: source_roots)
   end
@@ -96,11 +113,11 @@ defmodule Vaisto.Build do
   # Private helpers
 
   defp scan_files(dir) do
-    pattern = Path.join(dir, "**/*.va")
+    pattern = Path.join(dir, @source_glob)
 
     files =
       Path.wildcard(pattern)
-      |> Enum.reject(&String.ends_with?(&1, "/prelude.va"))
+      |> Enum.reject(&String.ends_with?(&1, @prelude_filename))
 
     if files == [] do
       {:error, "No .va files found in #{dir}"}
