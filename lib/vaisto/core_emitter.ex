@@ -9,6 +9,8 @@ defmodule Vaisto.CoreEmitter do
   the AST nodes that :compile.forms/2 understands.
   """
 
+  alias Vaisto.Error
+
   @doc """
   Compile typed AST directly to BEAM bytecode.
 
@@ -21,24 +23,29 @@ defmodule Vaisto.CoreEmitter do
 
   def compile(typed_ast, module_name, opts) when is_list(opts) do
     load? = Keyword.get(opts, :load, true)
-    core_ast = to_core(typed_ast, module_name)
 
-    case :compile.forms(core_ast, [:from_core, :binary, :return_errors]) do
-      {:ok, ^module_name, binary} ->
-        if load?, do: :code.load_binary(module_name, ~c"vaisto", binary)
-        {:ok, module_name, binary}
+    try do
+      core_ast = to_core(typed_ast, module_name)
 
-      {:ok, ^module_name, binary, _warnings} ->
-        if load?, do: :code.load_binary(module_name, ~c"vaisto", binary)
-        {:ok, module_name, binary}
+      case :compile.forms(core_ast, [:from_core, :binary, :return_errors]) do
+        {:ok, ^module_name, binary} ->
+          if load?, do: :code.load_binary(module_name, ~c"vaisto", binary)
+          {:ok, module_name, binary}
 
-      {:error, errors, _warnings} ->
-        formatted = try do
-          format_errors(errors)
-        rescue
-          _ -> "Internal compiler error: #{inspect(errors, limit: :infinity)}"
-        end
-        {:error, formatted}
+        {:ok, ^module_name, binary, _warnings} ->
+          if load?, do: :code.load_binary(module_name, ~c"vaisto", binary)
+          {:ok, module_name, binary}
+
+        {:error, errors, _warnings} ->
+          formatted = try do
+            format_errors(errors)
+          rescue
+            _ -> "Internal compiler error: #{inspect(errors, limit: :infinity)}"
+          end
+          {:error, Error.new("BEAM compilation failed", note: formatted)}
+      end
+    rescue
+      e -> {:error, Error.new("compilation error", note: Exception.message(e))}
     end
   end
 

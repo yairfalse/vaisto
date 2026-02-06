@@ -8,6 +8,8 @@ defmodule Vaisto.Emitter do
   directly. More sustainable, better documented, battle-tested.
   """
 
+  alias Vaisto.Error
+
   @doc """
   Transform typed Vaisto AST to Elixir AST (quoted form).
 
@@ -258,7 +260,7 @@ defmodule Vaisto.Emitter do
   # spawn: start a GenServer and return its PID
   # (spawn counter 0) → Counter.start_link(0) |> elem(1)
   def to_elixir({:call, :spawn, [process_name, init_arg], _pid_type}) do
-    module = camelize(process_name)
+    module = scoped_module_name(process_name)
     init = to_elixir(init_arg)
 
     quote do
@@ -420,6 +422,80 @@ defmodule Vaisto.Emitter do
   # Module compilation - produces multiple modules (processes, supervisors)
   # or a single module with user-defined functions + main
   def compile({:module, _forms} = module_ast, module_name) do
+    Process.put(:vaisto_compile_context, %{parent_module: module_name})
+
+    try do
+      compile_module(module_ast, module_name)
+    after
+      Process.delete(:vaisto_compile_context)
+    end
+  end
+
+  # Process definition - compile directly to GenServer module
+  def compile({:process, name, _init, _handlers, _type} = process_ast, module_name) do
+    Process.put(:vaisto_compile_context, %{parent_module: module_name})
+
+    try do
+      elixir_ast = to_elixir(process_ast)
+      module = scoped_module_name(name)
+
+      try do
+        [{^module, bytecode}] = Code.compile_quoted(elixir_ast)
+        {:ok, module, bytecode}
+      rescue
+        e -> {:error, Error.new("compilation error", note: Exception.message(e))}
+      end
+    after
+      Process.delete(:vaisto_compile_context)
+    end
+  end
+
+  # Single defn compilation - place function in module with main as entry point
+  def compile({:defn, name, _params, _body, _type} = defn_ast, module_name) do
+    elixir_ast = to_elixir(defn_ast)
+
+    # If the function is named "main", use it directly. Otherwise add a main that calls it.
+    module_ast = if name == :main do
+      quote do
+        defmodule unquote(module_name) do
+          unquote(elixir_ast)
+        end
+      end
+    else
+      quote do
+        defmodule unquote(module_name) do
+          unquote(elixir_ast)
+          def main, do: unquote(name)()
+        end
+      end
+    end
+
+    try do
+      [{^module_name, bytecode}] = Code.compile_quoted(module_ast)
+      {:ok, module_name, bytecode}
+    rescue
+      e -> {:error, Error.new("compilation error", note: Exception.message(e))}
+    end
+  end
+
+  # Single expression compilation - wrap in module
+  def compile(typed_ast, module_name) do
+    elixir_ast = to_elixir(typed_ast)
+
+    # Wrap expression in a module with a main/0 function
+    module_ast = wrap_in_module(elixir_ast, module_name)
+
+    try do
+      [{^module_name, bytecode}] = Code.compile_quoted(module_ast)
+      {:ok, module_name, bytecode}
+    rescue
+      e -> {:error, Error.new("compilation error", note: Exception.message(e))}
+    end
+  end
+
+  # Private helpers
+
+  defp compile_module(module_ast, module_name) do
     elixir_asts = to_elixir(module_ast)
 
     # Separate standalone modules (GenServers, Supervisors) from function defs
@@ -472,78 +548,20 @@ defmodule Vaisto.Emitter do
               end]
           end
 
-          module_ast = quote do
+          mod_ast = quote do
             defmodule unquote(module_name) do
               unquote_splicing(defs ++ main_def)
             end
           end
 
-          Code.compile_quoted(module_ast)
+          Code.compile_quoted(mod_ast)
       end
 
       {:ok, module_name, main_results ++ standalone_results}
     rescue
-      e -> {:error, Exception.message(e)}
+      e -> {:error, Error.new("compilation error", note: Exception.message(e))}
     end
   end
-
-  # Process definition - compile directly to GenServer module
-  def compile({:process, name, _init, _handlers, _type} = process_ast, _module_name) do
-    elixir_ast = to_elixir(process_ast)
-    module = camelize(name)
-
-    try do
-      [{^module, bytecode}] = Code.compile_quoted(elixir_ast)
-      {:ok, module, bytecode}
-    rescue
-      e -> {:error, Exception.message(e)}
-    end
-  end
-
-  # Single defn compilation - place function in module with main as entry point
-  def compile({:defn, name, _params, _body, _type} = defn_ast, module_name) do
-    elixir_ast = to_elixir(defn_ast)
-
-    # If the function is named "main", use it directly. Otherwise add a main that calls it.
-    module_ast = if name == :main do
-      quote do
-        defmodule unquote(module_name) do
-          unquote(elixir_ast)
-        end
-      end
-    else
-      quote do
-        defmodule unquote(module_name) do
-          unquote(elixir_ast)
-          def main, do: unquote(name)()
-        end
-      end
-    end
-
-    try do
-      [{^module_name, bytecode}] = Code.compile_quoted(module_ast)
-      {:ok, module_name, bytecode}
-    rescue
-      e -> {:error, Exception.message(e)}
-    end
-  end
-
-  # Single expression compilation - wrap in module
-  def compile(typed_ast, module_name) do
-    elixir_ast = to_elixir(typed_ast)
-
-    # Wrap expression in a module with a main/0 function
-    module_ast = wrap_in_module(elixir_ast, module_name)
-
-    try do
-      [{^module_name, bytecode}] = Code.compile_quoted(module_ast)
-      {:ok, module_name, bytecode}
-    rescue
-      e -> {:error, Exception.message(e)}
-    end
-  end
-
-  # Private helpers
 
   # De-duplicate function definition items by name, keeping the last definition
   # This implements shadowing semantics for REPL-style redefinition
@@ -592,7 +610,7 @@ defmodule Vaisto.Emitter do
   end
 
   defp emit_genserver(name, _initial_state, handlers) do
-    module_name = camelize(name)
+    module_name = scoped_module_name(name)
     handle_clauses = Enum.map(handlers, &emit_handle_call/1)
 
     quote do
@@ -600,7 +618,7 @@ defmodule Vaisto.Emitter do
         use GenServer
 
         def start_link(init_arg) do
-          GenServer.start_link(__MODULE__, init_arg, name: __MODULE__)
+          GenServer.start_link(__MODULE__, init_arg)
         end
 
         @impl true
@@ -724,7 +742,7 @@ defmodule Vaisto.Emitter do
   end
 
   defp child_spec_tuple({:call, name, args, _type}) do
-    module = camelize(name)
+    module = scoped_module_name(name)
     init_arg = case args do
       [arg] -> to_elixir(arg)
       args -> Enum.map(args, &to_elixir/1)
@@ -733,7 +751,7 @@ defmodule Vaisto.Emitter do
   end
 
   defp child_spec_tuple({:call, name, args}) do
-    module = camelize(name)
+    module = scoped_module_name(name)
     init_arg = case args do
       [arg] -> to_elixir(arg)
       args -> Enum.map(args, &to_elixir/1)
@@ -741,6 +759,18 @@ defmodule Vaisto.Emitter do
     {module, init_arg}
   end
 
+
+  defp scoped_module_name(name) do
+    base_name = camelize(name)
+
+    case Process.get(:vaisto_compile_context) do
+      %{parent_module: parent} when not is_nil(parent) ->
+        Module.concat(parent, base_name)
+
+      _ ->
+        base_name
+    end
+  end
 
   defp camelize(atom) when is_atom(atom) do
     name =
