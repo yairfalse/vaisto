@@ -8,6 +8,8 @@ defmodule Vaisto.Emitter do
   directly. More sustainable, better documented, battle-tested.
   """
 
+  alias Vaisto.Error
+
   @doc """
   Transform typed Vaisto AST to Elixir AST (quoted form).
 
@@ -441,7 +443,7 @@ defmodule Vaisto.Emitter do
         [{^module, bytecode}] = Code.compile_quoted(elixir_ast)
         {:ok, module, bytecode}
       rescue
-        e -> {:error, Exception.message(e)}
+        e -> {:error, Error.new("compilation error", note: Exception.message(e))}
       end
     after
       Process.delete(:vaisto_compile_context)
@@ -472,7 +474,7 @@ defmodule Vaisto.Emitter do
       [{^module_name, bytecode}] = Code.compile_quoted(module_ast)
       {:ok, module_name, bytecode}
     rescue
-      e -> {:error, Exception.message(e)}
+      e -> {:error, Error.new("compilation error", note: Exception.message(e))}
     end
   end
 
@@ -487,7 +489,7 @@ defmodule Vaisto.Emitter do
       [{^module_name, bytecode}] = Code.compile_quoted(module_ast)
       {:ok, module_name, bytecode}
     rescue
-      e -> {:error, Exception.message(e)}
+      e -> {:error, Error.new("compilation error", note: Exception.message(e))}
     end
   end
 
@@ -557,7 +559,7 @@ defmodule Vaisto.Emitter do
 
       {:ok, module_name, main_results ++ standalone_results}
     rescue
-      e -> {:error, Exception.message(e)}
+      e -> {:error, Error.new("compilation error", note: Exception.message(e))}
     end
   end
 
