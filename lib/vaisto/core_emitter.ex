@@ -9,6 +9,7 @@ defmodule Vaisto.CoreEmitter do
   the AST nodes that :compile.forms/2 understands.
   """
 
+  alias Vaisto.Backend.Shared
   alias Vaisto.Error
   alias Vaisto.TypeChecker
 
@@ -201,7 +202,7 @@ defmodule Vaisto.CoreEmitter do
         # Note: pattern variables are bound within each clause
         case_clauses = Enum.map(clauses, fn {pattern, body, _body_type} ->
           pattern_core = to_core_multi_pattern(pattern)
-          pattern_vars = extract_pattern_vars(pattern)
+          pattern_vars = Shared.extract_pattern_vars(pattern)
           local_vars = MapSet.new(pattern_vars)
           body_core = to_core_expr(body, user_fns, local_vars)
           :cerl.c_clause([pattern_core], :cerl.c_atom(true), body_core)
@@ -424,7 +425,7 @@ defmodule Vaisto.CoreEmitter do
     clause_cores = Enum.map(clauses, fn {pattern, body, _body_type} ->
       pattern_core = to_core_pattern(pattern)
       # Track pattern variables in the clause body
-      pattern_vars = extract_pattern_vars(pattern)
+      pattern_vars = Shared.extract_pattern_vars(pattern)
       clause_local_vars = MapSet.union(local_vars, MapSet.new(pattern_vars))
       body_core = to_core_expr(body, user_fns, clause_local_vars)
       :cerl.c_clause([pattern_core], :cerl.c_atom(true), body_core)
@@ -453,7 +454,7 @@ defmodule Vaisto.CoreEmitter do
   defp to_core_expr({:receive, clauses, _type}, user_fns, local_vars) do
     clause_cores = Enum.map(clauses, fn {pattern, body, _body_type} ->
       pattern_core = to_core_pattern(pattern)
-      pattern_vars = extract_pattern_vars(pattern)
+      pattern_vars = Shared.extract_pattern_vars(pattern)
       clause_local_vars = MapSet.union(local_vars, MapSet.new(pattern_vars))
       body_core = to_core_expr(body, user_fns, clause_local_vars)
       :cerl.c_clause([pattern_core], :cerl.c_atom(true), body_core)
@@ -487,7 +488,7 @@ defmodule Vaisto.CoreEmitter do
     # Collect all bound variable names from bindings
     bound_vars = Enum.flat_map(bindings, fn
       {name, _expr, _type} when is_atom(name) -> [name]
-      {{:tuple_pattern, _, _} = pattern, _expr, _type} -> extract_pattern_vars(pattern)
+      {{:tuple_pattern, _, _} = pattern, _expr, _type} -> Shared.extract_pattern_vars(pattern)
       _ -> []
     end)
 
@@ -685,7 +686,7 @@ defmodule Vaisto.CoreEmitter do
   defp to_core_expr({:fn, params, body, _type}, user_fns, local_vars) do
     # Extract parameter names to track as local variables
     fn_param_names = Enum.flat_map(params, fn
-      {:tuple_pattern, _, _} = pattern -> extract_pattern_vars(pattern)
+      {:tuple_pattern, _, _} = pattern -> Shared.extract_pattern_vars(pattern)
       {:var, name, _type} -> [name]
       atom when is_atom(atom) -> [atom]
       _ -> []
@@ -1132,27 +1133,6 @@ defmodule Vaisto.CoreEmitter do
   end
   defp to_core_multi_pattern(a) when is_atom(a), do: :cerl.c_var(a)
   defp to_core_multi_pattern(n) when is_integer(n), do: :cerl.c_int(n)
-
-  # --- Variable extraction from patterns ---
-  # Used to track which variables are introduced by pattern matching
-
-  defp extract_pattern_vars({:var, name, _type}), do: [name]
-  defp extract_pattern_vars({:tuple_pattern, elements, _type}) do
-    Enum.flat_map(elements, &extract_pattern_vars/1)
-  end
-  defp extract_pattern_vars({:list, elements, _type}) do
-    Enum.flat_map(elements, &extract_pattern_vars/1)
-  end
-  defp extract_pattern_vars({:cons, head, tail, _type}) do
-    extract_pattern_vars(head) ++ extract_pattern_vars(tail)
-  end
-  defp extract_pattern_vars({:pattern, _name, args, _type}) do
-    Enum.flat_map(args, &extract_pattern_vars/1)
-  end
-  defp extract_pattern_vars(a) when is_atom(a) and a != :_ do
-    [a]
-  end
-  defp extract_pattern_vars(_), do: []
 
   # --- String helpers ---
 

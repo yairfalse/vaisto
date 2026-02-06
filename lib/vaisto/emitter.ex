@@ -765,7 +765,7 @@ defmodule Vaisto.Emitter do
 
 
   defp scoped_module_name(name) do
-    base_name = camelize(name)
+    base_name = Vaisto.Backend.Shared.camelize(name)
 
     case Process.get(:vaisto_compile_context) do
       %{parent_module: parent} when not is_nil(parent) ->
@@ -776,15 +776,4 @@ defmodule Vaisto.Emitter do
     end
   end
 
-  defp camelize(atom) when is_atom(atom) do
-    name =
-      atom
-      |> Atom.to_string()
-      |> String.split("_")
-      |> Enum.map(&String.capitalize/1)
-      |> Enum.join()
-
-    # Use Module.concat to get proper Elixir module atom
-    Module.concat([String.to_atom(name)])
-  end
 end

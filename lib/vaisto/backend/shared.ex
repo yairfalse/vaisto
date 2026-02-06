@@ -122,12 +122,15 @@ defmodule Vaisto.Backend.Shared do
   """
   @spec camelize(atom()) :: atom()
   def camelize(atom) when is_atom(atom) do
-    atom
-    |> Atom.to_string()
-    |> String.split("_")
-    |> Enum.map(&String.capitalize/1)
-    |> Enum.join()
-    |> String.to_atom()
+    name =
+      atom
+      |> Atom.to_string()
+      |> String.split("_")
+      |> Enum.map(&String.capitalize/1)
+      |> Enum.join()
+
+    # Use Module.concat to get proper Elixir module atom (:"Elixir.Counter" = Counter)
+    Module.concat([String.to_atom(name)])
   end
 
   # ============================================================================

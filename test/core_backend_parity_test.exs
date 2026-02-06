@@ -21,13 +21,13 @@ defmodule Vaisto.CoreBackendParityTest do
       {{:ok, ev}, {:ok, cv}} when ev == cv ->
         {:ok, ev}
       {{:ok, ev}, {:ok, cv}} ->
-        {:mismatch, elixir: ev, core: cv}
+        {:mismatch, test_name, elixir: ev, core: cv}
       {{:ok, _}, {:error, err}} ->
-        {:core_failed, err}
+        {:core_failed, test_name, err}
       {{:error, err}, {:ok, _}} ->
-        {:elixir_failed, err}
+        {:elixir_failed, test_name, err}
       {{:error, e1}, {:error, e2}} ->
-        {:both_failed, elixir: e1, core: e2}
+        {:both_failed, test_name, elixir: e1, core: e2}
     end
   end
 
