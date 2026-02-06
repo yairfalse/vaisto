@@ -10,6 +10,7 @@ defmodule Vaisto.CoreEmitter do
   """
 
   alias Vaisto.Error
+  alias Vaisto.TypeChecker
 
   @doc """
   Compile typed AST directly to BEAM bytecode.
@@ -19,6 +20,8 @@ defmodule Vaisto.CoreEmitter do
 
   Returns {:ok, module_name, binary} or {:error, reason}
   """
+  @spec compile(TypeChecker.typed_ast(), atom(), keyword()) ::
+          {:ok, atom(), binary()} | {:error, Error.t()}
   def compile(typed_ast, module_name \\ :VaistoModule, opts \\ [])
 
   def compile(typed_ast, module_name, opts) when is_list(opts) do
@@ -52,6 +55,8 @@ defmodule Vaisto.CoreEmitter do
   @doc """
   Compile and load the module into the VM.
   """
+  @spec compile_and_load(TypeChecker.typed_ast(), atom()) ::
+          {:ok, atom()} | {:error, Error.t()}
   def compile_and_load(typed_ast, module_name \\ :VaistoModule) do
     case compile(typed_ast, module_name) do
       {:ok, mod, binary} ->
@@ -66,6 +71,7 @@ defmodule Vaisto.CoreEmitter do
   @doc """
   Transform typed Vaisto AST to Core Erlang AST.
   """
+  @spec to_core(TypeChecker.typed_ast(), atom()) :: :cerl.cerl()
   def to_core(typed_ast, module_name)
 
   # Process definition → raw BEAM process module
