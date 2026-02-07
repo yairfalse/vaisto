@@ -75,6 +75,10 @@ defmodule Vaisto.TypeSystem.Core do
     {:process, apply_subst(subst, state_type), msgs}
   end
 
+  def apply_subst(subst, {:tuple, types}) do
+    {:tuple, Enum.map(types, &apply_subst(subst, &1))}
+  end
+
   def apply_subst(_subst, {:atom, _} = t), do: t
 
   # Row variable - similar to type variable but for record fields
@@ -128,6 +132,11 @@ defmodule Vaisto.TypeSystem.Core do
     end)
   end
   def free_vars({:variant, _sum, _ctor, types}) do
+    Enum.reduce(types, MapSet.new(), fn t, acc ->
+      MapSet.union(acc, free_vars(t))
+    end)
+  end
+  def free_vars({:tuple, types}) do
     Enum.reduce(types, MapSet.new(), fn t, acc ->
       MapSet.union(acc, free_vars(t))
     end)

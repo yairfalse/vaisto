@@ -290,6 +290,179 @@ defmodule Vaisto.TypeSystem.InferTest do
     end
   end
 
+  describe "do blocks" do
+    test "empty do block infers unit" do
+      {:ok, type, _ast} = Infer.infer({:do, []})
+      assert type == :unit
+    end
+
+    test "single expression do block infers that type" do
+      {:ok, type, _ast} = Infer.infer({:do, [42]})
+      assert type == :int
+    end
+
+    test "multi-expression do block infers type of last expression" do
+      {:ok, type, _ast} = Infer.infer({:do, [true, 42]})
+      assert type == :int
+    end
+
+    test "do block threads context through expressions" do
+      # let binding in do block should be visible to later expressions
+      {:ok, type, _ast} = Infer.infer(
+        {:do, [{:let, [{:x, 42}], {:call, :+, [:x, 1]}}]}
+      )
+      assert type == :int
+    end
+
+    test "location stripping works for do blocks" do
+      loc = %Vaisto.Parser.Loc{line: 1, col: 1, file: nil}
+      {:ok, type, _ast} = Infer.infer({:do, [42], loc})
+      assert type == :int
+    end
+
+    test "typed AST shape for do blocks" do
+      {:ok, _type, ast} = Infer.infer({:do, [1, true]})
+      assert {:do, [_, _], :bool} = ast
+    end
+  end
+
+  describe "tuple expressions" do
+    test "tuple_pattern infers :any" do
+      {:ok, type, _ast} = Infer.infer({:tuple_pattern, [1, 2]})
+      assert type == :any
+    end
+
+    test "tuple infers :any" do
+      {:ok, type, _ast} = Infer.infer({:tuple, [1, {:string, "hello"}]})
+      assert type == :any
+    end
+
+    test "empty tuple infers :any" do
+      {:ok, type, _ast} = Infer.infer({:tuple, []})
+      assert type == :any
+    end
+
+    test "typed AST shape for tuples" do
+      {:ok, _type, ast} = Infer.infer({:tuple, [1, true]})
+      assert {:tuple, [_, _], :any} = ast
+    end
+
+    test "location stripping works for tuples" do
+      loc = %Vaisto.Parser.Loc{line: 1, col: 1, file: nil}
+      {:ok, type, _ast} = Infer.infer({:tuple, [1, 2], loc})
+      assert type == :any
+    end
+  end
+
+  describe "cons expressions" do
+    test "cons with known list type" do
+      env = Map.merge(Infer.__primitives__(), %{:xs => {:list, :int}})
+      {:ok, type, _ast} = Infer.infer({:cons, 1, :xs}, env)
+      assert type == {:list, :int}
+    end
+
+    test "cons infers element type from head" do
+      {:ok, type, _ast} = Infer.infer({:cons, 42, {:list, []}})
+      assert type == {:list, :int}
+    end
+
+    test "typed AST for cons" do
+      {:ok, _type, ast} = Infer.infer({:cons, 1, {:list, []}})
+      assert {:cons, {:lit, :int, 1}, {:list, [], _}, {:list, :int}} = ast
+    end
+  end
+
+  describe "bracket expressions" do
+    test "empty bracket infers polymorphic list" do
+      {:ok, type, _ast} = Infer.infer({:bracket, []})
+      assert {:list, _} = type
+    end
+
+    test "bracket with elements infers typed list" do
+      {:ok, type, _ast} = Infer.infer({:bracket, [1, 2, 3]})
+      assert type == {:list, :int}
+    end
+
+    test "bracket with cons" do
+      {:ok, type, _ast} = Infer.infer({:bracket, {:cons, 1, {:list, []}}})
+      assert type == {:list, :int}
+    end
+
+    test "location stripping works for brackets" do
+      loc = %Vaisto.Parser.Loc{line: 1, col: 1, file: nil}
+      {:ok, type, _ast} = Infer.infer({:bracket, [1, 2], loc})
+      assert type == {:list, :int}
+    end
+  end
+
+  describe "match expressions" do
+    test "match with literal patterns" do
+      {:ok, type, _ast} = Infer.infer(
+        {:match, 42, [{1, {:string, "one"}}, {2, {:string, "two"}}]}
+      )
+      assert type == :string
+    end
+
+    test "variable pattern binds scrutinee type" do
+      {:ok, type, _ast} = Infer.infer(
+        {:match, 42, [{:x, {:call, :+, [:x, 1]}}]}
+      )
+      assert type == :int
+    end
+
+    test "wildcard pattern" do
+      {:ok, type, _ast} = Infer.infer(
+        {:match, true, [{:_, 42}]}
+      )
+      assert type == :int
+    end
+
+    test "branch type unification" do
+      {:ok, type, _ast} = Infer.infer(
+        {:match, true, [{true, 1}, {false, 2}]}
+      )
+      assert type == :int
+    end
+
+    test "branch type mismatch returns error" do
+      assert {:error, _msg} = Infer.infer(
+        {:match, true, [{true, 1}, {false, {:string, "no"}}]}
+      )
+    end
+
+    test "cons pattern on list" do
+      env = Map.merge(Infer.__primitives__(), %{:xs => {:list, :int}})
+      {:ok, type, _ast} = Infer.infer(
+        {:match, :xs, [{{:cons, :h, :t}, :h}, {[], 0}]},
+        env
+      )
+      assert type == :int
+    end
+
+    test "location stripping works for match" do
+      loc = %Vaisto.Parser.Loc{line: 1, col: 1, file: nil}
+      {:ok, type, _ast} = Infer.infer(
+        {:match, 42, [{:x, :x}], loc}
+      )
+      assert type == :int
+    end
+
+    test "typed AST shape for match" do
+      {:ok, _type, ast} = Infer.infer(
+        {:match, 42, [{:x, :x}]}
+      )
+      assert {:match, {:lit, :int, 42}, [{_, _, :int}], :int} = ast
+    end
+
+    test "clause bindings don't leak between clauses" do
+      # x is bound in first clause, should not be visible in second clause
+      {:ok, type, _ast} = Infer.infer(
+        {:match, 42, [{:x, {:call, :+, [:x, 1]}}, {:y, {:call, :+, [:y, 2]}}]}
+      )
+      assert type == :int
+    end
+  end
+
   describe "type formatting" do
     test "formats primitive types" do
       assert Core.format_type(:int) == "Int"

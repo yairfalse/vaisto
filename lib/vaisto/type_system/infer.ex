@@ -35,6 +35,9 @@ defmodule Vaisto.TypeSystem.Infer do
     :!= => {:forall, [0], {:fn, [{:tvar, 0}, {:tvar, 0}], :bool}}
   }
 
+  @doc "Returns the built-in primitives environment (for testing)."
+  def __primitives__, do: @primitives
+
   @doc """
   Infer the type of an expression.
 
@@ -261,6 +264,113 @@ defmodule Vaisto.TypeSystem.Infer do
     infer_expr({:field_access, record_expr, field}, ctx)
   end
 
+  # --- Do Blocks ---
+  # (do expr1 expr2 ... exprN) → type of last expression, :unit if empty
+
+  defp infer_expr({:do, []}, ctx) do
+    {:ok, :unit, {:do, [], :unit}, ctx}
+  end
+
+  defp infer_expr({:do, exprs}, ctx) do
+    case infer_exprs_sequence(exprs, ctx, []) do
+      {:ok, typed_exprs, last_type, ctx} ->
+        {:ok, last_type, {:do, typed_exprs, last_type}, ctx}
+
+      error ->
+        error
+    end
+  end
+
+  defp infer_expr({:do, exprs, %Vaisto.Parser.Loc{}}, ctx) do
+    infer_expr({:do, exprs}, ctx)
+  end
+
+  # --- Tuple Expressions ---
+  # Tuples are for Erlang interop, typed as :any (matches TypeChecker)
+
+  defp infer_expr({:tuple, elements}, ctx) when is_list(elements) do
+    case infer_all_elements(elements, ctx, []) do
+      {:ok, typed_elements, ctx} ->
+        {:ok, :any, {:tuple, typed_elements, :any}, ctx}
+
+      error ->
+        error
+    end
+  end
+
+  defp infer_expr({:tuple, elements, %Vaisto.Parser.Loc{}}, ctx) when is_list(elements) do
+    infer_expr({:tuple, elements}, ctx)
+  end
+
+  defp infer_expr({:tuple_pattern, elements}, ctx) when is_list(elements) do
+    case infer_all_elements(elements, ctx, []) do
+      {:ok, typed_elements, ctx} ->
+        {:ok, :any, {:tuple, typed_elements, :any}, ctx}
+
+      error ->
+        error
+    end
+  end
+
+  # --- Cons Expressions ---
+  # (cons head tail) → {:list, elem_type}
+
+  defp infer_expr({:cons, head, tail}, ctx) do
+    {elem_tvar, ctx} = Context.fresh_var(ctx)
+
+    with {:ok, head_type, typed_head, ctx} <- infer_expr(head, ctx),
+         {:ok, ctx} <- Context.unify_types(ctx, head_type, elem_tvar),
+         {:ok, tail_type, typed_tail, ctx} <- infer_expr(tail, ctx),
+         {:ok, ctx} <- Context.unify_types(ctx, tail_type, {:list, elem_tvar}) do
+      list_type = {:list, elem_tvar}
+      {:ok, list_type, {:cons, typed_head, typed_tail, list_type}, ctx}
+    end
+  end
+
+  defp infer_expr({:cons, head, tail, %Vaisto.Parser.Loc{}}, ctx) do
+    infer_expr({:cons, head, tail}, ctx)
+  end
+
+  # --- Bracket Expressions ---
+  # Brackets normalize into list or cons typed ASTs
+
+  defp infer_expr({:bracket, []}, ctx) do
+    infer_expr({:list, []}, ctx)
+  end
+
+  defp infer_expr({:bracket, {:cons, head, tail}}, ctx) do
+    infer_expr({:cons, head, tail}, ctx)
+  end
+
+  defp infer_expr({:bracket, elements}, ctx) when is_list(elements) do
+    infer_expr({:list, elements}, ctx)
+  end
+
+  defp infer_expr({:bracket, content, %Vaisto.Parser.Loc{}}, ctx) do
+    infer_expr({:bracket, content}, ctx)
+  end
+
+  # --- Match Expressions ---
+  # (match scrutinee [pattern1 body1] [pattern2 body2] ...)
+
+  defp infer_expr({:match, scrutinee, clauses}, ctx) do
+    with {:ok, scrutinee_type, typed_scrutinee, ctx} <- infer_expr(scrutinee, ctx) do
+      {result_tvar, ctx} = Context.fresh_var(ctx)
+
+      case infer_match_clauses(clauses, scrutinee_type, result_tvar, ctx, []) do
+        {:ok, typed_clauses, ctx} ->
+          {:ok, result_tvar, {:match, typed_scrutinee, typed_clauses, result_tvar}, ctx}
+
+        error ->
+          error
+      end
+    end
+  end
+
+  defp infer_expr({:match, scrutinee, clauses, %Vaisto.Parser.Loc{}}, ctx) do
+    infer_expr({:match, scrutinee, clauses}, ctx)
+  end
+
   # --- Catch-all for unhandled expressions ---
   # Fall back to the original type checker for complex forms
 
@@ -348,6 +458,229 @@ defmodule Vaisto.TypeSystem.Infer do
     end
   end
 
+  # --- Do block helper ---
+
+  defp infer_exprs_sequence([expr], ctx, acc) do
+    case infer_expr(expr, ctx) do
+      {:ok, type, typed_expr, ctx} ->
+        {:ok, Enum.reverse([typed_expr | acc]), type, ctx}
+
+      error ->
+        error
+    end
+  end
+
+  defp infer_exprs_sequence([expr | rest], ctx, acc) do
+    case infer_expr(expr, ctx) do
+      {:ok, _type, typed_expr, ctx} ->
+        infer_exprs_sequence(rest, ctx, [typed_expr | acc])
+
+      error ->
+        error
+    end
+  end
+
+  # --- Generic element inference helper ---
+
+  defp infer_all_elements([], ctx, acc) do
+    {:ok, Enum.reverse(acc), ctx}
+  end
+
+  defp infer_all_elements([elem | rest], ctx, acc) do
+    case infer_expr(elem, ctx) do
+      {:ok, _type, typed_elem, ctx} ->
+        infer_all_elements(rest, ctx, [typed_elem | acc])
+
+      error ->
+        error
+    end
+  end
+
+  # --- Match helpers ---
+
+  defp infer_match_clauses([], _scrutinee_type, _result_tvar, ctx, acc) do
+    {:ok, Enum.reverse(acc), ctx}
+  end
+
+  defp infer_match_clauses([{pattern, body} | rest], scrutinee_type, result_tvar, ctx, acc) do
+    saved_env = ctx.env
+
+    case infer_pattern(pattern, scrutinee_type, ctx) do
+      {:ok, bindings, typed_pattern, ctx} ->
+        ctx = Context.extend_many(ctx, bindings)
+
+        case infer_expr(body, ctx) do
+          {:ok, body_type, typed_body, ctx} ->
+            case Context.unify_types(ctx, body_type, result_tvar) do
+              {:ok, ctx} ->
+                typed_clause = {typed_pattern, typed_body, body_type}
+                ctx = %{ctx | env: saved_env}
+                infer_match_clauses(rest, scrutinee_type, result_tvar, ctx, [typed_clause | acc])
+
+              {:error, _} = err ->
+                err
+            end
+
+          error ->
+            error
+        end
+
+      {:error, _} = err ->
+        err
+    end
+  end
+
+  # --- Pattern inference ---
+  # Returns {:ok, bindings, typed_pattern, ctx}
+
+  # Wildcard
+  defp infer_pattern(:_, _scrutinee_type, ctx) do
+    {:ok, [], :_, ctx}
+  end
+
+  # Variable
+  defp infer_pattern(name, scrutinee_type, ctx) when is_atom(name) do
+    {:ok, [{name, scrutinee_type}], {:var, name, scrutinee_type}, ctx}
+  end
+
+  defp infer_pattern({:var, name}, scrutinee_type, ctx) when is_atom(name) do
+    {:ok, [{name, scrutinee_type}], {:var, name, scrutinee_type}, ctx}
+  end
+
+  # Integer literal
+  defp infer_pattern(n, scrutinee_type, ctx) when is_integer(n) do
+    case Context.unify_types(ctx, scrutinee_type, :int) do
+      {:ok, ctx} -> {:ok, [], {:lit, :int, n}, ctx}
+      {:error, _} -> {:ok, [], {:lit, :int, n}, ctx}
+    end
+  end
+
+  # Float literal
+  defp infer_pattern(f, scrutinee_type, ctx) when is_float(f) do
+    case Context.unify_types(ctx, scrutinee_type, :float) do
+      {:ok, ctx} -> {:ok, [], {:lit, :float, f}, ctx}
+      {:error, _} -> {:ok, [], {:lit, :float, f}, ctx}
+    end
+  end
+
+  # Boolean literal
+  defp infer_pattern(true, scrutinee_type, ctx) do
+    case Context.unify_types(ctx, scrutinee_type, :bool) do
+      {:ok, ctx} -> {:ok, [], {:lit, :bool, true}, ctx}
+      {:error, _} -> {:ok, [], {:lit, :bool, true}, ctx}
+    end
+  end
+
+  defp infer_pattern(false, scrutinee_type, ctx) do
+    case Context.unify_types(ctx, scrutinee_type, :bool) do
+      {:ok, ctx} -> {:ok, [], {:lit, :bool, false}, ctx}
+      {:error, _} -> {:ok, [], {:lit, :bool, false}, ctx}
+    end
+  end
+
+  # Atom literal
+  defp infer_pattern({:atom, a}, _scrutinee_type, ctx) do
+    {:ok, [], {:lit, :atom, a}, ctx}
+  end
+
+  # String literal
+  defp infer_pattern({:string, s}, scrutinee_type, ctx) do
+    case Context.unify_types(ctx, scrutinee_type, :string) do
+      {:ok, ctx} -> {:ok, [], {:lit, :string, s}, ctx}
+      {:error, _} -> {:ok, [], {:lit, :string, s}, ctx}
+    end
+  end
+
+  # Empty list pattern
+  defp infer_pattern([], scrutinee_type, ctx) do
+    {elem_tvar, ctx} = Context.fresh_var(ctx)
+    case Context.unify_types(ctx, scrutinee_type, {:list, elem_tvar}) do
+      {:ok, ctx} ->
+        {:ok, [], {:list_pattern, [], {:list, elem_tvar}}, ctx}
+      {:error, _} ->
+        {:ok, [], {:list_pattern, [], {:list, elem_tvar}}, ctx}
+    end
+  end
+
+  # Cons pattern [h | t]
+  defp infer_pattern({:cons, head, tail}, scrutinee_type, ctx) do
+    {elem_tvar, ctx} = Context.fresh_var(ctx)
+    list_type = {:list, elem_tvar}
+
+    ctx = case Context.unify_types(ctx, scrutinee_type, list_type) do
+      {:ok, ctx} -> ctx
+      {:error, _} -> ctx
+    end
+
+    {:ok, head_bindings, typed_head, ctx} = infer_pattern(head, elem_tvar, ctx)
+    {:ok, tail_bindings, typed_tail, ctx} = infer_pattern(tail, list_type, ctx)
+
+    {:ok, head_bindings ++ tail_bindings, {:cons_pattern, typed_head, typed_tail, list_type}, ctx}
+  end
+
+  defp infer_pattern({:cons, head, tail, %Vaisto.Parser.Loc{}}, scrutinee_type, ctx) do
+    infer_pattern({:cons, head, tail}, scrutinee_type, ctx)
+  end
+
+  # Bracket pattern
+  defp infer_pattern({:bracket, []}, scrutinee_type, ctx) do
+    infer_pattern([], scrutinee_type, ctx)
+  end
+
+  defp infer_pattern({:bracket, {:cons, head, tail}}, scrutinee_type, ctx) do
+    infer_pattern({:cons, head, tail}, scrutinee_type, ctx)
+  end
+
+  defp infer_pattern({:bracket, elements}, scrutinee_type, ctx) when is_list(elements) do
+    infer_pattern(elements, scrutinee_type, ctx)
+  end
+
+  # Tuple pattern
+  defp infer_pattern({:tuple_pattern, elements}, _scrutinee_type, ctx) do
+    {:ok, bindings, typed_elems, ctx} = infer_pattern_elements(elements, :any, ctx, [], [])
+    {:ok, bindings, {:tuple_pattern, typed_elems, :any}, ctx}
+  end
+
+  defp infer_pattern({:tuple, elements, %Vaisto.Parser.Loc{}}, scrutinee_type, ctx) when is_list(elements) do
+    infer_pattern({:tuple_pattern, elements}, scrutinee_type, ctx)
+  end
+
+  # Constructor pattern: (CtorName arg1 arg2 ...)
+  defp infer_pattern({:call, name, args, %Vaisto.Parser.Loc{}}, scrutinee_type, ctx) do
+    infer_pattern({:call, name, args}, scrutinee_type, ctx)
+  end
+
+  defp infer_pattern({:call, name, args}, scrutinee_type, ctx) when is_atom(name) do
+    param_types = case Context.lookup(ctx, name) do
+      {:ok, {:fn, ptypes, _}} -> ptypes
+      {:ok, {:forall, _, {:fn, ptypes, _}}} -> ptypes
+      _ -> List.duplicate(:any, length(args))
+    end
+
+    {:ok, bindings, typed_args, ctx} = infer_pattern_elements(args, param_types, ctx, [], [])
+    {:ok, bindings, {:pattern, name, typed_args, scrutinee_type}, ctx}
+  end
+
+  # Catch-all pattern — treat as opaque
+  defp infer_pattern(_pattern, _scrutinee_type, ctx) do
+    {:ok, [], :_, ctx}
+  end
+
+  defp infer_pattern_elements([], _types, ctx, bindings_acc, elems_acc) do
+    {:ok, Enum.reverse(bindings_acc), Enum.reverse(elems_acc), ctx}
+  end
+
+  defp infer_pattern_elements([elem | rest], types, ctx, bindings_acc, elems_acc) do
+    {elem_type, rest_types} = case types do
+      [t | ts] -> {t, ts}
+      t when is_atom(t) -> {t, t}
+      _ -> {:any, :any}
+    end
+
+    {:ok, bindings, typed_elem, ctx} = infer_pattern(elem, elem_type, ctx)
+    infer_pattern_elements(rest, rest_types, ctx, Enum.reverse(bindings) ++ bindings_acc, [typed_elem | elems_acc])
+  end
+
   defp with_location(msg, %Vaisto.Parser.Loc{line: line, col: col, file: file}) do
     prefix = case file do
       nil -> "#{line}:#{col}"
@@ -398,5 +731,48 @@ defmodule Vaisto.TypeSystem.Infer do
 
   defp apply_subst_to_ast({:unit}, _subst), do: {:unit}
 
+  defp apply_subst_to_ast({:do, exprs, type}, subst) do
+    {:do, Enum.map(exprs, &apply_subst_to_ast(&1, subst)), Core.apply_subst(subst, type)}
+  end
+
+  defp apply_subst_to_ast({:tuple, elems, type}, subst) do
+    {:tuple, Enum.map(elems, &apply_subst_to_ast(&1, subst)), Core.apply_subst(subst, type)}
+  end
+
+  defp apply_subst_to_ast({:cons, head, tail, type}, subst) do
+    {:cons, apply_subst_to_ast(head, subst), apply_subst_to_ast(tail, subst), Core.apply_subst(subst, type)}
+  end
+
+  defp apply_subst_to_ast({:match, scrutinee, clauses, type}, subst) do
+    typed_clauses = Enum.map(clauses, fn {pattern, body, body_type} ->
+      {apply_subst_to_pattern(pattern, subst), apply_subst_to_ast(body, subst), Core.apply_subst(subst, body_type)}
+    end)
+    {:match, apply_subst_to_ast(scrutinee, subst), typed_clauses, Core.apply_subst(subst, type)}
+  end
+
   defp apply_subst_to_ast(other, _subst), do: other
+
+  # --- Pattern substitution ---
+
+  defp apply_subst_to_pattern({:var, name, type}, subst) do
+    {:var, name, Core.apply_subst(subst, type)}
+  end
+
+  defp apply_subst_to_pattern({:cons_pattern, head, tail, type}, subst) do
+    {:cons_pattern, apply_subst_to_pattern(head, subst), apply_subst_to_pattern(tail, subst), Core.apply_subst(subst, type)}
+  end
+
+  defp apply_subst_to_pattern({:list_pattern, elems, type}, subst) do
+    {:list_pattern, Enum.map(elems, &apply_subst_to_pattern(&1, subst)), Core.apply_subst(subst, type)}
+  end
+
+  defp apply_subst_to_pattern({:tuple_pattern, elems, type}, subst) do
+    {:tuple_pattern, Enum.map(elems, &apply_subst_to_pattern(&1, subst)), Core.apply_subst(subst, type)}
+  end
+
+  defp apply_subst_to_pattern({:pattern, name, args, type}, subst) do
+    {:pattern, name, Enum.map(args, &apply_subst_to_pattern(&1, subst)), Core.apply_subst(subst, type)}
+  end
+
+  defp apply_subst_to_pattern(other, _subst), do: other
 end
