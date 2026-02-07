@@ -13,6 +13,7 @@ defmodule Vaisto.CLI do
   """
 
   alias Vaisto.Compilation
+  alias Vaisto.Package.{Manifest, Namespace}
 
   # Embed the prelude at compile time
   @external_resource Path.join(__DIR__, "../../std/prelude.va")
@@ -24,7 +25,16 @@ defmodule Vaisto.CLI do
         compile_file(input, output, backend)
 
       {:build, source_dir, output_dir, backend, src_roots} ->
-        build_project(source_dir, output_dir, backend, src_roots)
+        build_dir(source_dir, output_dir, backend, src_roots)
+
+      :build_manifest ->
+        build_manifest(".")
+
+      {:init, name} ->
+        init_project(name)
+
+      {:add, path} ->
+        add_dependency(path)
 
       {:eval, code, backend} ->
         eval_code(code, backend)
@@ -47,6 +57,8 @@ defmodule Vaisto.CLI do
   defp parse_args([]), do: :help
   defp parse_args(["repl" | _]), do: :repl
   defp parse_args(["lsp" | _]), do: :lsp
+  defp parse_args(["init" | rest]), do: parse_init(rest)
+  defp parse_args(["add" | rest]), do: parse_add(rest)
   defp parse_args(["build" | rest]), do: parse_build(rest)
   defp parse_args(args), do: parse_compile_or_eval(args)
 
@@ -88,25 +100,38 @@ defmodule Vaisto.CLI do
       )
 
     case invalid do
-      [{flag, _} | _] -> {:error, "unknown build option: #{flag}. Use --help for usage."}
+      [{flag, _} | _] ->
+        {:error, "unknown build option: #{flag}. Use --help for usage."}
+
       [] ->
-        dir = List.first(positional) || "."
-        output = opts[:output] || dir
-        backend = parse_backend(opts[:backend] || "core")
+        # No positional args + no explicit flags = try manifest mode
+        if positional == [] and opts == [] and Manifest.exists?(".") do
+          :build_manifest
+        else
+          dir = List.first(positional) || "."
+          output = opts[:output] || dir
+          backend = parse_backend(opts[:backend] || "core")
 
-        src_roots =
-          opts
-          |> Keyword.get_values(:src)
-          |> Enum.map(fn root ->
-            case String.split(root, ":", parts: 2) do
-              [path, prefix] -> {path, prefix}
-              [path] -> {path, ""}
-            end
-          end)
+          src_roots =
+            opts
+            |> Keyword.get_values(:src)
+            |> Enum.map(fn root ->
+              case String.split(root, ":", parts: 2) do
+                [path, prefix] -> {path, prefix}
+                [path] -> {path, ""}
+              end
+            end)
 
-        {:build, dir, output, backend, src_roots}
+          {:build, dir, output, backend, src_roots}
+        end
     end
   end
+
+  defp parse_init([name | _]) when byte_size(name) > 0, do: {:init, name}
+  defp parse_init([]), do: {:init, Path.basename(File.cwd!())}
+
+  defp parse_add([path | _]) when byte_size(path) > 0, do: {:add, path}
+  defp parse_add([]), do: {:error, "add requires a path argument. Usage: vaistoc add ../my-dep"}
 
   defp parse_backend("core"), do: :core
   defp parse_backend("elixir"), do: :elixir
@@ -167,8 +192,8 @@ defmodule Vaisto.CLI do
     end
   end
 
-  defp build_project(source_dir, output_dir, backend, src_roots) do
-    IO.puts("Building project in #{source_dir}...")
+  defp build_dir(source_dir, output_dir, backend, src_roots) do
+    IO.puts("  Building #{source_dir} ...")
 
     # Use custom source roots if provided, otherwise use defaults
     opts = [output_dir: output_dir, backend: backend, prelude: @prelude]
@@ -176,10 +201,7 @@ defmodule Vaisto.CLI do
 
     case Vaisto.Build.build(source_dir, opts) do
       {:ok, results} ->
-        Enum.each(results, fn result ->
-          IO.puts("✓ Compiled #{result.module} → #{result.beam}")
-        end)
-        IO.puts("\n#{length(results)} module(s) compiled successfully.")
+        print_build_results(results)
 
       {:error, errors} when is_list(errors) ->
         Enum.each(errors, fn {:error, msg} ->
@@ -191,6 +213,105 @@ defmodule Vaisto.CLI do
         IO.puts(:stderr, "error: #{reason}")
         System.halt(1)
     end
+  end
+
+  defp build_manifest(dir) do
+    start = System.monotonic_time(:millisecond)
+
+    case Vaisto.Build.build_project(dir, prelude: @prelude) do
+      {:ok, results} ->
+        elapsed = System.monotonic_time(:millisecond) - start
+        print_build_results(results, elapsed)
+
+      {:error, reason} ->
+        IO.puts(:stderr, "error: #{reason}")
+        System.halt(1)
+    end
+  end
+
+  defp init_project(name) do
+    prefix = Namespace.to_prefix(name)
+
+    # Create directory structure
+    dir = name
+    src_dir = Path.join(dir, "src")
+
+    if File.exists?(dir) do
+      IO.puts(:stderr, "error: directory `#{dir}` already exists")
+      System.halt(1)
+    end
+
+    File.mkdir_p!(src_dir)
+
+    # Write vaisto.toml
+    manifest_path = Path.join(dir, "vaisto.toml")
+    File.write!(manifest_path, Manifest.generate(name))
+
+    # Write root module
+    module_path = Path.join(src_dir, "#{prefix}.va")
+
+    File.write!(module_path, """
+    (ns #{prefix})
+
+    (defn hello [] :string
+      "hello from #{name}")
+    """)
+
+    IO.puts("  Created #{manifest_path}")
+    IO.puts("  Created #{module_path}")
+    IO.puts("")
+    IO.puts("  cd #{name} && vaistoc build")
+  end
+
+  defp add_dependency(path) do
+    manifest_path = Path.join(".", "vaisto.toml")
+
+    unless File.exists?(manifest_path) do
+      IO.puts(:stderr, "error: no vaisto.toml in current directory")
+      IO.puts(:stderr, "  hint: run `vaistoc init` to create a project first")
+      System.halt(1)
+    end
+
+    # Resolve the dependency name from its manifest or directory name
+    abs_path = Path.expand(path)
+    dep_name = resolve_dep_name(abs_path, path)
+
+    # Read existing manifest, add dependency
+    content = File.read!(manifest_path)
+
+    if String.contains?(content, "[dependencies]") do
+      # Append to existing [dependencies] section
+      updated =
+        String.replace(content, "[dependencies]", "[dependencies]\n#{dep_name} = { path = \"#{path}\" }", global: false)
+
+      File.write!(manifest_path, updated)
+    else
+      # Add [dependencies] section at end
+      updated = String.trim_trailing(content) <> "\n\n[dependencies]\n#{dep_name} = { path = \"#{path}\" }\n"
+      File.write!(manifest_path, updated)
+    end
+
+    prefix = Namespace.to_prefix(dep_name)
+    IO.puts("  Added #{dep_name} (path: #{path}) -> #{prefix}.*")
+  end
+
+  defp resolve_dep_name(abs_path, _rel_path) do
+    # Try to read the dep's manifest for its canonical name
+    case Manifest.load(abs_path) do
+      {:ok, manifest} -> manifest.name
+      _ -> abs_path |> Path.basename() |> String.downcase() |> String.replace("_", "-")
+    end
+  end
+
+  defp print_build_results(results, elapsed \\ nil) do
+    Enum.each(results, fn result ->
+      module_str = result.module |> to_string() |> String.replace_prefix("Elixir.", "")
+      IO.puts("  Compiling #{module_str}")
+    end)
+
+    count = length(results)
+    time_str = if elapsed, do: " in #{elapsed}ms", else: ""
+    IO.puts("  Built #{count} module(s)#{time_str}")
   end
 
   defp compile(source, module_name, backend) do
@@ -227,16 +348,29 @@ defmodule Vaisto.CLI do
     vaistoc - The Vaisto Compiler
 
     Usage:
-      vaistoc <file.va>                     Compile to <File>.beam
+      vaistoc <file.va>                     Compile a single file
       vaistoc <file.va> -o <output>         Compile to specific output
-      vaistoc <file.va> --backend <backend> Use specific backend (core|elixir)
+      vaistoc build                         Build project (reads vaisto.toml)
       vaistoc build [dir]                   Build all .va files in directory
       vaistoc build [dir] -o <output_dir>   Build with custom output directory
-      vaistoc build [dir] --src <root:prefix> Add source root for module naming
+      vaistoc init [name]                   Create a new package
+      vaistoc add <path>                    Add a local dependency
       vaistoc --eval "<code>"               Evaluate expression
       vaistoc repl                          Start interactive REPL
       vaistoc lsp                           Start Language Server Protocol server
       vaistoc --help                        Show this help
+
+    Packages:
+      vaistoc init my-lib                   Creates my-lib/ with vaisto.toml + src/
+      vaistoc add ../my-dep                 Adds path dependency to vaisto.toml
+      vaistoc build                         Builds from vaisto.toml (if present)
+
+      Package names are kebab-case. The name determines the module namespace:
+        my-lib → MyLib.*    json-parser → JsonParser.*
+
+    Build Modes:
+      With vaisto.toml:  vaistoc build       Reads manifest, resolves deps
+      Without:           vaistoc build src/   Builds directory directly (no packages)
 
     Backends:
       core    - Direct Core Erlang compilation (default, smaller output)
@@ -247,13 +381,6 @@ defmodule Vaisto.CLI do
         src/Vaisto/Lexer.va → Elixir.Vaisto.Lexer
         std/List.va         → Elixir.Std.List
 
-      Default source roots:
-        src/ → (no prefix)    lib/ → (no prefix)    std/ → Std.
-
-      Custom source roots with --src:
-        --src mylib:MyLib     mylib/Foo.va → Elixir.MyLib.Foo
-        --src vendor          vendor/Bar.va → Elixir.Bar
-
     Module System:
       (ns Vaisto.Lexer)                     Optional: validates against path
       (import Vaisto.Lexer.Types)           Import another module
@@ -262,12 +389,10 @@ defmodule Vaisto.CLI do
 
     Examples:
       vaistoc counter.va
-      vaistoc counter.va -o build/Counter.beam
-      vaistoc main.va --backend elixir
+      vaistoc init my-app && cd my-app && vaistoc build
+      vaistoc add ../json-parser
       vaistoc build src/ -o build/
-      vaistoc build . --src src --src std:Std -o build/
       vaistoc --eval "(+ 1 2)"
-      vaistoc --eval "(deftype Result (Ok v) (Error e)) (Ok 42)"
     """)
   end
 end

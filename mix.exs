@@ -23,7 +23,8 @@ defmodule Vaisto.MixProject do
 
   defp deps do
     [
-      {:jason, "~> 1.4"}
+      {:jason, "~> 1.4"},
+      {:toml, "~> 0.7"}
     ]
   end
 end
