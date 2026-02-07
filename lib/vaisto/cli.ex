@@ -104,8 +104,8 @@ defmodule Vaisto.CLI do
         {:error, "unknown build option: #{flag}. Use --help for usage."}
 
       [] ->
-        # No positional args + no explicit flags = try manifest mode
-        if positional == [] and opts == [] and Manifest.exists?(".") do
+        # No positional args = try manifest mode (flags like --backend apply on top)
+        if positional == [] and Manifest.exists?(".") do
           :build_manifest
         else
           dir = List.first(positional) || "."
@@ -230,6 +230,14 @@ defmodule Vaisto.CLI do
   end
 
   defp init_project(name) do
+    case Manifest.validate_name(name) do
+      {:error, msg} ->
+        IO.puts(:stderr, "error: #{msg}")
+        System.halt(1)
+
+      :ok -> :ok
+    end
+
     prefix = Namespace.to_prefix(name)
 
     # Create directory structure
@@ -279,15 +287,17 @@ defmodule Vaisto.CLI do
     # Read existing manifest, add dependency
     content = File.read!(manifest_path)
 
+    escaped_path = String.replace(path, "\"", "\\\"")
+
     if String.contains?(content, "[dependencies]") do
-      # Append to existing [dependencies] section
+      # Append after existing [dependencies] header
       updated =
-        String.replace(content, "[dependencies]", "[dependencies]\n#{dep_name} = { path = \"#{path}\" }", global: false)
+        String.replace(content, "[dependencies]\n", "[dependencies]\n#{dep_name} = { path = \"#{escaped_path}\" }\n", global: false)
 
       File.write!(manifest_path, updated)
     else
       # Add [dependencies] section at end
-      updated = String.trim_trailing(content) <> "\n\n[dependencies]\n#{dep_name} = { path = \"#{path}\" }\n"
+      updated = String.trim_trailing(content) <> "\n\n[dependencies]\n#{dep_name} = { path = \"#{escaped_path}\" }\n"
       File.write!(manifest_path, updated)
     end
 
@@ -353,6 +363,7 @@ defmodule Vaisto.CLI do
       vaistoc build                         Build project (reads vaisto.toml)
       vaistoc build [dir]                   Build all .va files in directory
       vaistoc build [dir] -o <output_dir>   Build with custom output directory
+      vaistoc build [dir] --src <root:pfx>  Add source root for module naming
       vaistoc init [name]                   Create a new package
       vaistoc add <path>                    Add a local dependency
       vaistoc --eval "<code>"               Evaluate expression

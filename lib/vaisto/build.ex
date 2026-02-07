@@ -171,7 +171,7 @@ defmodule Vaisto.Build do
         {path, ""}
       end)
 
-    # Dependency source roots (with namespace prefix)
+    # Dependency source roots (as returned by Namespace.to_source_root/3)
     dep_source_roots = Enum.flat_map(dep_roots, fn {_name, _dir, _manifest, roots} -> roots end)
 
     # Standard library

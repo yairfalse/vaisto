@@ -15,7 +15,7 @@ defmodule Vaisto.Package.Namespace do
       "JsonParser"
 
       iex> Namespace.to_source_root("../json", "json")
-      {"../json/src/", "Json."}
+      [{"../json/src/", ""}]
   """
 
   @doc """
@@ -51,17 +51,17 @@ defmodule Vaisto.Package.Namespace do
   ## Examples
 
       iex> Namespace.to_source_root("../json", "json")
-      {"../json/src/", "Json."}
+      [{"../json/src/", ""}]
 
       iex> Namespace.to_source_root("../tcp", "tcp", ["lib"])
-      {"../tcp/lib/", "Tcp."}
+      [{"../tcp/lib/", ""}]
   """
   @spec to_source_root(String.t(), String.t(), [String.t()]) :: [{String.t(), String.t()}]
   def to_source_root(dep_path, _package_name, source_dirs \\ ["src"]) do
-    # No prefix: the files inside the dep are already namespaced.
+    # No prefix: the files inside the dep are expected to already be correctly namespaced.
     # e.g. string-utils/src/StringUtils.va → StringUtils (root module)
     #      string-utils/src/StringUtils/Parser.va → StringUtils.Parser
-    # Namespace enforcement validates they all start with the right prefix.
+    # Any namespace enforcement must be handled by callers (e.g. via `validate_module/2`).
     Enum.map(source_dirs, fn dir ->
       path = Path.join(dep_path, dir)
       path = if String.ends_with?(path, "/"), do: path, else: path <> "/"

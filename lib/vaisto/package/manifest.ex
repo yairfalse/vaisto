@@ -169,7 +169,7 @@ defmodule Vaisto.Package.Manifest do
         {name, %{path: path}}
 
       {name, other} ->
-        {name, inspect(other)}
+        {name, {:invalid_dependency_spec, other}}
     end)
   end
 
@@ -177,9 +177,13 @@ defmodule Vaisto.Package.Manifest do
 
   # --- Validation ---
 
-  defp validate_name(nil), do: {:error, "package name is required"}
+  @doc """
+  Validate that a package name is lowercase kebab-case.
+  """
+  @spec validate_name(String.t() | nil) :: :ok | {:error, String.t()}
+  def validate_name(nil), do: {:error, "package name is required"}
 
-  defp validate_name(name) do
+  def validate_name(name) do
     cond do
       not Regex.match?(~r/^[a-z][a-z0-9]*(-[a-z][a-z0-9]*)*$/, name) ->
         {:error, "package name `#{name}` must be lowercase kebab-case (e.g. \"my-package\")"}
@@ -193,7 +197,7 @@ defmodule Vaisto.Package.Manifest do
   end
 
   defp validate_version(version) do
-    if Regex.match?(~r/^\d+\.\d+\.\d+/, version) do
+    if Regex.match?(~r/^\d+\.\d+\.\d+(-[a-zA-Z0-9.]+)?(\+[a-zA-Z0-9.]+)?$/, version) do
       :ok
     else
       {:error, "version `#{version}` must follow semver (e.g. \"1.0.0\")"}
