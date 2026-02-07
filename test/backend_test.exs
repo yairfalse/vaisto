@@ -107,9 +107,9 @@ defmodule Vaisto.BackendTest do
     end
 
     test "camelize converts snake_case to CamelCase" do
-      assert Shared.camelize(:foo_bar) == :FooBar
-      assert Shared.camelize(:counter) == :Counter
-      assert Shared.camelize(:my_process_name) == :MyProcessName
+      assert Shared.camelize(:foo_bar) == FooBar
+      assert Shared.camelize(:counter) == Counter
+      assert Shared.camelize(:my_process_name) == MyProcessName
     end
 
     test "is_literal? detects literals" do

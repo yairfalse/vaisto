@@ -120,14 +120,16 @@ defmodule Vaisto.Backend.Shared do
       iex> Backend.Shared.camelize(:counter)
       Counter
   """
-  @spec camelize(atom()) :: atom()
+  @spec camelize(atom()) :: module()
   def camelize(atom) when is_atom(atom) do
-    atom
-    |> Atom.to_string()
-    |> String.split("_")
-    |> Enum.map(&String.capitalize/1)
-    |> Enum.join()
-    |> String.to_atom()
+    name =
+      atom
+      |> Atom.to_string()
+      |> String.split("_")
+      |> Enum.map(&String.capitalize/1)
+      |> Enum.join()
+
+    Module.concat([name])
   end
 
   # ============================================================================

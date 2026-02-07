@@ -1508,6 +1508,15 @@ defmodule Vaisto.TypeChecker do
     end
   end
 
+  # Patterns against type variables or row types - delegate to :any path (env constructor lookup)
+  defp extract_pattern_bindings({:call, _, _} = pattern, {:tvar, _}, env) do
+    extract_pattern_bindings(pattern, :any, env)
+  end
+
+  defp extract_pattern_bindings({:call, _, _} = pattern, {:row, _, _}, env) do
+    extract_pattern_bindings(pattern, :any, env)
+  end
+
   # Record pattern against :any type - try to look up the record/variant in env
   defp extract_pattern_bindings({:call, record_name, args}, :any, env) do
     case Map.get(env, record_name) do
@@ -1601,6 +1610,15 @@ defmodule Vaisto.TypeChecker do
         # Unknown variant - this shouldn't happen if type checking is correct
         {:pattern, ctor_name, args, :any}
     end
+  end
+
+  # Patterns against type variables or row types - delegate to :any path
+  defp type_pattern({:call, _, _} = pattern, {:tvar, _}, env) do
+    type_pattern(pattern, :any, env)
+  end
+
+  defp type_pattern({:call, _, _} = pattern, {:row, _, _}, env) do
+    type_pattern(pattern, :any, env)
   end
 
   # Record pattern against :any type - try to look up the record in env

@@ -118,6 +118,54 @@ defmodule Vaisto.RowPolymorphismTest do
     end
   end
 
+  describe "pattern matching on unknown types" do
+    test "record pattern against tvar scrutinee extracts typed bindings" do
+      code = """
+      (deftype Point [x :int y :int])
+      (defn extract [p]
+        (match p
+          [(Point x y) (+ x y)]))
+      """
+      ast = Parser.parse(code)
+      {:ok, _type, _typed_ast} = TypeChecker.check(ast)
+    end
+
+    test "sum type pattern against tvar scrutinee works" do
+      code = """
+      (deftype Result (Ok v) (Err e))
+      (defn unwrap [r]
+        (match r
+          [(Ok v) v]
+          [(Err e) e]))
+      """
+      ast = Parser.parse(code)
+      {:ok, _type, _typed_ast} = TypeChecker.check(ast)
+    end
+
+    test "pattern variables get correct types from constructor definition" do
+      code = """
+      (deftype Pair [fst :int snd :string])
+      (defn get-fst [p]
+        (match p
+          [(Pair f s) f]))
+      """
+      ast = Parser.parse(code)
+      {:ok, :module, {:module, typed_forms}} = TypeChecker.check(ast)
+
+      # Find the get-fst function in the typed forms
+      defn = Enum.find(typed_forms, fn
+        {:defn, :"get-fst", _, _, _} -> true
+        _ -> false
+      end)
+
+      assert {:defn, :"get-fst", _, _, func_type} = defn
+
+      # The function should return the type of fst field
+      assert {:fn, [_param], ret_type} = func_type
+      assert ret_type == :int
+    end
+  end
+
   describe "row type formatting" do
     test "formats open row type" do
       alias Vaisto.TypeSystem.Core

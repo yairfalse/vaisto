@@ -227,6 +227,69 @@ defmodule Vaisto.TypeSystem.InferTest do
     end
   end
 
+  describe "field access" do
+    test "single field access infers row-polymorphic type" do
+      # (fn [p] (. p :name)) → ({name: 'a | ..b}) -> 'a
+      {:ok, type, _ast} = Infer.infer({:fn, [:p], {:field_access, :p, :name}})
+
+      assert {:fn, [param_type], ret_type} = type
+      # Return type should be a type variable (the field's type)
+      assert match?({:tvar, _}, ret_type)
+      # Param type should be a row type with :name field
+      assert {:row, fields, tail} = param_type
+      assert [{:name, ^ret_type}] = fields
+      assert match?({:rvar, _}, tail)
+    end
+
+    test "field access constrained by arithmetic infers int fields" do
+      # (fn [p] (+ (. p :x) (. p :y))) → ({x: Int, y: Int | ..r}) -> Int
+      {:ok, type, _ast} = Infer.infer(
+        {:fn, [:p], {:call, :+, [{:field_access, :p, :x}, {:field_access, :p, :y}]}}
+      )
+
+      assert {:fn, [param_type], :int} = type
+      # Param type is a nested row: {x: Int | {y: Int | ..r}}
+      # This is standard Algorithm W row polymorphism - second field unifies with the tail
+      assert {:row, [{:x, :int}], inner_row} = param_type
+      assert {:row, [{:y, :int}], tail} = inner_row
+      assert match?({:rvar, _}, tail)
+    end
+
+    test "nested field access infers nested row types" do
+      # (fn [p] (. (. p :inner) :x)) → ({inner: {x: 'a | ..r1} | ..r2}) -> 'a
+      {:ok, type, _ast} = Infer.infer(
+        {:fn, [:p], {:field_access, {:field_access, :p, :inner}, :x}}
+      )
+
+      assert {:fn, [param_type], ret_type} = type
+      assert match?({:tvar, _}, ret_type)
+      # Outer row should have :inner field
+      assert {:row, [{:inner, inner_type}], _tail} = param_type
+      # Inner type should be a row with :x field
+      assert {:row, [{:x, ^ret_type}], _inner_tail} = inner_type
+    end
+
+    test "location stripping works for field access" do
+      loc = %Vaisto.Parser.Loc{line: 1, col: 1, file: nil}
+
+      {:ok, type, _ast} = Infer.infer(
+        {:fn, [:p], {:field_access, :p, :name, loc}}
+      )
+
+      assert {:fn, [_param], _ret} = type
+    end
+
+    test "typed AST contains field_access with correct types" do
+      {:ok, _type, ast} = Infer.infer(
+        {:fn, [:p], {:field_access, :p, :name}}
+      )
+
+      assert {:fn, [:p], body, _fn_type} = ast
+      assert {:field_access, {:var, :p, _record_type}, :name, field_type} = body
+      assert match?({:tvar, _}, field_type) or is_atom(field_type)
+    end
+  end
+
   describe "type formatting" do
     test "formats primitive types" do
       assert Core.format_type(:int) == "Int"

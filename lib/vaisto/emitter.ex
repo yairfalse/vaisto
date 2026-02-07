@@ -9,6 +9,7 @@ defmodule Vaisto.Emitter do
   """
 
   alias Vaisto.Error
+  alias Vaisto.TypeChecker
 
   @doc """
   Transform typed Vaisto AST to Elixir AST (quoted form).
@@ -21,6 +22,7 @@ defmodule Vaisto.Emitter do
       iex> Emitter.to_elixir({:call, :+, [{:lit, :int, 1}, {:lit, :int, 2}], :int})
       {:+, [], [1, 2]}
   """
+  @spec to_elixir(TypeChecker.typed_ast() | integer() | float() | atom()) :: Macro.t()
   def to_elixir(typed_ast)
 
   # Literals pass through
@@ -414,9 +416,11 @@ defmodule Vaisto.Emitter do
   @doc """
   Compile typed AST to a module and return the bytecode.
 
-  Returns {:ok, module_name, bytecode} or {:error, reason}
-  For modules: returns {:ok, :module, [{module_name, bytecode}, ...]}
+  Returns `{:ok, module_name, bytecode}` or `{:error, %Vaisto.Error{}}`.
+  For modules: returns `{:ok, :module, [{module_name, bytecode}, ...]}`.
   """
+  @spec compile(TypeChecker.typed_ast(), atom()) ::
+          {:ok, atom(), binary() | [{atom(), binary()}]} | {:error, Error.t()}
   def compile(typed_ast, module_name \\ :vaisto_module)
 
   # Module compilation - produces multiple modules (processes, supervisors)
@@ -761,7 +765,7 @@ defmodule Vaisto.Emitter do
 
 
   defp scoped_module_name(name) do
-    base_name = camelize(name)
+    base_name = Vaisto.Backend.Shared.camelize(name)
 
     case Process.get(:vaisto_compile_context) do
       %{parent_module: parent} when not is_nil(parent) ->
@@ -772,15 +776,4 @@ defmodule Vaisto.Emitter do
     end
   end
 
-  defp camelize(atom) when is_atom(atom) do
-    name =
-      atom
-      |> Atom.to_string()
-      |> String.split("_")
-      |> Enum.map(&String.capitalize/1)
-      |> Enum.join()
-
-    # Use Module.concat to get proper Elixir module atom
-    Module.concat([String.to_atom(name)])
-  end
 end

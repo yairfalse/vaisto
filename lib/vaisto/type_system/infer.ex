@@ -229,6 +229,38 @@ defmodule Vaisto.TypeSystem.Infer do
     {:ok, :unit, {:unit}, ctx}
   end
 
+  # --- Field Access ---
+  # (. record :field) → row-polymorphic field type
+
+  defp infer_expr({:field_access, record_expr, field}, ctx) when is_atom(field) do
+    case infer_expr(record_expr, ctx) do
+      {:ok, record_type, typed_record, ctx} ->
+        # Fresh type variable for the field's type
+        {field_tvar, ctx} = Context.fresh_var(ctx)
+        # Fresh row variable for the open tail
+        {row_rvar, ctx} = Context.fresh_row_var(ctx)
+
+        # Unify the record type with a row requiring at least {field: field_tvar}
+        row_constraint = {:row, [{field, field_tvar}], row_rvar}
+
+        case Context.unify_types(ctx, record_type, row_constraint) do
+          {:ok, ctx} ->
+            {:ok, field_tvar, {:field_access, typed_record, field, field_tvar}, ctx}
+
+          {:error, reason} ->
+            {:error, "Field access error: #{reason}"}
+        end
+
+      error ->
+        error
+    end
+  end
+
+  # Strip location from field_access nodes
+  defp infer_expr({:field_access, record_expr, field, %Vaisto.Parser.Loc{}}, ctx) do
+    infer_expr({:field_access, record_expr, field}, ctx)
+  end
+
   # --- Catch-all for unhandled expressions ---
   # Fall back to the original type checker for complex forms
 
@@ -358,6 +390,10 @@ defmodule Vaisto.TypeSystem.Infer do
 
   defp apply_subst_to_ast({:list, elems, type}, subst) do
     {:list, Enum.map(elems, &apply_subst_to_ast(&1, subst)), Core.apply_subst(subst, type)}
+  end
+
+  defp apply_subst_to_ast({:field_access, record, field, type}, subst) do
+    {:field_access, apply_subst_to_ast(record, subst), field, Core.apply_subst(subst, type)}
   end
 
   defp apply_subst_to_ast({:unit}, _subst), do: {:unit}
