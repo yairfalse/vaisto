@@ -89,8 +89,10 @@ defmodule Vaisto.CoreEmitter do
     end)
 
     if process_def do
-      {:process, _name, _init, handlers, _type} = process_def
-      to_core_process(module_name, handlers)
+      {:process, name, _init, handlers, _type} = process_def
+      # Scope process module under parent to prevent name collisions in async tests
+      process_module = scoped_process_name(name, module_name)
+      to_core_process(process_module, handlers)
     else
       to_core_module_forms(forms, module_name)
     end
@@ -1162,6 +1164,13 @@ defmodule Vaisto.CoreEmitter do
     end)
     |> List.flatten()
     |> Enum.join("\n")
+  end
+
+  # Scope process module name under parent to prevent collisions in async tests.
+  # e.g., :counter under :MyModule → MyModule.Counter
+  defp scoped_process_name(name, parent_module) do
+    base_name = Shared.camelize(name)
+    Module.concat(parent_module, base_name)
   end
 
   # --- Module name resolution ---
