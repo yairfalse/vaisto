@@ -218,6 +218,7 @@ defmodule Vaisto.REPL do
     end
   end
 
+  defp definition?({:defn, _, _, _, _, _}), do: true
   defp definition?({:defn, _, _, _, _}), do: true
   defp definition?({:defn, _, _, _}), do: true
   defp definition?({:deftype, _, _, _}), do: true
@@ -272,11 +273,28 @@ defmodule Vaisto.REPL do
   defp compile_and_run(ast, module_name) do
     with {:ok, _type, typed_ast} <- Vaisto.Compilation.typecheck(ast),
          {:ok, ^module_name, _binary} <- Vaisto.Compilation.emit(typed_ast, module_name, :core) do
-      result = apply(module_name, :main, [])
-      # Clean up
-      :code.purge(module_name)
-      :code.delete(module_name)
-      {:ok, result}
+      result =
+        try do
+          apply(module_name, :main, [])
+        rescue
+          e in ArithmeticError ->
+            :code.purge(module_name)
+            :code.delete(module_name)
+            {:error, Exception.message(e)}
+
+          e ->
+            :code.purge(module_name)
+            :code.delete(module_name)
+            {:error, "runtime error: #{Exception.message(e)}"}
+        end
+
+      case result do
+        {:error, _} = err -> err
+        value ->
+          :code.purge(module_name)
+          :code.delete(module_name)
+          {:ok, value}
+      end
     else
       {:error, msg} -> {:error, format_error(msg)}
       other -> {:error, "Unexpected: #{inspect(other)}"}
@@ -308,8 +326,18 @@ defmodule Vaisto.REPL do
     case typed_def do
       {:defn, ^name, _, _, type} -> {name, type}
       {:defn_multi, ^name, _, _, type} -> {name, type}
-      {:deftype, ^name, fields, _type} ->
-        # Constructor type
+      {:deftype, ^name, {:sum, variants}, _type} ->
+        # Sum type — report the sum type itself
+        {name, {:sum, name, variants}}
+
+      {:deftype, ^name, {:product, fields}, _type} ->
+        # Product type — constructor
+        field_types = Enum.map(fields, fn {_, t} -> t end)
+        record_type = {:record, name, fields}
+        {name, {:fn, field_types, record_type}}
+
+      {:deftype, ^name, fields, _type} when is_list(fields) ->
+        # Legacy product fields
         field_types = Enum.map(fields, fn {_, t} -> t end)
         record_type = {:record, name, fields}
         {name, {:fn, field_types, record_type}}
@@ -317,6 +345,7 @@ defmodule Vaisto.REPL do
     end
   end
 
+  defp get_definition_name({:defn, name, _, _, _, _}), do: name
   defp get_definition_name({:defn, name, _, _, _}), do: name
   defp get_definition_name({:defn, name, _, _}), do: name
   defp get_definition_name({:deftype, name, _, _}), do: name
