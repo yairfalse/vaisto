@@ -402,15 +402,14 @@
     {
       "id": "INT-003",
       "category": "Integration",
-      "name": "ADT match triggers type_pattern crash → diagnostic",
-      "note": "Known limitation: type checker type_pattern/3 doesn't handle ADT match patterns yet",
+      "name": "ADT match with type_pattern resolves cleanly",
       "messages": [
         {"method": "initialize", "id": 1, "params": {"processId": null, "rootUri": "file:///tmp/lsp_test", "capabilities": {}}},
         {"method": "initialized", "params": {}},
         {"method": "textDocument/didOpen", "params": {"textDocument": {"uri": "file:///tmp/adt.va", "languageId": "vaisto", "version": 1, "text": "(deftype Maybe (Just v) (Nothing))\n(defn unwrap [m :Maybe] :int\n  (match m\n    [(Just v) v]\n    [(Nothing) 0]))"}}}
       ],
       "expect_notification": "textDocument/publishDiagnostics",
-      "expect_diagnostics_min": 1
+      "expect_diagnostics_count": 0
     },
     {
       "id": "INT-004",

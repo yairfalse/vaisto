@@ -1237,6 +1237,8 @@ defmodule Vaisto.TypeChecker do
   defp lookup_function(name, env) do
     case Map.get(env, name) do
       nil -> {:error, Errors.unknown_function(name)}
+      {:fn, _, {:sum, _, _}} = ctor_type -> {:ok, instantiate_constructor_type(ctor_type)}
+      {:fn, _, {:record, _, _}} = ctor_type -> {:ok, instantiate_constructor_type(ctor_type)}
       type -> {:ok, type}
     end
   end
@@ -1331,13 +1333,24 @@ defmodule Vaisto.TypeChecker do
       {:error, _} = err -> err
       nil ->
         typed_clauses = Enum.map(results, fn {:ok, clause} -> clause end)
-        # All clauses must have the same result type - use the first one
-        [{_pattern, _body, result_type} | _] = typed_clauses
+        [{_pattern, _body, result_type} | rest_clauses] = typed_clauses
 
-        # Exhaustiveness check for sum types
-        case check_exhaustiveness(clauses, expr_type) do
-          :ok -> {:ok, result_type, typed_clauses}
+        # Verify all branches return compatible types
+        branch_error = Enum.find_value(rest_clauses, fn {_, _, body_type} ->
+          case unify_types(result_type, body_type) do
+            {:ok, _} -> nil
+            {:error, _} = err -> err
+          end
+        end)
+
+        case branch_error do
           {:error, _} = err -> err
+          nil ->
+            # Exhaustiveness check for sum types
+            case check_exhaustiveness(clauses, expr_type) do
+              :ok -> {:ok, result_type, typed_clauses}
+              {:error, _} = err -> err
+            end
         end
     end
   end
@@ -1424,14 +1437,17 @@ defmodule Vaisto.TypeChecker do
   defp is_catch_all_pattern?(_), do: false
 
   defp check_match_clause(pattern, body, expr_type, env) do
+    # Fresh-instantiate sum type tvars per clause so each branch is independent
+    instantiated_type = instantiate_sum_tvars(expr_type)
+
     # Extract bindings from pattern and add to env
-    bindings = extract_pattern_bindings(pattern, expr_type, env)
+    bindings = extract_pattern_bindings(pattern, instantiated_type, env)
     extended_env = Enum.reduce(bindings, env, fn {name, type}, acc ->
       Map.put(acc, name, type)
     end)
 
     # Type the pattern itself
-    typed_pattern = type_pattern(pattern, expr_type, env)
+    typed_pattern = type_pattern(pattern, instantiated_type, env)
 
     case check(body, extended_env) do
       {:ok, body_type, typed_body} ->
@@ -1519,6 +1535,18 @@ defmodule Vaisto.TypeChecker do
 
   defp extract_pattern_bindings({:call, _, _} = pattern, {:row, _, _}, env) do
     extract_pattern_bindings(pattern, :any, env)
+  end
+
+  # Resolve bare type name atoms (e.g., :Maybe, :Point) to their full form from env
+  defp extract_pattern_bindings({:call, _, _} = pattern, type_name, env)
+       when is_atom(type_name) and type_name not in [:any, :int, :float, :string, :bool, :atom, :unit] do
+    case Map.get(env, type_name) do
+      {:sum, _, _} = sum_type -> extract_pattern_bindings(pattern, sum_type, env)
+      {:record, _, _} = rec_type -> extract_pattern_bindings(pattern, rec_type, env)
+      {:fn, _, {:sum, _, _} = sum_type} -> extract_pattern_bindings(pattern, sum_type, env)
+      {:fn, _, {:record, _, _} = rec_type} -> extract_pattern_bindings(pattern, rec_type, env)
+      _ -> extract_pattern_bindings(pattern, :any, env)
+    end
   end
 
   # Record pattern against :any type - try to look up the record/variant in env
@@ -1623,6 +1651,18 @@ defmodule Vaisto.TypeChecker do
 
   defp type_pattern({:call, _, _} = pattern, {:row, _, _}, env) do
     type_pattern(pattern, :any, env)
+  end
+
+  # Resolve bare type name atoms (e.g., :Maybe, :Point) to their full form from env
+  defp type_pattern({:call, _, _} = pattern, type_name, env)
+       when is_atom(type_name) and type_name not in [:any, :int, :float, :string, :bool, :atom, :unit] do
+    case Map.get(env, type_name) do
+      {:sum, _, _} = sum_type -> type_pattern(pattern, sum_type, env)
+      {:record, _, _} = rec_type -> type_pattern(pattern, rec_type, env)
+      {:fn, _, {:sum, _, _} = sum_type} -> type_pattern(pattern, sum_type, env)
+      {:fn, _, {:record, _, _} = rec_type} -> type_pattern(pattern, rec_type, env)
+      _ -> type_pattern(pattern, :any, env)
+    end
   end
 
   # Record pattern against :any type - try to look up the record in env
@@ -2291,4 +2331,55 @@ defmodule Vaisto.TypeChecker do
       {name, unify_two_simple(type1, type2)}
     end)
   end
+
+  # ============================================================================
+  # Parametric Polymorphism — Fresh Instantiation
+  # ============================================================================
+
+  # Generate a fresh tvar id that won't collide with parser-assigned ids (0, 1, 2...)
+  defp fresh_tvar_id do
+    System.unique_integer([:positive, :monotonic]) + 10_000
+  end
+
+  # Instantiate a constructor type with fresh tvars so each call site is independent
+  defp instantiate_constructor_type({:fn, params, ret}) do
+    tvar_ids = collect_tvar_ids(params ++ [ret])
+    if tvar_ids == [] do
+      {:fn, params, ret}
+    else
+      mapping = Map.new(tvar_ids, fn id -> {id, {:tvar, fresh_tvar_id()}} end)
+      {:fn,
+       Enum.map(params, &Vaisto.TypeSystem.Core.apply_subst(mapping, &1)),
+       Vaisto.TypeSystem.Core.apply_subst(mapping, ret)}
+    end
+  end
+
+  # Instantiate a sum type with fresh tvars so each match clause is independent
+  defp instantiate_sum_tvars({:sum, name, variants}) do
+    tvar_ids = variants
+    |> Enum.flat_map(fn {_, types} -> collect_tvar_ids(types) end)
+    |> Enum.uniq()
+    if tvar_ids == [] do
+      {:sum, name, variants}
+    else
+      mapping = Map.new(tvar_ids, fn id -> {id, {:tvar, fresh_tvar_id()}} end)
+      Vaisto.TypeSystem.Core.apply_subst(mapping, {:sum, name, variants})
+    end
+  end
+  defp instantiate_sum_tvars(other), do: other
+
+  # Collect all tvar ids from a type or list of types
+  defp collect_tvar_ids(types) when is_list(types) do
+    Enum.flat_map(types, &collect_tvar_ids/1) |> Enum.uniq()
+  end
+  defp collect_tvar_ids({:tvar, id}), do: [id]
+  defp collect_tvar_ids({:fn, params, ret}), do: collect_tvar_ids(params) ++ collect_tvar_ids(ret)
+  defp collect_tvar_ids({:sum, _, variants}) do
+    Enum.flat_map(variants, fn {_, types} -> collect_tvar_ids(types) end)
+  end
+  defp collect_tvar_ids({:list, t}), do: collect_tvar_ids(t)
+  defp collect_tvar_ids({:record, _, fields}) do
+    Enum.flat_map(fields, fn {_, t} -> collect_tvar_ids(t) end)
+  end
+  defp collect_tvar_ids(_), do: []
 end

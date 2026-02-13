@@ -236,4 +236,83 @@ defmodule Vaisto.ADTTest do
       assert 10 = Runner.call(mod, :main)
     end
   end
+
+  describe "parametric polymorphism" do
+    test "polymorphic match — Just with int" do
+      code = """
+      (deftype Maybe (Just v) (Nothing))
+      (match (Just 42)
+        [(Just v) (+ v 1)]
+        [(Nothing) 0])
+      """
+      {:ok, mod} = Runner.compile_and_load(code, :PolyMatchInt)
+      assert 43 = Runner.call(mod, :main)
+    end
+
+    test "fresh tvars per call site — Just with int and string in same module" do
+      code = """
+      (deftype Maybe (Just v) (Nothing))
+      (defn get-int [] (Just 42))
+      (defn get-str [] (Just "hello"))
+      (match (get-int)
+        [(Just v) v]
+        [(Nothing) 0])
+      """
+      {:ok, mod} = Runner.compile_and_load(code, :FreshPerCall)
+      assert 42 = Runner.call(mod, :main)
+    end
+
+    test "nested ADT — Just wrapping Just" do
+      code = """
+      (deftype Maybe (Just v) (Nothing))
+      (match (Just (Just 42))
+        [(Just inner) (match inner
+          [(Just v) v]
+          [(Nothing) 0])]
+        [(Nothing) 0])
+      """
+      {:ok, mod} = Runner.compile_and_load(code, :NestedADT)
+      assert 42 = Runner.call(mod, :main)
+    end
+
+    test "exhaustiveness still enforced with polymorphic types" do
+      code = """
+      (deftype Maybe (Just v) (Nothing))
+      (match (Just 42)
+        [(Just v) v])
+      """
+      result = Runner.compile_and_load(code, :PolyExhaustive)
+      assert {:error, err} = result
+      text = error_text(err)
+      assert text =~ "non-exhaustive" or text =~ "Non-exhaustive"
+      assert text =~ "Nothing"
+    end
+
+    test "two-param ADT — Result with Ok and Err" do
+      code = """
+      (deftype Result (Ok v) (Err e))
+      (defn unwrap-or [r default]
+        (match r
+          [(Ok v) v]
+          [(Err _) default]))
+      (+ (unwrap-or (Ok 10) 0) (unwrap-or (Err "fail") 5))
+      """
+      {:ok, mod} = Runner.compile_and_load(code, :TwoParamADT)
+      assert 15 = Runner.call(mod, :main)
+    end
+
+    test "branch type mismatch is detected" do
+      code = """
+      (deftype Maybe (Just v) (Nothing))
+      (defn bad [m :Maybe]
+        (match m
+          [(Just v) "hello"]
+          [(Nothing) 42]))
+      """
+      result = Runner.compile_and_load(code, :BranchMismatch)
+      assert {:error, err} = result
+      text = error_text(err)
+      assert text =~ "branch" or text =~ "mismatch" or text =~ "cannot"
+    end
+  end
 end

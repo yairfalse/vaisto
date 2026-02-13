@@ -71,6 +71,17 @@ defmodule Vaisto.TypeSystem.Unify do
           unify_fields(fields1, fields2, subst, row_counter)
         end
 
+      # Sum types - same name, unify variant field types pairwise
+      match?({:sum, _, _}, t1) and match?({:sum, _, _}, t2) ->
+        {:sum, name1, variants1} = t1
+        {:sum, name2, variants2} = t2
+
+        if name1 != name2 do
+          {:error, "cannot unify #{name1} with #{name2}"}
+        else
+          unify_variant_fields(variants1, variants2, subst, row_counter)
+        end
+
       # Tuple types - unify element types
       match?({:tuple, _}, t1) and match?({:tuple, _}, t2) ->
         {:tuple, elems1} = t1
@@ -147,6 +158,9 @@ defmodule Vaisto.TypeSystem.Unify do
   def occurs?(id, {:record, _name, fields}) do
     Enum.any?(fields, fn {_k, v} -> occurs?(id, v) end)
   end
+  def occurs?(id, {:sum, _name, variants}) do
+    Enum.any?(variants, fn {_ctor, types} -> Enum.any?(types, &occurs?(id, &1)) end)
+  end
   def occurs?(id, {:row, fields, tail}) do
     Enum.any?(fields, fn {_k, v} -> occurs?(id, v) end) or occurs?(id, tail)
   end
@@ -184,6 +198,23 @@ defmodule Vaisto.TypeSystem.Unify do
         end
       end)
     end
+  end
+
+  @doc """
+  Unifies sum type variants pairwise by constructor name and field types.
+  """
+  def unify_variant_fields([], [], subst, rc), do: {:ok, subst, rc}
+  def unify_variant_fields([{name, types1} | r1], [{name, types2} | r2], subst, rc) do
+    case unify_lists(types1, types2, subst, rc) do
+      {:ok, subst, rc} -> unify_variant_fields(r1, r2, subst, rc)
+      error -> error
+    end
+  end
+  def unify_variant_fields([{n1, _} | _], [{n2, _} | _], _subst, _rc) do
+    {:error, "variant mismatch: #{n1} vs #{n2}"}
+  end
+  def unify_variant_fields(_, _, _subst, _rc) do
+    {:error, "variant count mismatch"}
   end
 
   # ============================================================================

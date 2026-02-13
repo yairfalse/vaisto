@@ -332,8 +332,9 @@ defmodule Vaisto.TypeSystem.Infer do
 
   defp infer_expr({:call, func, args}, ctx) when is_atom(func) do
     case Context.lookup(ctx, func) do
-      {:ok, scheme} ->
-        # Instantiate function type (handles polymorphism)
+      {:ok, raw_type} ->
+        # Wrap bare constructor types as schemes for fresh instantiation
+        scheme = ensure_scheme(raw_type)
         {func_type, ctx} = Context.instantiate(ctx, scheme)
         infer_application(func, func_type, args, ctx)
 
@@ -757,6 +758,16 @@ defmodule Vaisto.TypeSystem.Infer do
     end
   end
 
+  # --- Scheme helpers ---
+  # Wraps bare constructor {:fn, ...} types as {:forall, ...} so
+  # Context.instantiate generates fresh tvars at each use site
+  defp ensure_scheme({:forall, _, _} = s), do: s
+  defp ensure_scheme({:fn, _, _} = fn_type) do
+    tvars = Core.free_vars(fn_type) |> MapSet.to_list() |> Enum.filter(&is_integer/1)
+    if tvars == [], do: fn_type, else: {:forall, tvars, fn_type}
+  end
+  defp ensure_scheme(type), do: type
+
   # --- Pattern inference ---
   # Returns {:ok, bindings, typed_pattern, ctx}
 
@@ -878,14 +889,32 @@ defmodule Vaisto.TypeSystem.Infer do
   end
 
   defp infer_pattern({:call, name, args}, scrutinee_type, ctx) when is_atom(name) do
-    param_types = case Context.lookup(ctx, name) do
-      {:ok, {:fn, ptypes, _}} -> ptypes
-      {:ok, {:forall, _, {:fn, ptypes, _}}} -> ptypes
-      _ -> List.duplicate(:any, length(args))
-    end
+    case Context.lookup(ctx, name) do
+      {:ok, raw_type} ->
+        scheme = ensure_scheme(raw_type)
+        {ctor_type, ctx} = Context.instantiate(ctx, scheme)
 
-    {:ok, bindings, typed_args, ctx} = infer_pattern_elements(args, param_types, ctx, [], [])
-    {:ok, bindings, {:pattern, name, typed_args, scrutinee_type}, ctx}
+        case ctor_type do
+          {:fn, param_types, ret_type} ->
+            # Unify return type with scrutinee to propagate constraints
+            ctx = case Context.unify_types(ctx, ret_type, scrutinee_type) do
+              {:ok, ctx} -> ctx
+              {:error, _} -> ctx
+            end
+            {:ok, bindings, typed_args, ctx} = infer_pattern_elements(args, param_types, ctx, [], [])
+            {:ok, bindings, {:pattern, name, typed_args, scrutinee_type}, ctx}
+
+          _ ->
+            {:ok, bindings, typed_args, ctx} = infer_pattern_elements(
+              args, List.duplicate(:any, length(args)), ctx, [], [])
+            {:ok, bindings, {:pattern, name, typed_args, scrutinee_type}, ctx}
+        end
+
+      :error ->
+        {:ok, bindings, typed_args, ctx} = infer_pattern_elements(
+          args, List.duplicate(:any, length(args)), ctx, [], [])
+        {:ok, bindings, {:pattern, name, typed_args, scrutinee_type}, ctx}
+    end
   end
 
   # Catch-all pattern — treat as opaque
