@@ -1014,6 +1014,8 @@ defmodule Vaisto.TypeChecker do
     # Validate: class definition is already collected in signature pass
     classes = Map.get(env, :__classes__, %{})
     case Map.get(classes, class_name) do
+      {:class, _, _, _, _} ->
+        {:ok, :defclass, {:defclass, class_name, type_params, methods, :defclass}}
       {:class, _, _, _} ->
         {:ok, :defclass, {:defclass, class_name, type_params, methods, :defclass}}
       nil ->
@@ -1025,20 +1027,34 @@ defmodule Vaisto.TypeChecker do
   defp check_impl({:instance, class_name, for_type, methods}, env) do
     classes = Map.get(env, :__classes__, %{})
     case Map.get(classes, class_name) do
-      {:class, _name, tvar_ids, method_sigs} ->
-        # Verify all methods are provided
+      class_def when is_tuple(class_def) and elem(class_def, 0) == :class ->
+        {tvar_ids, method_sigs, defaults} = extract_class_parts(class_def)
+
+        # Check for missing methods, accounting for defaults
         required_names = Enum.map(method_sigs, fn {name, _type} -> name end) |> MapSet.new()
         provided_names = Enum.map(methods, fn {name, _params, _body} -> name end) |> MapSet.new()
         missing = MapSet.difference(required_names, provided_names)
 
-        if MapSet.size(missing) > 0 do
-          {:error, Error.new("instance #{class_name} #{inspect(for_type)} is missing methods: #{Enum.join(missing, ", ")}")}
+        # Split missing into those with defaults and truly missing
+        {with_defaults, truly_missing} = Enum.split_with(missing, fn name ->
+          Map.has_key?(defaults, name)
+        end)
+
+        if length(truly_missing) > 0 do
+          {:error, Error.new("instance #{class_name} #{inspect(for_type)} is missing methods: #{Enum.join(truly_missing, ", ")}")}
         else
+          # Inject default bodies for missing methods
+          injected = Enum.map(with_defaults, fn name ->
+            {:default, param_names, body} = Map.fetch!(defaults, name)
+            {name, param_names, body}
+          end)
+          all_methods = methods ++ injected
+
           # Type-check each method body with the concrete type
           subst = Map.new(tvar_ids, fn id -> {id, for_type} end)
           method_sig_map = Map.new(method_sigs)
 
-          typed_methods = Enum.map(methods, fn {method_name, params, body} ->
+          typed_methods = Enum.map(all_methods, fn {method_name, params, body} ->
             expected_type = Vaisto.TypeSystem.Core.apply_subst(subst, method_sig_map[method_name])
             {:fn, param_types, _ret_type} = expected_type
 
@@ -1056,7 +1072,13 @@ defmodule Vaisto.TypeChecker do
             end
           end)
 
-          {:ok, :instance, {:instance, class_name, for_type, typed_methods, :instance}}
+          # Sort typed_methods to match class definition order (for dictionary indexing)
+          class_order = Enum.map(method_sigs, fn {name, _} -> name end)
+          sorted_methods = Enum.sort_by(typed_methods, fn {name, _, _} ->
+            Enum.find_index(class_order, &(&1 == name)) || 999
+          end)
+
+          {:ok, :instance, {:instance, class_name, for_type, sorted_methods, :instance}}
         end
 
       nil ->
@@ -1065,6 +1087,12 @@ defmodule Vaisto.TypeChecker do
   catch
     {:error, _} = err -> err
   end
+
+  # Extract tvar_ids, method_sigs, defaults from class def (4-tuple or 5-tuple)
+  defp extract_class_parts({:class, _name, tvar_ids, method_sigs, defaults}),
+    do: {tvar_ids, method_sigs, defaults}
+  defp extract_class_parts({:class, _name, tvar_ids, method_sigs}),
+    do: {tvar_ids, method_sigs, %{}}
 
   # Handle parse errors (propagate them as type errors with location info)
   # Parse error - location is stripped by generic handler and added via with_loc
@@ -2356,8 +2384,9 @@ defmodule Vaisto.TypeChecker do
 
     tvar_ids = Enum.with_index(type_params) |> Enum.map(fn {_, idx} -> idx end)
 
-    # Parse method signatures
-    parsed_methods = Enum.map(methods, fn {method_name, params, ret_type} ->
+    # Parse method signatures and collect defaults
+    # Methods are 4-tuples: {name, params, ret_type, body|nil}
+    parsed_methods = Enum.map(methods, fn {method_name, params, ret_type, _body} ->
       param_types = Enum.map(params, fn {_name, type} ->
         Map.get(param_map, type, parse_type_expr(type))
       end)
@@ -2365,8 +2394,16 @@ defmodule Vaisto.TypeChecker do
       {method_name, {:fn, param_types, parsed_ret}}
     end)
 
-    # Store class definition
-    class_def = {:class, class_name, tvar_ids, parsed_methods}
+    # Collect default implementations: method_name => {:default, param_names, body_ast}
+    defaults = methods
+      |> Enum.filter(fn {_name, _params, _ret_type, body} -> body != nil end)
+      |> Map.new(fn {name, params, _ret_type, body} ->
+        param_names = Enum.map(params, fn {pname, _type} -> pname end)
+        {name, {:default, param_names, body}}
+      end)
+
+    # Store class definition with defaults (5-tuple)
+    class_def = {:class, class_name, tvar_ids, parsed_methods, defaults}
     classes = Map.get(env, :__classes__, %{})
     env = Map.put(env, :__classes__, Map.put(classes, class_name, class_def))
 
@@ -2380,8 +2417,10 @@ defmodule Vaisto.TypeChecker do
 
   defp collect_instance_signature(class_name, for_type, env) do
     classes = Map.get(env, :__classes__, %{})
-    case Map.get(classes, class_name) do
-      {:class, _name, tvar_ids, method_sigs} ->
+    class_def = Map.get(classes, class_name)
+    case class_def do
+      tuple when is_tuple(tuple) and elem(tuple, 0) == :class ->
+        {tvar_ids, method_sigs, _defaults} = extract_class_parts(class_def)
         # Substitute concrete type for tvars in method signatures
         subst = Map.new(tvar_ids, fn id -> {id, for_type} end)
         concrete_methods = Map.new(method_sigs, fn {method_name, method_type} ->

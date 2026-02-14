@@ -175,6 +175,22 @@ defmodule Vaisto.CoreEmitter do
   end
 
   defp to_core_module_forms(forms, module_name) do
+    # Extract user-defined class definitions for method index lookups
+    user_classes = forms
+      |> Enum.filter(fn
+        {:defclass, _, _, _, _} -> true
+        _ -> false
+      end)
+      |> Map.new(fn {:defclass, class_name, _params, methods, _type} ->
+        # Convert to method_sigs format: [{name, {:fn, ...}}]
+        method_sigs = Enum.map(methods, fn
+          {name, _params, _ret_type, _body} -> {name, :any}
+          {name, _params, _ret_type} -> {name, :any}
+        end)
+        {class_name, {:class, class_name, [], method_sigs, %{}}}
+      end)
+    Process.put(:__vaisto_user_classes__, user_classes)
+
     # Separate defn forms from other expressions
     {defns, exprs} = Enum.split_with(forms, fn
       {:defn, _, _, _, _} -> true
@@ -1297,6 +1313,11 @@ defmodule Vaisto.CoreEmitter do
     :cerl.c_call(:cerl.c_atom(:erlang), :cerl.c_atom(:"=:="), [left, right])
   end
 
+  defp emit_class_call(:Eq, :neq, concrete_type, [left, right]) when concrete_type in [:int, :float, :string, :bool, :atom] do
+    eq_result = :cerl.c_call(:cerl.c_atom(:erlang), :cerl.c_atom(:"=:="), [left, right])
+    :cerl.c_call(:cerl.c_atom(:erlang), :cerl.c_atom(:not), [eq_result])
+  end
+
   defp emit_class_call(:Show, :show, :int, [arg]) do
     :cerl.c_call(:cerl.c_atom(:erlang), :cerl.c_atom(:integer_to_binary), [arg])
   end
@@ -1336,14 +1357,17 @@ defmodule Vaisto.CoreEmitter do
 
   # Get 1-based index of a method in a class definition
   defp get_method_index(class_name, method_name) do
-    classes = Vaisto.TypeEnv.primitives()[:__classes__] || %{}
-    case Map.get(classes, class_name) do
-      {:class, _, _, methods} ->
-        case Enum.find_index(methods, fn {name, _} -> name == method_name end) do
-          nil -> 1
-          idx -> idx + 1
-        end
-      _ -> 1
+    builtin_classes = Vaisto.TypeEnv.primitives()[:__classes__] || %{}
+    user_classes = Process.get(:__vaisto_user_classes__, %{})
+    classes = Map.merge(builtin_classes, user_classes)
+    methods = case Map.get(classes, class_name) do
+      {:class, _, _, methods, _defaults} -> methods
+      {:class, _, _, methods} -> methods
+      _ -> []
+    end
+    case Enum.find_index(methods, fn {name, _} -> name == method_name end) do
+      nil -> 1
+      idx -> idx + 1
     end
   end
 

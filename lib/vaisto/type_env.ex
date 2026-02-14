@@ -35,19 +35,29 @@ defmodule Vaisto.TypeEnv do
     :!= => {:fn, [:any, :any], :bool},
     # Type class method signatures (constrained polymorphic)
     :eq => {:forall, [0], {:constrained, [{:Eq, {:tvar, 0}}], {:fn, [{:tvar, 0}, {:tvar, 0}], :bool}}},
+    :neq => {:forall, [0], {:constrained, [{:Eq, {:tvar, 0}}], {:fn, [{:tvar, 0}, {:tvar, 0}], :bool}}},
     :show => {:forall, [0], {:constrained, [{:Show, {:tvar, 0}}], {:fn, [{:tvar, 0}], :string}}},
     # Type class registry
+    # Format: {:class, name, tvar_ids, method_sigs, defaults}
     :__classes__ => %{
-      Eq: {:class, :Eq, [0], [{:eq, {:fn, [{:tvar, 0}, {:tvar, 0}], :bool}}]},
-      Show: {:class, :Show, [0], [{:show, {:fn, [{:tvar, 0}], :string}}]}
+      Eq: {:class, :Eq, [0], [
+        {:eq, {:fn, [{:tvar, 0}, {:tvar, 0}], :bool}},
+        {:neq, {:fn, [{:tvar, 0}, {:tvar, 0}], :bool}}
+      ], %{
+        neq: {:default, [:x, :y],
+          {:if, {:call, :eq, [:x, :y], nil}, false, true, nil}}
+      }},
+      Show: {:class, :Show, [0], [
+        {:show, {:fn, [{:tvar, 0}], :string}}
+      ], %{}}
     },
     # Instance registry: {ClassName, ConcreteType} => %{method => type}
     :__instances__ => %{
-      {:Eq, :int} => %{eq: {:fn, [:int, :int], :bool}},
-      {:Eq, :float} => %{eq: {:fn, [:float, :float], :bool}},
-      {:Eq, :string} => %{eq: {:fn, [:string, :string], :bool}},
-      {:Eq, :bool} => %{eq: {:fn, [:bool, :bool], :bool}},
-      {:Eq, :atom} => %{eq: {:fn, [:atom, :atom], :bool}},
+      {:Eq, :int} => %{eq: {:fn, [:int, :int], :bool}, neq: {:fn, [:int, :int], :bool}},
+      {:Eq, :float} => %{eq: {:fn, [:float, :float], :bool}, neq: {:fn, [:float, :float], :bool}},
+      {:Eq, :string} => %{eq: {:fn, [:string, :string], :bool}, neq: {:fn, [:string, :string], :bool}},
+      {:Eq, :bool} => %{eq: {:fn, [:bool, :bool], :bool}, neq: {:fn, [:bool, :bool], :bool}},
+      {:Eq, :atom} => %{eq: {:fn, [:atom, :atom], :bool}, neq: {:fn, [:atom, :atom], :bool}},
       {:Show, :int} => %{show: {:fn, [:int], :string}},
       {:Show, :float} => %{show: {:fn, [:float], :string}},
       {:Show, :string} => %{show: {:fn, [:string], :string}},

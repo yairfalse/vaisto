@@ -781,7 +781,10 @@ defmodule Vaisto.Parser do
     {:defclass, name, type_params, parsed_methods, loc}
   end
 
-  # Parse a class method declaration: (eq [x :a y :a] :bool) → {:eq, [{:x, :a}, {:y, :a}], :bool}
+  # Parse a class method declaration:
+  # No default:   (eq [x :a y :a] :bool)     → {:eq, [{:x, :a}, {:y, :a}], :bool, nil}
+  # With default:  (neq [x :a y :a] :bool (if (eq x y) false true))
+  #             → {:neq, [{:x, :a}, {:y, :a}], :bool, <body_ast>}
   defp parse_class_method({:call, method_name, args, _loc}) do
     parse_class_method_args(method_name, args)
   end
@@ -790,14 +793,19 @@ defmodule Vaisto.Parser do
   end
 
   defp parse_class_method_args(method_name, args) do
-    # args is [{:bracket, [x, {:atom, :a}, y, {:atom, :a}]}, {:atom, :bool}] or similar
+    # args is [{:bracket, params}, ret_type] or [{:bracket, params}, ret_type, body, ...]
     case args do
-      [{:bracket, params}, ret_type] ->
+      [{:bracket, params}, ret_type | body] ->
         typed_params = parse_class_params(params)
-        {method_name, typed_params, unwrap_type(ret_type)}
+        default_body = case body do
+          [] -> nil
+          [b] -> b
+          _ -> nil
+        end
+        {method_name, typed_params, unwrap_type(ret_type), default_body}
       [{:bracket, params}] ->
         typed_params = parse_class_params(params)
-        {method_name, typed_params, :any}
+        {method_name, typed_params, :any, nil}
     end
   end
 

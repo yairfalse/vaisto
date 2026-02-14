@@ -18,7 +18,7 @@ defmodule Vaisto.TypeClassTest do
       code = "(defclass Eq [a] (eq [x :a y :a] :bool))"
       ast = Parser.parse(code)
       assert {:defclass, :Eq, [:a], methods, _loc} = ast
-      assert [{:eq, [{:x, :a}, {:y, :a}], :bool}] = methods
+      assert [{:eq, [{:x, :a}, {:y, :a}], :bool, nil}] = methods
     end
 
     test "parses defclass with multiple methods" do
@@ -27,7 +27,7 @@ defmodule Vaisto.TypeClassTest do
         (show [x :a] :string))
       """
       ast = Parser.parse(code)
-      assert {:defclass, :Show, [:a], [{:show, [{:x, :a}], :string}], _loc} = ast
+      assert {:defclass, :Show, [:a], [{:show, [{:x, :a}], :string, nil}], _loc} = ast
     end
   end
 
@@ -258,6 +258,119 @@ defmodule Vaisto.TypeClassTest do
       """
       {:ok, mod} = Runner.compile_and_load(code, :ShowInLet, backend: :core)
       assert "99" == Runner.call(mod, :main)
+    end
+  end
+
+  # =========================================================================
+  # Parsing — Default Methods
+  # =========================================================================
+
+  describe "parsing defclass with defaults" do
+    test "parses method with default body" do
+      code = """
+      (defclass Eq [a]
+        (eq [x :a y :a] :bool)
+        (neq [x :a y :a] :bool (if (eq x y) false true)))
+      """
+      ast = Parser.parse(code)
+      assert {:defclass, :Eq, [:a], methods, _loc} = ast
+      assert [{:eq, _, :bool, nil}, {:neq, _, :bool, body}] = methods
+      assert body != nil
+    end
+
+    test "parses method without default body as nil" do
+      code = "(defclass Show [a] (show [x :a] :string))"
+      ast = Parser.parse(code)
+      assert {:defclass, :Show, [:a], [{:show, [{:x, :a}], :string, nil}], _loc} = ast
+    end
+  end
+
+  # =========================================================================
+  # Type Checking — Default Methods (neq)
+  # =========================================================================
+
+  describe "type checking defaults" do
+    test "neq with int types succeeds" do
+      code = "(neq 1 2)"
+      ast = Parser.parse(code)
+      assert {:ok, :bool, _typed_ast} = TypeChecker.check(ast)
+    end
+
+    test "neq resolves to class_call" do
+      code = "(neq 1 2)"
+      ast = Parser.parse(code)
+      {:ok, :bool, typed_ast} = TypeChecker.check(ast)
+      assert {:class_call, :Eq, :neq, :int, _args, :bool} = typed_ast
+    end
+
+    test "instance without neq inherits default" do
+      code = """
+      (defclass Comparable [a]
+        (cmp-eq [x :a y :a] :bool)
+        (cmp-neq [x :a y :a] :bool (if (cmp-eq x y) false true)))
+      (instance Comparable :int
+        (cmp-eq [x y] (== x y)))
+      (cmp-neq 1 2)
+      """
+      ast = Parser.parse(code)
+      assert {:ok, :module, _typed_ast} = TypeChecker.check(ast)
+    end
+
+    test "instance can override default" do
+      code = """
+      (defclass Comparable2 [a]
+        (cmp-eq2 [x :a y :a] :bool)
+        (cmp-neq2 [x :a y :a] :bool (if (cmp-eq2 x y) false true)))
+      (instance Comparable2 :int
+        (cmp-eq2 [x y] (== x y))
+        (cmp-neq2 [x y] (!= x y)))
+      (cmp-neq2 1 2)
+      """
+      ast = Parser.parse(code)
+      assert {:ok, :module, _typed_ast} = TypeChecker.check(ast)
+    end
+  end
+
+  # =========================================================================
+  # Code Generation + Runtime — neq
+  # =========================================================================
+
+  describe "codegen: neq" do
+    test "(neq 1 2) => true" do
+      {:ok, mod} = Runner.compile_and_load("(neq 1 2)", :NeqIntTrue, backend: :core)
+      assert true == Runner.call(mod, :main)
+    end
+
+    test "(neq 1 1) => false" do
+      {:ok, mod} = Runner.compile_and_load("(neq 1 1)", :NeqIntFalse, backend: :core)
+      assert false == Runner.call(mod, :main)
+    end
+
+    test "user-defined class default method works" do
+      code = """
+      (defclass Testable [a]
+        (is-ok [x :a] :bool)
+        (is-bad [x :a] :bool (if (is-ok x) false true)))
+      (instance Testable :int
+        (is-ok [x] (> x 0)))
+      (is-bad 5)
+      """
+      {:ok, mod} = Runner.compile_and_load(code, :DefaultMethodE2E, backend: :core)
+      assert false == Runner.call(mod, :main)
+    end
+
+    test "overridden default method works" do
+      code = """
+      (defclass Testable2 [a]
+        (is-ok2 [x :a] :bool)
+        (is-bad2 [x :a] :bool (if (is-ok2 x) false true)))
+      (instance Testable2 :int
+        (is-ok2 [x] (> x 0))
+        (is-bad2 [x] (<= x 0)))
+      (is-bad2 5)
+      """
+      {:ok, mod} = Runner.compile_and_load(code, :OverrideDefaultE2E, backend: :core)
+      assert false == Runner.call(mod, :main)
     end
   end
 end
