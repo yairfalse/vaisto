@@ -32,7 +32,27 @@ defmodule Vaisto.TypeEnv do
     :> => {:fn, [:int, :int], :bool},
     :<= => {:fn, [:int, :int], :bool},
     :>= => {:fn, [:int, :int], :bool},
-    :!= => {:fn, [:any, :any], :bool}
+    :!= => {:fn, [:any, :any], :bool},
+    # Type class method signatures (constrained polymorphic)
+    :eq => {:forall, [0], {:constrained, [{:Eq, {:tvar, 0}}], {:fn, [{:tvar, 0}, {:tvar, 0}], :bool}}},
+    :show => {:forall, [0], {:constrained, [{:Show, {:tvar, 0}}], {:fn, [{:tvar, 0}], :string}}},
+    # Type class registry
+    :__classes__ => %{
+      Eq: {:class, :Eq, [0], [{:eq, {:fn, [{:tvar, 0}, {:tvar, 0}], :bool}}]},
+      Show: {:class, :Show, [0], [{:show, {:fn, [{:tvar, 0}], :string}}]}
+    },
+    # Instance registry: {ClassName, ConcreteType} => %{method => type}
+    :__instances__ => %{
+      {:Eq, :int} => %{eq: {:fn, [:int, :int], :bool}},
+      {:Eq, :float} => %{eq: {:fn, [:float, :float], :bool}},
+      {:Eq, :string} => %{eq: {:fn, [:string, :string], :bool}},
+      {:Eq, :bool} => %{eq: {:fn, [:bool, :bool], :bool}},
+      {:Eq, :atom} => %{eq: {:fn, [:atom, :atom], :bool}},
+      {:Show, :int} => %{show: {:fn, [:int], :string}},
+      {:Show, :float} => %{show: {:fn, [:float], :string}},
+      {:Show, :string} => %{show: {:fn, [:string], :string}},
+      {:Show, :bool} => %{show: {:fn, [:bool], :string}}
+    }
   }
 
   @doc """

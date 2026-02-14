@@ -185,6 +185,8 @@ defmodule Vaisto.CoreEmitter do
       {:extern, _, _, _} -> true   # Skip externs (compile-time only)
       {:ns, _} -> true             # Skip ns (compile-time only)
       {:import, _, _} -> true      # Skip import (compile-time only)
+      {:defclass, _, _, _, _} -> true  # Skip defclass (compile-time only)
+      {:instance, _, _, _, _} -> true  # Instance dicts generated separately
       _ -> false
     end)
 
@@ -223,10 +225,11 @@ defmodule Vaisto.CoreEmitter do
     # defn_multi now has arity as 3rd element from type checker
     # defval becomes a zero-arity function
     user_fns = defns
-      |> Enum.map(fn
-        {:defn, name, params, _, _} -> {name, length(params)}
-        {:defn_multi, name, arity, _clauses, _type} -> {name, arity}
-        {:defval, name, _, _} -> {name, 0}
+      |> Enum.flat_map(fn
+        {:defn, name, params, _, _} -> [{name, length(params)}]
+        {:defn_multi, name, arity, _clauses, _type} -> [{name, arity}]
+        {:defval, name, _, _} -> [{name, 0}]
+        _ -> []
       end)
       |> MapSet.new()
 
@@ -290,15 +293,19 @@ defmodule Vaisto.CoreEmitter do
         {[main_name], [{main_name, main_fun}]}
     end
 
-    # Export all user-defined functions plus main plus constructor functions
+    # Generate dictionary functions for user-defined type class instances
+    instance_dict_fns = generate_instance_dicts(forms, user_fns)
+
+    # Export all user-defined functions plus main plus constructors plus instance dicts
     fun_exports = Enum.map(fun_defs, fn {fname, _} -> fname end)
     ctor_exports = Enum.map(constructor_fns, fn {fname, _} -> fname end)
+    dict_exports = Enum.map(instance_dict_fns, fn {fname, _} -> fname end)
 
     :cerl.c_module(
       :cerl.c_atom(module_name),
-      fun_exports ++ main_exports ++ ctor_exports,
+      fun_exports ++ main_exports ++ ctor_exports ++ dict_exports,
       [],
-      fun_defs ++ main_defs ++ constructor_fns
+      fun_defs ++ main_defs ++ constructor_fns ++ instance_dict_fns
     )
   end
 
@@ -602,6 +609,12 @@ defmodule Vaisto.CoreEmitter do
       :cerl.c_atom(op),
       [to_core_expr(left, user_fns, local_vars), to_core_expr(right, user_fns, local_vars)]
     )
+  end
+
+  # Type class method call: resolved at compile time to dictionary lookup
+  defp to_core_expr({:class_call, class_name, method_name, concrete_type, args, _type}, user_fns, local_vars) do
+    arg_cores = Enum.map(args, &to_core_expr(&1, user_fns, local_vars))
+    emit_class_call(class_name, method_name, concrete_type, arg_cores)
   end
 
   # Comparison operators
@@ -1273,5 +1286,90 @@ defmodule Vaisto.CoreEmitter do
       (String.length(mod_str) > 0 and
          String.first(mod_str) == String.upcase(String.first(mod_str)) and
          String.first(mod_str) =~ ~r/[A-Z]/)
+  end
+
+  # ===========================================================================
+  # Type Class Dictionary Emission
+  # ===========================================================================
+
+  # Emit a resolved class method call for built-in instances
+  defp emit_class_call(:Eq, :eq, concrete_type, [left, right]) when concrete_type in [:int, :float, :string, :bool, :atom] do
+    :cerl.c_call(:cerl.c_atom(:erlang), :cerl.c_atom(:"=:="), [left, right])
+  end
+
+  defp emit_class_call(:Show, :show, :int, [arg]) do
+    :cerl.c_call(:cerl.c_atom(:erlang), :cerl.c_atom(:integer_to_binary), [arg])
+  end
+
+  defp emit_class_call(:Show, :show, :float, [arg]) do
+    :cerl.c_call(:cerl.c_atom(:erlang), :cerl.c_atom(:float_to_binary), [arg])
+  end
+
+  defp emit_class_call(:Show, :show, :string, [arg]) do
+    arg
+  end
+
+  defp emit_class_call(:Show, :show, :bool, [arg]) do
+    :cerl.c_call(:cerl.c_atom(:erlang), :cerl.c_atom(:atom_to_binary), [arg])
+  end
+
+  # User-defined instances: call the dictionary function and extract method
+  defp emit_class_call(class_name, method_name, concrete_type, arg_cores) do
+    dict_fn_name = dict_function_name(class_name, concrete_type)
+    # Call __dict_Class_Type/0 to get the dictionary tuple
+    dict_call = :cerl.c_apply(:cerl.c_fname(dict_fn_name, 0), [])
+    # Find method index in the class definition
+    method_index = get_method_index(class_name, method_name)
+    # Extract method: element(index, dict)
+    method_fn = :cerl.c_call(
+      :cerl.c_atom(:erlang),
+      :cerl.c_atom(:element),
+      [:cerl.c_int(method_index), dict_call]
+    )
+    # Apply method to args
+    :cerl.c_apply(method_fn, arg_cores)
+  end
+
+  defp dict_function_name(class_name, concrete_type) do
+    :"__dict_#{class_name}_#{concrete_type}"
+  end
+
+  # Get 1-based index of a method in a class definition
+  defp get_method_index(class_name, method_name) do
+    classes = Vaisto.TypeEnv.primitives()[:__classes__] || %{}
+    case Map.get(classes, class_name) do
+      {:class, _, _, methods} ->
+        case Enum.find_index(methods, fn {name, _} -> name == method_name end) do
+          nil -> 1
+          idx -> idx + 1
+        end
+      _ -> 1
+    end
+  end
+
+  # Generate dictionary function definitions for user-defined instances
+  # Returns list of {fname, fun} pairs to include in the module
+  defp generate_instance_dicts(forms, user_fns) do
+    forms
+    |> Enum.filter(fn
+      {:instance, _, _, _, _} -> true
+      _ -> false
+    end)
+    |> Enum.map(fn {:instance, class_name, for_type, methods, _type} ->
+      dict_fn_name = dict_function_name(class_name, for_type)
+      fname = :cerl.c_fname(dict_fn_name, 0)
+
+      # Build method closures
+      method_closures = Enum.map(methods, fn {_method_name, params, typed_body} ->
+        param_vars = Enum.map(params, &:cerl.c_var/1)
+        local_vars = MapSet.new(params)
+        body_core = to_core_expr(typed_body, user_fns, local_vars)
+        :cerl.c_fun(param_vars, body_core)
+      end)
+
+      dict_tuple = :cerl.c_tuple(method_closures)
+      fun = :cerl.c_fun([], dict_tuple)
+      {fname, fun}
+    end)
   end
 end

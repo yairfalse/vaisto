@@ -21,7 +21,7 @@ defmodule Vaisto.Interface do
     }
   """
 
-  @version 1
+  @version 2
 
   @doc """
   Save a module's type environment to a .vsi file.
@@ -35,7 +35,9 @@ defmodule Vaisto.Interface do
       module: module_name,
       version: @version,
       exports: extract_exports(type_env),
-      types: types
+      types: types,
+      classes: Map.get(type_env, :__classes__, %{}),
+      instances: Map.get(type_env, :__instances__, %{})
     }
 
     path = interface_path(module_name, output_dir)
@@ -88,34 +90,41 @@ defmodule Vaisto.Interface do
       alias_name = Map.get(aliases, module_name, module_name)
 
       # Add each export with qualified name (using : for TypeChecker compatibility)
-      Enum.reduce(interface.exports, env, fn {func_name, type}, acc ->
+      env = Enum.reduce(interface.exports, env, fn {func_name, type}, acc ->
         qualified = :"#{alias_name}:#{func_name}"
         Map.put(acc, qualified, type)
       end)
-      |> then(fn env ->
-        # Also add type constructors
-        Enum.reduce(interface.types, env, fn {type_name, type_def}, acc ->
-          case type_def do
-            {:sum, _name, variants} ->
-              # Register each variant constructor
-              Enum.reduce(variants, acc, fn {ctor_name, field_types}, inner_acc ->
-                qualified_ctor = :"#{alias_name}:#{ctor_name}"
-                ctor_type = {:fn, field_types, type_def}
-                Map.put(inner_acc, qualified_ctor, ctor_type)
-              end)
 
-            {:record, _name, _fields} = record_type ->
-              # Register record constructor (using : for TypeChecker compatibility)
-              qualified_ctor = :"#{alias_name}:#{type_name}"
-              field_types = extract_field_types(record_type)
-              ctor_type = {:fn, field_types, record_type}
-              Map.put(acc, qualified_ctor, ctor_type)
+      # Add type constructors
+      env = Enum.reduce(interface.types, env, fn {type_name, type_def}, acc ->
+        case type_def do
+          {:sum, _name, variants} ->
+            Enum.reduce(variants, acc, fn {ctor_name, field_types}, inner_acc ->
+              qualified_ctor = :"#{alias_name}:#{ctor_name}"
+              ctor_type = {:fn, field_types, type_def}
+              Map.put(inner_acc, qualified_ctor, ctor_type)
+            end)
 
-            _ ->
-              acc
-          end
-        end)
+          {:record, _name, _fields} = record_type ->
+            qualified_ctor = :"#{alias_name}:#{type_name}"
+            field_types = extract_field_types(record_type)
+            ctor_type = {:fn, field_types, record_type}
+            Map.put(acc, qualified_ctor, ctor_type)
+
+          _ ->
+            acc
+        end
       end)
+
+      # Merge imported classes and instances
+      imported_classes = Map.get(interface, :classes, %{})
+      imported_instances = Map.get(interface, :instances, %{})
+      existing_classes = Map.get(env, :__classes__, %{})
+      existing_instances = Map.get(env, :__instances__, %{})
+
+      env
+      |> Map.put(:__classes__, Map.merge(existing_classes, imported_classes))
+      |> Map.put(:__instances__, Map.merge(existing_instances, imported_instances))
     end)
   end
 
@@ -158,7 +167,7 @@ defmodule Vaisto.Interface do
   end
 
   defp validate_interface(%{module: _, version: v, exports: _, types: _} = interface)
-       when v == @version do
+       when v in [1, @version] do
     {:ok, interface}
   end
 

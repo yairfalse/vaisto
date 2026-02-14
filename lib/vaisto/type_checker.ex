@@ -759,18 +759,20 @@ defmodule Vaisto.TypeChecker do
   # If func is a local variable holding a function, emit {:apply, var, args, type}
   # If func is a module-level function, emit {:call, name, args, type}
   defp check_impl({:call, func, args}, env) when is_atom(func) do
-    with {:ok, func_type} <- lookup_function(func, env),
-         {:ok, arg_types, typed_args} <- check_args(args, env),
-         {:ok, ret_type} <- unify_call(func_type, arg_types, args) do
-      # Check if this is a local variable (function parameter or let-binding)
-      # vs a module-level defn. Local vars have {:fn, ...} type directly in env.
-      # We check if it's a "local" by seeing if it came from :__local_vars__
-      if is_local_var?(func, env) do
-        # Local function variable - needs f.(args) syntax in Elixir
-        {:ok, ret_type, {:apply, {:var, func, func_type}, typed_args, ret_type}}
-      else
-        # Module-level function - uses func(args) syntax
-        {:ok, ret_type, {:call, func, typed_args, ret_type}}
+    with {:ok, func_type} <- lookup_function(func, env) do
+      case func_type do
+        {:constrained_method, vars, constraints, fn_type, method_name} ->
+          check_class_method_call(method_name, vars, constraints, fn_type, args, env)
+
+        _ ->
+          with {:ok, arg_types, typed_args} <- check_args(args, env),
+               {:ok, ret_type} <- unify_call(func_type, arg_types, args) do
+            if is_local_var?(func, env) do
+              {:ok, ret_type, {:apply, {:var, func, func_type}, typed_args, ret_type}}
+            else
+              {:ok, ret_type, {:call, func, typed_args, ret_type}}
+            end
+          end
       end
     end
   end
@@ -1007,6 +1009,63 @@ defmodule Vaisto.TypeChecker do
     {:ok, :import, {:import, module, alias_name}}
   end
 
+  # Type class declaration
+  defp check_impl({:defclass, class_name, type_params, methods}, env) do
+    # Validate: class definition is already collected in signature pass
+    classes = Map.get(env, :__classes__, %{})
+    case Map.get(classes, class_name) do
+      {:class, _, _, _} ->
+        {:ok, :defclass, {:defclass, class_name, type_params, methods, :defclass}}
+      nil ->
+        {:error, Errors.unknown_expression({:defclass, class_name})}
+    end
+  end
+
+  # Type class instance
+  defp check_impl({:instance, class_name, for_type, methods}, env) do
+    classes = Map.get(env, :__classes__, %{})
+    case Map.get(classes, class_name) do
+      {:class, _name, tvar_ids, method_sigs} ->
+        # Verify all methods are provided
+        required_names = Enum.map(method_sigs, fn {name, _type} -> name end) |> MapSet.new()
+        provided_names = Enum.map(methods, fn {name, _params, _body} -> name end) |> MapSet.new()
+        missing = MapSet.difference(required_names, provided_names)
+
+        if MapSet.size(missing) > 0 do
+          {:error, Error.new("instance #{class_name} #{inspect(for_type)} is missing methods: #{Enum.join(missing, ", ")}")}
+        else
+          # Type-check each method body with the concrete type
+          subst = Map.new(tvar_ids, fn id -> {id, for_type} end)
+          method_sig_map = Map.new(method_sigs)
+
+          typed_methods = Enum.map(methods, fn {method_name, params, body} ->
+            expected_type = Vaisto.TypeSystem.Core.apply_subst(subst, method_sig_map[method_name])
+            {:fn, param_types, _ret_type} = expected_type
+
+            # Build local env with params bound to their concrete types
+            local_env = Enum.zip(params, param_types)
+              |> Enum.reduce(env, fn {param, type}, acc ->
+                acc |> Map.put(param, type) |> add_local_var(param)
+              end)
+
+            case check(body, local_env) do
+              {:ok, _body_type, typed_body} ->
+                {method_name, params, typed_body}
+              {:error, _} = err ->
+                throw(err)
+            end
+          end)
+
+          {:ok, :instance, {:instance, class_name, for_type, typed_methods, :instance}}
+        end
+
+      nil ->
+        {:error, Error.new("unknown type class: #{class_name}")}
+    end
+  catch
+    {:error, _} = err -> err
+  end
+
   # Handle parse errors (propagate them as type errors with location info)
   # Parse error - location is stripped by generic handler and added via with_loc
   defp check_impl({:error, %Error{} = error}, _env) do
@@ -1234,11 +1293,74 @@ defmodule Vaisto.TypeChecker do
     end
   end
 
+  # Type class method call resolution
+  # Instantiates fresh tvars, checks args, unifies, then resolves the class constraint
+  defp check_class_method_call(method_name, vars, constraints, fn_type, args, env) do
+    # Create fresh tvar substitution (using large IDs to avoid collision)
+    base_id = :erlang.unique_integer([:positive, :monotonic]) * 1000
+    fresh_subst = vars
+      |> Enum.with_index()
+      |> Map.new(fn {var, idx} -> {var, {:tvar, base_id + idx}} end)
+
+    inst_fn_type = Vaisto.TypeSystem.Core.apply_subst(fresh_subst, fn_type)
+    inst_constraints = Enum.map(constraints, fn {class, t} ->
+      {class, Vaisto.TypeSystem.Core.apply_subst(fresh_subst, t)}
+    end)
+
+    with {:ok, arg_types, typed_args} <- check_args(args, env),
+         {:ok, ret_type} <- unify_call(inst_fn_type, arg_types, args) do
+      # Resolve constraints: check if concrete instances exist
+      resolve_class_constraints(inst_constraints, method_name, ret_type, typed_args, arg_types, env)
+    end
+  end
+
+  defp resolve_class_constraints(constraints, method_name, ret_type, typed_args, arg_types, env) do
+    instances = Map.get(env, :__instances__, %{})
+
+    # For each constraint, try to resolve the concrete type
+    Enum.reduce_while(constraints, {:ok, nil}, fn {class_name, constraint_type}, _acc ->
+      # The constraint type should be concrete after unification with args
+      concrete_type = resolve_constraint_type(constraint_type, arg_types)
+
+      cond do
+        # Still a type variable — can't resolve yet, emit as regular call
+        match?({:tvar, _}, concrete_type) ->
+          {:halt, {:ok, ret_type, {:call, method_name, typed_args, ret_type}}}
+
+        # Check instance exists
+        Map.has_key?(instances, {class_name, concrete_type}) ->
+          {:cont, {:ok, {:class_call, class_name, method_name, concrete_type, typed_args, ret_type}}}
+
+        true ->
+          {:halt, {:error, Error.new("no instance of `#{class_name}` for type `#{Vaisto.TypeSystem.Core.format_type(concrete_type)}`")}}
+      end
+    end)
+    |> case do
+      {:ok, nil} ->
+        {:ok, ret_type, {:call, method_name, typed_args, ret_type}}
+      {:ok, {:class_call, class_name, method_name, concrete_type, typed_args, ret_type}} ->
+        {:ok, ret_type, {:class_call, class_name, method_name, concrete_type, typed_args, ret_type}}
+      {:ok, ret_type, ast} ->
+        {:ok, ret_type, ast}
+      {:error, _} = err ->
+        err
+    end
+  end
+
+  # Resolve the constraint type from argument types
+  # If the constraint is {:tvar, N}, look at actual arg types
+  defp resolve_constraint_type({:tvar, _}, [first_arg_type | _]) do
+    first_arg_type
+  end
+  defp resolve_constraint_type(concrete, _arg_types), do: concrete
+
   defp lookup_function(name, env) do
     case Map.get(env, name) do
       nil -> {:error, Errors.unknown_function(name)}
       {:fn, _, {:sum, _, _}} = ctor_type -> {:ok, instantiate_constructor_type(ctor_type)}
       {:fn, _, {:record, _, _}} = ctor_type -> {:ok, instantiate_constructor_type(ctor_type)}
+      {:forall, vars, {:constrained, constraints, fn_type}} ->
+        {:ok, {:constrained_method, vars, constraints, fn_type, name}}
       type -> {:ok, type}
     end
   end
@@ -2096,6 +2218,18 @@ defmodule Vaisto.TypeChecker do
         {:defval, name, value} ->
           collect_defval_signature(name, value, acc_env)
 
+        {:defclass, class_name, type_params, methods, %Vaisto.Parser.Loc{}} ->
+          collect_defclass_signature(class_name, type_params, methods, acc_env)
+
+        {:defclass, class_name, type_params, methods} ->
+          collect_defclass_signature(class_name, type_params, methods, acc_env)
+
+        {:instance, class_name, for_type, _methods, %Vaisto.Parser.Loc{}} ->
+          collect_instance_signature(class_name, for_type, acc_env)
+
+        {:instance, class_name, for_type, _methods} ->
+          collect_instance_signature(class_name, for_type, acc_env)
+
         _ ->
           acc_env
       end
@@ -2212,6 +2346,55 @@ defmodule Vaisto.TypeChecker do
     parsed_ret_type = parse_type_expr(ret_type)
     func_type = {:fn, parsed_arg_types, parsed_ret_type}
     Map.put(env, extern_name, func_type)
+  end
+
+  defp collect_defclass_signature(class_name, type_params, methods, env) do
+    # Create type variable mapping: param_name -> {:tvar, index}
+    param_map = type_params
+      |> Enum.with_index()
+      |> Map.new(fn {param, idx} -> {param, {:tvar, idx}} end)
+
+    tvar_ids = Enum.with_index(type_params) |> Enum.map(fn {_, idx} -> idx end)
+
+    # Parse method signatures
+    parsed_methods = Enum.map(methods, fn {method_name, params, ret_type} ->
+      param_types = Enum.map(params, fn {_name, type} ->
+        Map.get(param_map, type, parse_type_expr(type))
+      end)
+      parsed_ret = Map.get(param_map, ret_type, parse_type_expr(ret_type))
+      {method_name, {:fn, param_types, parsed_ret}}
+    end)
+
+    # Store class definition
+    class_def = {:class, class_name, tvar_ids, parsed_methods}
+    classes = Map.get(env, :__classes__, %{})
+    env = Map.put(env, :__classes__, Map.put(classes, class_name, class_def))
+
+    # Register each method as a constrained type in env
+    Enum.reduce(parsed_methods, env, fn {method_name, method_type}, acc_env ->
+      constraints = Enum.map(tvar_ids, fn id -> {class_name, {:tvar, id}} end)
+      scheme = {:forall, tvar_ids, {:constrained, constraints, method_type}}
+      Map.put(acc_env, method_name, scheme)
+    end)
+  end
+
+  defp collect_instance_signature(class_name, for_type, env) do
+    classes = Map.get(env, :__classes__, %{})
+    case Map.get(classes, class_name) do
+      {:class, _name, tvar_ids, method_sigs} ->
+        # Substitute concrete type for tvars in method signatures
+        subst = Map.new(tvar_ids, fn id -> {id, for_type} end)
+        concrete_methods = Map.new(method_sigs, fn {method_name, method_type} ->
+          {method_name, Vaisto.TypeSystem.Core.apply_subst(subst, method_type)}
+        end)
+
+        instances = Map.get(env, :__instances__, %{})
+        Map.put(env, :__instances__, Map.put(instances, {class_name, for_type}, concrete_methods))
+
+      nil ->
+        # Class not found — will error during checking pass
+        env
+    end
   end
 
   defp check_module_forms([], _env, acc, errors) do

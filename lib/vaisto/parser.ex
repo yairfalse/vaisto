@@ -223,6 +223,8 @@ defmodule Vaisto.Parser do
       [:deftype | rest] -> parse_deftype(rest, open_loc)
       [:fn | rest] -> parse_fn(rest, open_loc)
       [:extern | rest] -> parse_extern(rest, open_loc)
+      [:defclass | rest] -> parse_defclass(rest, open_loc)
+      [:instance | rest] -> parse_instance(rest, open_loc)
       # Do block: (do expr1 expr2 ...) → {:do, [expr1, expr2, ...], loc}
       [:do | exprs] -> {:do, exprs, open_loc}
       # Module system
@@ -768,6 +770,71 @@ defmodule Vaisto.Parser do
   # (extern erlang:hd [(List :any)] :any) → {:extern, :erlang, :hd, [type_expr], ret_type, loc}
   defp parse_extern([{:qualified, mod, func}, {:bracket, arg_types}, ret_type], loc) do
     {:extern, mod, func, arg_types, ret_type, loc}
+  end
+
+  # (defclass Eq [a] (eq [x :a y :a] :bool))
+  # → {:defclass, :Eq, [:a], [{:eq, [{:x, :a}, {:y, :a}], :bool}], loc}
+  defp parse_defclass([name, {:bracket, type_params} | methods], loc) when is_atom(name) do
+    parsed_methods = Enum.map(methods, fn method ->
+      parse_class_method(method)
+    end)
+    {:defclass, name, type_params, parsed_methods, loc}
+  end
+
+  # Parse a class method declaration: (eq [x :a y :a] :bool) → {:eq, [{:x, :a}, {:y, :a}], :bool}
+  defp parse_class_method({:call, method_name, args, _loc}) do
+    parse_class_method_args(method_name, args)
+  end
+  defp parse_class_method({:call, method_name, args}) do
+    parse_class_method_args(method_name, args)
+  end
+
+  defp parse_class_method_args(method_name, args) do
+    # args is [{:bracket, [x, {:atom, :a}, y, {:atom, :a}]}, {:atom, :bool}] or similar
+    case args do
+      [{:bracket, params}, ret_type] ->
+        typed_params = parse_class_params(params)
+        {method_name, typed_params, unwrap_type(ret_type)}
+      [{:bracket, params}] ->
+        typed_params = parse_class_params(params)
+        {method_name, typed_params, :any}
+    end
+  end
+
+  # Parse class method params: [x :a y :a] → [{:x, :a}, {:y, :a}]
+  # Type params in class methods are always paired: name type name type
+  defp parse_class_params(params) do
+    params
+    |> Enum.chunk_every(2)
+    |> Enum.map(fn [param_name, type] -> {param_name, unwrap_type(type)} end)
+  end
+
+  # (instance Eq :int (eq [x y] (== x y)))
+  # → {:instance, :Eq, :int, [{:eq, [:x, :y], body_ast}], loc}
+  defp parse_instance([class_name, for_type | methods], loc) when is_atom(class_name) do
+    parsed_methods = Enum.map(methods, fn method ->
+      parse_instance_method(method)
+    end)
+    {:instance, class_name, unwrap_type(for_type), parsed_methods, loc}
+  end
+
+  # Parse an instance method: (eq [x y] (== x y)) → {:eq, [:x, :y], body_ast}
+  defp parse_instance_method({:call, method_name, args, _loc}) do
+    parse_instance_method_args(method_name, args)
+  end
+  defp parse_instance_method({:call, method_name, args}) do
+    parse_instance_method_args(method_name, args)
+  end
+
+  defp parse_instance_method_args(method_name, args) do
+    case args do
+      [{:bracket, params} | bodies] when length(bodies) >= 1 ->
+        body = case bodies do
+          [single] -> single
+          multiple -> {:do, multiple, %Loc{}}
+        end
+        {method_name, params, body}
+    end
   end
 
   # (ns MyModule) → {:ns, :MyModule, loc}

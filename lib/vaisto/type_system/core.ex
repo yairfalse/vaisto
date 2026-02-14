@@ -43,6 +43,13 @@ defmodule Vaisto.TypeSystem.Core do
     end
   end
 
+  def apply_subst(subst, {:constrained, constraints, type}) do
+    new_constraints = Enum.map(constraints, fn {class, t} ->
+      {class, apply_subst(subst, t)}
+    end)
+    {:constrained, new_constraints, apply_subst(subst, type)}
+  end
+
   def apply_subst(subst, {:fn, args, ret}) do
     {:fn, Enum.map(args, &apply_subst(subst, &1)), apply_subst(subst, ret)}
   end
@@ -113,6 +120,12 @@ defmodule Vaisto.TypeSystem.Core do
   Returns all free type variables in a type.
   """
   def free_vars({:tvar, id}), do: MapSet.new([id])
+  def free_vars({:constrained, constraints, type}) do
+    constraint_vars = Enum.reduce(constraints, MapSet.new(), fn {_class, t}, acc ->
+      MapSet.union(acc, free_vars(t))
+    end)
+    MapSet.union(constraint_vars, free_vars(type))
+  end
   def free_vars({:fn, args, ret}) do
     Enum.reduce(args, free_vars(ret), fn arg, acc ->
       MapSet.union(acc, free_vars(arg))
@@ -200,6 +213,12 @@ defmodule Vaisto.TypeSystem.Core do
     field_str = fields |> Enum.map(fn {k, v} -> "#{k}: #{format_type_with_ctx(v, ctx)}" end) |> Enum.join(", ")
     "{#{field_str} | #{format_type_with_ctx(tail, ctx)}}"
   end
+  def format_type_with_ctx({:constrained, constraints, type}, ctx) do
+    constraint_str = Enum.map(constraints, fn {class, t} ->
+      "#{class} #{format_type_with_ctx(t, ctx)}"
+    end) |> Enum.join(", ")
+    "(#{constraint_str}) => #{format_type_with_ctx(type, ctx)}"
+  end
   def format_type_with_ctx(other, _ctx), do: inspect(other)
 
   @doc """
@@ -254,6 +273,10 @@ defmodule Vaisto.TypeSystem.Core do
     Enum.reduce(variants, acc, fn {_ctor, types}, a ->
       Enum.reduce(types, a, &collect_tvars/2)
     end)
+  end
+  defp collect_tvars({:constrained, constraints, type}, acc) do
+    acc = Enum.reduce(constraints, acc, fn {_class, t}, a -> collect_tvars(t, a) end)
+    collect_tvars(type, acc)
   end
   defp collect_tvars(_other, acc), do: acc
 
