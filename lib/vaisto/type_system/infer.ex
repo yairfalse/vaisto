@@ -776,6 +776,21 @@ defmodule Vaisto.TypeSystem.Infer do
     {:ok, [], :_, ctx}
   end
 
+  # Boolean literals — must come before the is_atom guard since true/false are atoms
+  defp infer_pattern(true, scrutinee_type, ctx) do
+    case Context.unify_types(ctx, scrutinee_type, :bool) do
+      {:ok, ctx} -> {:ok, [], {:lit, :bool, true}, ctx}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp infer_pattern(false, scrutinee_type, ctx) do
+    case Context.unify_types(ctx, scrutinee_type, :bool) do
+      {:ok, ctx} -> {:ok, [], {:lit, :bool, false}, ctx}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
   # Variable
   defp infer_pattern(name, scrutinee_type, ctx) when is_atom(name) do
     {:ok, [{name, scrutinee_type}], {:var, name, scrutinee_type}, ctx}
@@ -797,21 +812,6 @@ defmodule Vaisto.TypeSystem.Infer do
   defp infer_pattern(f, scrutinee_type, ctx) when is_float(f) do
     case Context.unify_types(ctx, scrutinee_type, :float) do
       {:ok, ctx} -> {:ok, [], {:lit, :float, f}, ctx}
-      {:error, reason} -> {:error, reason}
-    end
-  end
-
-  # Boolean literal
-  defp infer_pattern(true, scrutinee_type, ctx) do
-    case Context.unify_types(ctx, scrutinee_type, :bool) do
-      {:ok, ctx} -> {:ok, [], {:lit, :bool, true}, ctx}
-      {:error, reason} -> {:error, reason}
-    end
-  end
-
-  defp infer_pattern(false, scrutinee_type, ctx) do
-    case Context.unify_types(ctx, scrutinee_type, :bool) do
-      {:ok, ctx} -> {:ok, [], {:lit, :bool, false}, ctx}
       {:error, reason} -> {:error, reason}
     end
   end

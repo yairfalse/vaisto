@@ -825,6 +825,13 @@ defmodule Vaisto.TypeSystem.InferTest do
       )
     end
 
+    test "bool literal pattern against int scrutinee errors" do
+      # (match 42 [true ...]) should fail — bool pattern can't match int
+      assert {:error, _msg} = Infer.infer(
+        {:match, 42, [{true, {:string, "yes"}}]}
+      )
+    end
+
     test "float literal pattern against string scrutinee errors" do
       # (match "hello" [3.14 ...]) should fail — float pattern can't match string
       assert {:error, _msg} = Infer.infer(
