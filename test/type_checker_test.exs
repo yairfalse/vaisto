@@ -337,12 +337,12 @@ defmodule Vaisto.TypeCheckerTest do
   end
 
   describe "match clause type unification" do
-    test "match with int and float arms unifies to float" do
+    test "match with int and float arms unifies to num" do
       code = """
       (match true [true 1] [false 1.5])
       """
       ast = Vaisto.Parser.parse(code)
-      {:ok, :float, {:match, _, _, :float}} = TypeChecker.check(ast)
+      {:ok, :num, {:match, _, _, :num}} = TypeChecker.check(ast)
     end
 
     test "match with defn returning consistent type across arms" do

@@ -926,6 +926,7 @@ defmodule Vaisto.Parser do
         |> String.slice(1..-2//1)
         |> unescape_string()
         |> then(&{:string, &1})
+      token =~ ~r/^0x[0-9a-fA-F]+$/ -> String.to_integer(String.trim_leading(token, "0x"), 16)
       token =~ ~r/^-?\d+$/ -> String.to_integer(token)
       token =~ ~r/^-?\d+\.\d+$/ -> String.to_float(token)
       # Atom literal: :foo → {:atom, :foo}

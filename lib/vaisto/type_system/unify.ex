@@ -122,6 +122,36 @@ defmodule Vaisto.TypeSystem.Unify do
         {:row, fields2, tail} = t2
         unify_row_with_record(fields2, tail, fields1, subst, row_counter)
 
+      # :any is compatible with everything (no binding)
+      t1 == :any or t2 == :any ->
+        {:ok, subst, row_counter}
+
+      # :num subsumes :int and :float
+      (t1 == :num and t2 in [:int, :float]) or (t2 == :num and t1 in [:int, :float]) ->
+        {:ok, subst, row_counter}
+
+      # Singleton atom vs :atom (atom subtyping)
+      (match?({:atom, _}, t1) and t2 == :atom) or
+      (t1 == :atom and match?({:atom, _}, t2)) or
+      (match?({:atom, _}, t1) and match?({:atom, _}, t2)) ->
+        {:ok, subst, row_counter}
+
+      # Pid types — same process name
+      match?({:pid, _, _}, t1) and match?({:pid, _, _}, t2) ->
+        {:pid, n1, _} = t1
+        {:pid, n2, _} = t2
+        if n1 == n2 do
+          {:ok, subst, row_counter}
+        else
+          {:error, "cannot unify #{format_type(t1)} with #{format_type(t2)}"}
+        end
+
+      # Process types — unify state types
+      match?({:process, _, _}, t1) and match?({:process, _, _}, t2) ->
+        {:process, s1, _} = t1
+        {:process, s2, _} = t2
+        unify(s1, s2, subst, row_counter)
+
       # No match - types are incompatible
       true ->
         {:error, "cannot unify #{format_type(t1)} with #{format_type(t2)}"}

@@ -19,6 +19,17 @@ defmodule Vaisto.ParserTest do
       assert Parser.parse("42") == 42
     end
 
+    test "parses hex literals" do
+      assert Parser.parse("0xFF") == 255
+      assert Parser.parse("0x0800") == 2048
+      assert Parser.parse("0x0") == 0
+      assert Parser.parse("0xDEAD") == 0xDEAD
+    end
+
+    test "hex literals in expressions" do
+      assert {:call, :+, [1, 255], _loc} = Parser.parse("(+ 1 0xFF)")
+    end
+
     test "parses simple call" do
       # Calls now include location as last element
       assert {:call, :+, [1, 2], %Vaisto.Parser.Loc{line: 1, col: 1}} = Parser.parse("(+ 1 2)")

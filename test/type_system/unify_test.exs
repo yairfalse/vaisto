@@ -171,6 +171,77 @@ defmodule Vaisto.TypeSystem.UnifyTest do
     end
   end
 
+  describe "unify/3 with :any" do
+    test ":any unifies with any type on either side" do
+      assert {:ok, %{}, _} = Unify.unify(:any, :int)
+      assert {:ok, %{}, _} = Unify.unify(:string, :any)
+      assert {:ok, %{}, _} = Unify.unify(:any, {:list, :int})
+      assert {:ok, %{}, _} = Unify.unify({:fn, [:int], :bool}, :any)
+    end
+
+    test ":any does not bind type variables" do
+      {:ok, subst, _} = Unify.unify(:any, :int)
+      assert subst == %{}
+    end
+  end
+
+  describe "unify/3 with :num" do
+    test ":num unifies with :int" do
+      assert {:ok, %{}, _} = Unify.unify(:num, :int)
+      assert {:ok, %{}, _} = Unify.unify(:int, :num)
+    end
+
+    test ":num unifies with :float" do
+      assert {:ok, %{}, _} = Unify.unify(:num, :float)
+      assert {:ok, %{}, _} = Unify.unify(:float, :num)
+    end
+
+    test ":num unifies with itself" do
+      assert {:ok, %{}, _} = Unify.unify(:num, :num)
+    end
+
+    test ":int and :float do NOT unify" do
+      assert {:error, _} = Unify.unify(:int, :float)
+      assert {:error, _} = Unify.unify(:float, :int)
+    end
+  end
+
+  describe "unify/3 with atom subtyping" do
+    test "singleton atom unifies with :atom" do
+      assert {:ok, %{}, _} = Unify.unify({:atom, :foo}, :atom)
+      assert {:ok, %{}, _} = Unify.unify(:atom, {:atom, :bar})
+    end
+
+    test "two singleton atoms unify" do
+      assert {:ok, %{}, _} = Unify.unify({:atom, :foo}, {:atom, :bar})
+    end
+  end
+
+  describe "unify/3 with pid types" do
+    test "same process name pids unify" do
+      assert {:ok, %{}, _} = Unify.unify({:pid, :counter, [:inc]}, {:pid, :counter, [:dec]})
+    end
+
+    test "different process name pids fail" do
+      assert {:error, _} = Unify.unify({:pid, :counter, [:inc]}, {:pid, :timer, [:tick]})
+    end
+  end
+
+  describe "unify/3 with process types" do
+    test "process types with same state unify" do
+      assert {:ok, %{}, _} = Unify.unify({:process, :int, [:inc]}, {:process, :int, [:dec]})
+    end
+
+    test "process types with tvar state unify and bind" do
+      {:ok, subst, _} = Unify.unify({:process, {:tvar, 0}, [:inc]}, {:process, :int, [:dec]})
+      assert Core.apply_subst(subst, {:tvar, 0}) == :int
+    end
+
+    test "process types with incompatible state fail" do
+      assert {:error, _} = Unify.unify({:process, :int, [:inc]}, {:process, :string, [:dec]})
+    end
+  end
+
   describe "chained unification" do
     test "propagates constraints through chain" do
       # t0 = t1, t1 = int => t0 = int

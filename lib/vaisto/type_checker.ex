@@ -11,6 +11,7 @@ defmodule Vaisto.TypeChecker do
 
   alias Vaisto.Error
   alias Vaisto.Errors
+  alias Vaisto.TypeChecker.TcCtx
   alias Vaisto.TypeEnv
 
   @type ast :: term()
@@ -170,16 +171,15 @@ defmodule Vaisto.TypeChecker do
   end
 
   # Generic location handling for all AST tuple nodes
-  # Strips Loc from any tuple and delegates to check_impl, wrapping result with location
-  # This replaces 27 individual boilerplate clauses
+  # Routes through check_s which threads TcCtx for substitution propagation
   def check(node, env) when is_tuple(node) do
-    case Vaisto.LocationStripper.strip_node(node) do
-      {^node, nil} ->
-        # No Loc found, node unchanged - delegate to implementation
-        check_impl(node, env)
-      {stripped, %Vaisto.Parser.Loc{} = loc} ->
-        # Loc found and stripped - check stripped version and wrap result
-        with_loc(check(stripped, env), loc)
+    ctx = TcCtx.new(env)
+    case check_s(node, ctx) do
+      {:ok, type, ast, ctx} ->
+        final_type = TcCtx.apply_subst(ctx, type)
+        final_ast = apply_subst_to_ast(ctx.subst, ast)
+        {:ok, final_type, final_ast}
+      {:error, _} = err -> err
     end
   end
 
@@ -216,119 +216,144 @@ defmodule Vaisto.TypeChecker do
   end
 
   # ============================================================================
-  # Private implementation clauses (check_impl) for tuple AST nodes
+  # Internal dispatch chain threading TcCtx (substitution context)
+  # check_s mirrors check/2 but threads ctx; check_impl_s mirrors check_impl/2
   # ============================================================================
 
-  # Delegate tuple patterns and tuples to their handlers
-  defp check_impl({:tuple_pattern, elements}, env), do: check_tuple_expr(elements, env)
-  defp check_impl({:map, pairs}, env), do: check_map_literal(pairs, env)
-  defp check_impl({:tuple, elements}, env), do: check_tuple_expr(elements, env)
+  # Tuple nodes: strip loc, dispatch to check_impl_s
+  defp check_s(node, ctx) when is_tuple(node) do
+    case Vaisto.LocationStripper.strip_node(node) do
+      {^node, nil} ->
+        check_impl_s(node, ctx)
+      {stripped, %Vaisto.Parser.Loc{} = loc} ->
+        case check_s(stripped, ctx) do
+          {:ok, type, ast, ctx} -> {:ok, type, with_loc_ast(ast, loc), ctx}
+          {:error, _} = err -> with_loc(err, loc)
+        end
+    end
+  end
 
-  # Bracket expressions: [] or [a b c] used as list literals
-  # Empty bracket [] → empty list
-  defp check_impl({:bracket, []}, _env), do: {:ok, {:list, :any}, {:list, [], {:list, :any}}}
-  # Cons expression: [h | t] → creates a list by prepending h to t
-  defp check_impl({:bracket, {:cons, head, tail}}, env) do
-    with {:ok, head_type, typed_head} <- check(head, env),
-         {:ok, tail_type, typed_tail} <- check(tail, env) do
-      # The result is a list containing head_type elements
+  # Literals — same as check/2 but return ctx
+  defp check_s(n, ctx) when is_integer(n), do: {:ok, :int, {:lit, :int, n}, ctx}
+  defp check_s(f, ctx) when is_float(f), do: {:ok, :float, {:lit, :float, f}, ctx}
+  defp check_s(true, ctx), do: {:ok, :bool, {:lit, :bool, true}, ctx}
+  defp check_s(false, ctx), do: {:ok, :bool, {:lit, :bool, false}, ctx}
+
+  # Atoms
+  defp check_s(a, ctx) when is_atom(a) do
+    case check(a, ctx.env) do
+      {:ok, type, ast} -> {:ok, type, ast, ctx}
+      {:error, _} = err -> err
+    end
+  end
+
+  # Fallback for non-tuple/non-literal
+  defp check_s(other, ctx) do
+    case check(other, ctx.env) do
+      {:ok, type, ast} -> {:ok, type, ast, ctx}
+      {:error, _} = err -> err
+    end
+  end
+
+  # Typed AST doesn't carry location — this is a no-op placeholder
+  defp with_loc_ast(ast, _loc), do: ast
+
+  # === Migrated check_impl_s clauses ===
+  # Each clause threads TcCtx. Direct check() calls → check_s() for ctx propagation.
+  # Helper calls that internally recurse use ctx.env (helpers migrated in later phases).
+
+  # Tuple patterns and tuples — ctx-threaded
+  defp check_impl_s({:tuple_pattern, elements}, ctx) do
+    case check_args_s(elements, ctx) do
+      {:ok, _types, typed_elements, ctx} -> {:ok, :any, {:tuple, typed_elements, :any}, ctx}
+      error -> error
+    end
+  end
+  defp check_impl_s({:map, pairs}, ctx) do
+    check_map_literal_s(pairs, ctx)
+  end
+  defp check_impl_s({:tuple, elements}, ctx) do
+    case check_args_s(elements, ctx) do
+      {:ok, _types, typed_elements, ctx} -> {:ok, :any, {:tuple, typed_elements, :any}, ctx}
+      error -> error
+    end
+  end
+
+  # Bracket expressions
+  defp check_impl_s({:bracket, []}, ctx), do: {:ok, {:list, :any}, {:list, [], {:list, :any}}, ctx}
+
+  defp check_impl_s({:bracket, {:cons, head, tail}}, ctx) do
+    with {:ok, head_type, typed_head, ctx} <- check_s(head, ctx),
+         {:ok, tail_type, typed_tail, ctx} <- check_s(tail, ctx) do
       elem_type = case tail_type do
         {:list, t} -> join_types(head_type, t)
-        _ -> head_type  # If tail type unknown, use head type
+        _ -> head_type
       end
-      {:ok, {:list, elem_type}, {:cons, typed_head, typed_tail, {:list, elem_type}}}
+      {:ok, {:list, elem_type}, {:cons, typed_head, typed_tail, {:list, elem_type}}, ctx}
     end
   end
-  # Non-empty bracket with cons pattern: [h | t] → this is a pattern, not an expression
-  # (Should only appear in match clauses, not as standalone expression)
-  defp check_impl({:bracket, elements}, env) when is_list(elements) do
-    # Treat as list literal: [1 2 3] → (list 1 2 3)
-    check({:list, elements}, env)
+
+  defp check_impl_s({:bracket, elements}, ctx) when is_list(elements) do
+    check_s({:list, elements}, ctx)
   end
 
-  # Do block: (do expr1 expr2 ...) → type of last expression
-  defp check_impl({:do, []}, _env), do: {:ok, :unit, {:do, [], :unit}}
-  defp check_impl({:do, exprs}, env) do
-    case check_exprs_sequence(exprs, env) do
-      {:ok, typed_exprs, last_type} ->
-        {:ok, last_type, {:do, typed_exprs, last_type}}
+  # Do block
+  defp check_impl_s({:do, []}, ctx), do: {:ok, :unit, {:do, [], :unit}, ctx}
+
+  defp check_impl_s({:do, exprs}, ctx) do
+    case check_exprs_sequence_s(exprs, ctx) do
+      {:ok, typed_exprs, last_type, ctx} ->
+        {:ok, last_type, {:do, typed_exprs, last_type}, ctx}
       error -> error
     end
   end
 
-  # String and unit literals (tuple forms)
-  defp check_impl({:string, s}, _env), do: {:ok, :string, {:lit, :string, s}}
-  defp check_impl({:unit, _loc}, _env), do: {:ok, :unit, {:lit, :unit, nil}}
-  defp check_impl({:unit}, _env), do: {:ok, :unit, {:lit, :unit, nil}}
+  # String and unit literals
+  defp check_impl_s({:string, s}, ctx), do: {:ok, :string, {:lit, :string, s}, ctx}
+  defp check_impl_s({:unit, _loc}, ctx), do: {:ok, :unit, {:lit, :unit, nil}, ctx}
+  defp check_impl_s({:unit}, ctx), do: {:ok, :unit, {:lit, :unit, nil}, ctx}
 
-  # List literal: (list 1 2 3) → homogeneous list
-  defp check_impl({:list, []}, _env), do: {:ok, {:list, :any}, {:list, [], {:list, :any}}}
-  defp check_impl({:list, elements}, env) do
-    case check_args(elements, env) do
-      {:ok, types, typed_elements} ->
-        # Infer element type from first element (lists are homogeneous)
-        elem_type = hd(types)
-        # Verify all elements have the same type
-        case Enum.find(types, &(not types_match?(elem_type, &1))) do
-          nil ->
-            list_type = {:list, elem_type}
-            {:ok, list_type, {:list, typed_elements, list_type}}
-          mismatched ->
-            {:error, Errors.list_type_mismatch(elem_type, mismatched)}
-        end
+  # List literal
+  defp check_impl_s({:list, []}, ctx), do: {:ok, {:list, :any}, {:list, [], {:list, :any}}, ctx}
+
+  defp check_impl_s({:list, elements}, ctx) do
+    case check_args_s(elements, ctx) do
+      {:ok, types, typed_elements, ctx} ->
+        elem_type = Enum.reduce(types, :any, &join_types/2)
+        {:ok, {:list, elem_type}, {:list, typed_elements, {:list, elem_type}}, ctx}
       error -> error
     end
   end
 
-
-
-  # Atom literal from parser: {:atom, :foo} → :foo
-  # This is always a literal, never a variable lookup
-  defp check_impl({:atom, a}, _env) when is_atom(a) do
-    {:ok, {:atom, a}, {:lit, :atom, a}}
+  # Atom literal
+  defp check_impl_s({:atom, a}, ctx) when is_atom(a) do
+    {:ok, {:atom, a}, {:lit, :atom, a}, ctx}
   end
 
   # Variable lookup
-  # Distinguishes local variables from module-level function references
-  defp check_impl({:var, name}, env) do
-    case Map.get(env, name) do
+  defp check_impl_s({:var, name}, ctx) do
+    case Map.get(ctx.env, name) do
       nil ->
         {:error, Errors.undefined_variable(name)}
-
       {:fn, params, _ret} = type ->
-        # Function type - check if it's local or module-level
-        if is_local_var?(name, env) do
-          {:ok, type, {:var, name, type}}
+        if is_local_var?(name, ctx.env) do
+          {:ok, type, {:var, name, type}, ctx}
         else
-          # Module-level function - emit fn_ref so emitter can use &name/arity
-          {:ok, type, {:fn_ref, name, length(params), type}}
+          {:ok, type, {:fn_ref, name, length(params), type}, ctx}
         end
-
       type ->
-        {:ok, type, {:var, name, type}}
+        {:ok, type, {:var, name, type}, ctx}
     end
   end
 
-  # Field access with row polymorphism: (. record :field) → field_type
-  # Works with records, row types, and creates row constraints
-  #
-  # Row polymorphism allows functions to accept any record with at least
-  # certain fields. For example:
-  #   (defn get-name [r] (. r :name))
-  # accepts any record with a :name field.
-  #
-  # When the record type is unknown (type variable or open row), we create
-  # fresh type variables for the field type and row constraint. These are
-  # deterministic based on the input IDs to ensure consistent types across
-  # multiple accesses to the same field.
-  defp check_impl({:field_access, record_expr, field}, env) when is_atom(field) do
-    with {:ok, record_type, typed_record} <- check(record_expr, env) do
+  # Field access with row polymorphism
+  defp check_impl_s({:field_access, record_expr, field}, ctx) when is_atom(field) do
+    with {:ok, record_type, typed_record, ctx} <- check_s(record_expr, ctx) do
       case record_type do
-        # Concrete record - look up field directly
         {:record, _name, fields} ->
           case List.keyfind(fields, field, 0) do
             {^field, field_type} ->
-              {:ok, field_type, {:field_access, typed_record, field, field_type}}
+              {:ok, field_type, {:field_access, typed_record, field, field_type}, ctx}
             nil ->
               {:error, Errors.type_mismatch(
                 {:row, [{field, :any}], {:rvar, 0}},
@@ -337,13 +362,11 @@ defmodule Vaisto.TypeChecker do
               )}
           end
 
-        # Row type - look up in known fields or constrain the tail
         {:row, fields, tail} ->
           case List.keyfind(fields, field, 0) do
             {^field, field_type} ->
-              {:ok, field_type, {:field_access, typed_record, field, field_type}}
+              {:ok, field_type, {:field_access, typed_record, field, field_type}, ctx}
             nil ->
-              # Field not in known fields - constrain the tail
               case tail do
                 :closed ->
                   {:error, Errors.type_mismatch(
@@ -352,43 +375,25 @@ defmodule Vaisto.TypeChecker do
                     note: "closed row does not have field `#{field}`"
                   )}
                 {:rvar, row_id} ->
-                  # Create fresh type variable for the field type
-                  # Use deterministic ID based on row_id and field name for consistency
                   field_tvar_id = fresh_field_tvar_id(row_id, field)
                   field_type = {:tvar, field_tvar_id}
-
-                  # The row constraint: this row must have field => field_type
-                  # plus whatever else the tail requires
                   row_constraint = {:row, [{field, field_type} | fields], {:rvar, row_id + 1}}
-
-                  # Return the field type variable with row constraint in AST
-                  {:ok, field_type, {:field_access, typed_record, field, field_type, row_constraint}}
+                  {:ok, field_type, {:field_access, typed_record, field, field_type, row_constraint}, ctx}
               end
           end
 
-        # Type variable - convert to row type constraint
         {:tvar, tvar_id} ->
-          # The record has an unknown type - constrain it to be a row with this field
-          # Create fresh type variables for field type and row tail
           field_tvar_id = fresh_field_tvar_id(tvar_id, field)
           field_type = {:tvar, field_tvar_id}
-
-          # Row constraint: tvar must be a row with at least this field
           row_constraint = {:row, [{field, field_type}], {:rvar, tvar_id}}
-
-          {:ok, field_type, {:field_access, typed_record, field, field_type, row_constraint}}
+          {:ok, field_type, {:field_access, typed_record, field, field_type, row_constraint}, ctx}
 
         :any ->
-          # Treat :any as an open row type - enables row polymorphism for untyped params
-          # Use base_id 200 — maps to 100_200_000_000+ range in fresh_field_tvar_id
           any_row_base_id = 200
           field_tvar_id = fresh_field_tvar_id(any_row_base_id, field)
           field_type = {:tvar, field_tvar_id}
-
-          # Row constraint: any must be a row with at least this field
           row_constraint = {:row, [{field, field_type}], {:rvar, any_row_base_id}}
-
-          {:ok, field_type, {:field_access, typed_record, field, field_type, row_constraint}}
+          {:ok, field_type, {:field_access, typed_record, field, field_type, row_constraint}, ctx}
 
         other ->
           {:error, Errors.type_mismatch(
@@ -400,533 +405,416 @@ defmodule Vaisto.TypeChecker do
     end
   end
 
-  # Special form: spawn - returns a typed PID
-  # (spawn process_name initial_state) → Pid<ProcessName>
-  defp check_impl({:call, :spawn, [process_name, init_state]}, env) do
-    with {:ok, process_type} <- lookup_process(process_name, env),
-         {:ok, _init_type, typed_init} <- check(init_state, env) do
-      # Create typed PID that knows what messages this process accepts
+  # spawn
+  defp check_impl_s({:call, :spawn, [process_name, init_state]}, ctx) do
+    with {:ok, process_type} <- lookup_process(process_name, ctx.env),
+         {:ok, _init_type, typed_init, ctx} <- check_s(init_state, ctx) do
       {:process, _state_type, accepted_msgs} = process_type
       pid_type = {:pid, process_name, accepted_msgs}
-      {:ok, pid_type, {:call, :spawn, [process_name, typed_init], pid_type}}
+      {:ok, pid_type, {:call, :spawn, [process_name, typed_init], pid_type}, ctx}
     end
   end
 
-  # --- List operations ---
-
-  # head: (list a) → a
-  defp check_impl({:call, :head, [list_expr]}, env) do
-    with {:ok, list_type, typed_list} <- check(list_expr, env) do
+  # head
+  defp check_impl_s({:call, :head, [list_expr]}, ctx) do
+    with {:ok, list_type, typed_list, ctx} <- check_s(list_expr, ctx) do
       case list_type do
-        {:list, elem_type} ->
-          {:ok, elem_type, {:call, :head, [typed_list], elem_type}}
-        :any ->
-          {:ok, :any, {:call, :head, [typed_list], :any}}
-        other ->
-          {:error, Errors.not_a_list(:head, other)}
+        {:list, elem_type} -> {:ok, elem_type, {:call, :head, [typed_list], elem_type}, ctx}
+        :any -> {:ok, :any, {:call, :head, [typed_list], :any}, ctx}
+        other -> {:error, Errors.not_a_list(:head, other)}
       end
     end
   end
 
-  # tail: (list a) → (list a)
-  defp check_impl({:call, :tail, [list_expr]}, env) do
-    with {:ok, list_type, typed_list} <- check(list_expr, env) do
+  # tail
+  defp check_impl_s({:call, :tail, [list_expr]}, ctx) do
+    with {:ok, list_type, typed_list, ctx} <- check_s(list_expr, ctx) do
       case list_type do
-        {:list, _elem_type} = t ->
-          {:ok, t, {:call, :tail, [typed_list], t}}
-        :any ->
-          {:ok, {:list, :any}, {:call, :tail, [typed_list], {:list, :any}}}
-        other ->
-          {:error, Errors.not_a_list(:tail, other)}
+        {:list, _elem_type} = t -> {:ok, t, {:call, :tail, [typed_list], t}, ctx}
+        :any -> {:ok, {:list, :any}, {:call, :tail, [typed_list], {:list, :any}}, ctx}
+        other -> {:error, Errors.not_a_list(:tail, other)}
       end
     end
   end
 
-  # cons: a → (list a) → (list a)
-  defp check_impl({:call, :cons, [elem_expr, list_expr]}, env) do
-    with {:ok, elem_type, typed_elem} <- check(elem_expr, env),
-         {:ok, list_type, typed_list} <- check(list_expr, env) do
+  # cons
+  defp check_impl_s({:call, :cons, [elem_expr, list_expr]}, ctx) do
+    with {:ok, elem_type, typed_elem, ctx} <- check_s(elem_expr, ctx),
+         {:ok, list_type, typed_list, ctx} <- check_s(list_expr, ctx) do
       case list_type do
         {:list, :any} ->
-          # Empty list - element determines type
           result_type = {:list, elem_type}
-          {:ok, result_type, {:call, :cons, [typed_elem, typed_list], result_type}}
+          {:ok, result_type, {:call, :cons, [typed_elem, typed_list], result_type}, ctx}
         {:list, list_elem_type} ->
-          if types_match?(elem_type, list_elem_type) do
+          if types_unifiable?(elem_type, list_elem_type) do
             result_type = {:list, list_elem_type}
-            {:ok, result_type, {:call, :cons, [typed_elem, typed_list], result_type}}
+            {:ok, result_type, {:call, :cons, [typed_elem, typed_list], result_type}, ctx}
           else
             {:error, Errors.cons_type_mismatch(elem_type, list_type)}
           end
         :any ->
           result_type = {:list, elem_type}
-          {:ok, result_type, {:call, :cons, [typed_elem, typed_list], result_type}}
+          {:ok, result_type, {:call, :cons, [typed_elem, typed_list], result_type}, ctx}
         other ->
           {:error, Errors.not_a_list(:cons, other)}
       end
     end
   end
 
-  # empty?: (list a) → bool
-  defp check_impl({:call, :empty?, [list_expr]}, env) do
-    with {:ok, list_type, typed_list} <- check(list_expr, env) do
+  # empty?
+  defp check_impl_s({:call, :empty?, [list_expr]}, ctx) do
+    with {:ok, list_type, typed_list, ctx} <- check_s(list_expr, ctx) do
       case list_type do
-        {:list, _} ->
-          {:ok, :bool, {:call, :empty?, [typed_list], :bool}}
-        :any ->
-          {:ok, :bool, {:call, :empty?, [typed_list], :bool}}
-        other ->
-          {:error, Errors.not_a_list(:empty?, other)}
+        {:list, _} -> {:ok, :bool, {:call, :empty?, [typed_list], :bool}, ctx}
+        :any -> {:ok, :bool, {:call, :empty?, [typed_list], :bool}, ctx}
+        other -> {:error, Errors.not_a_list(:empty?, other)}
       end
     end
   end
 
-  # length: (list a) → int
-  defp check_impl({:call, :length, [list_expr]}, env) do
-    with {:ok, list_type, typed_list} <- check(list_expr, env) do
+  # length
+  defp check_impl_s({:call, :length, [list_expr]}, ctx) do
+    with {:ok, list_type, typed_list, ctx} <- check_s(list_expr, ctx) do
       case list_type do
-        {:list, _} ->
-          {:ok, :int, {:call, :length, [typed_list], :int}}
-        :any ->
-          {:ok, :int, {:call, :length, [typed_list], :int}}
-        other ->
-          {:error, Errors.not_a_list(:length, other)}
+        {:list, _} -> {:ok, :int, {:call, :length, [typed_list], :int}, ctx}
+        :any -> {:ok, :int, {:call, :length, [typed_list], :int}, ctx}
+        other -> {:error, Errors.not_a_list(:length, other)}
       end
     end
   end
 
-  # str: variadic string concatenation/conversion
-  # (str arg1 arg2 ...) → string
-  # Converts each argument to string and concatenates them
-  defp check_impl({:call, :str, args}, env) when is_list(args) and length(args) > 0 do
-    # Type check all arguments - str accepts any type
-    results = Enum.map(args, &check(&1, env))
-
-    case Enum.find(results, &match?({:error, _}, &1)) do
+  # str — variadic
+  defp check_impl_s({:call, :str, args}, ctx) when is_list(args) and length(args) > 0 do
+    case check_args_s(args, ctx) do
+      {:ok, _types, typed_args, ctx} ->
+        {:ok, :string, {:call, :str, typed_args, :string}, ctx}
       {:error, _} = err -> err
-      nil ->
-        typed_args = Enum.map(results, fn {:ok, _, ast} -> ast end)
-        {:ok, :string, {:call, :str, typed_args, :string}}
     end
   end
-
-  # --- Higher-order list functions ---
 
   # map: (a → b) → (list a) → (list b)
-  # (map func list) - applies func to each element
-  # Named function version
-  # Skip built-in handling if user defined their own map function
-  defp check_impl({:call, :map, [func_name, list_expr]}, env) when is_atom(func_name) do
-    # If map is user-defined in env (not the built-in), use generic call handling
-    case Map.get(env, :map) do
-      nil -> check_builtin_map(func_name, list_expr, env)
-      _user_defined -> check_generic_call(:map, [func_name, list_expr], env)
+  defp check_impl_s({:call, :map, [func_name, list_expr]}, ctx) when is_atom(func_name) do
+    case Map.get(ctx.env, :map) do
+      nil -> check_builtin_map_s(func_name, list_expr, ctx)
+      _user_defined -> check_generic_call_s(:map, [func_name, list_expr], ctx)
     end
   end
-
-
-
-  # map with anonymous function (either 3-tuple or 4-tuple with location)
-  defp check_impl({:call, :map, [{:fn, _, _, _} = fn_expr, list_expr]}, env) do
-    case Map.get(env, :map) do
-      nil -> check({:call, :map, [strip_fn_loc(fn_expr), list_expr]}, env)
-      _user_defined -> check_generic_call(:map, [fn_expr, list_expr], env)
+  defp check_impl_s({:call, :map, [{:fn, _, _, _} = fn_expr, list_expr]}, ctx) do
+    case Map.get(ctx.env, :map) do
+      nil -> check_s({:call, :map, [strip_fn_loc(fn_expr), list_expr]}, ctx)
+      _user_defined -> check_generic_call_s(:map, [fn_expr, list_expr], ctx)
     end
   end
-  defp check_impl({:call, :map, [{:fn, _, _} = fn_expr, list_expr]}, env) do
-    case Map.get(env, :map) do
-      nil -> check_builtin_map_anon(fn_expr, list_expr, env)
-      _user_defined -> check_generic_call(:map, [fn_expr, list_expr], env)
+  defp check_impl_s({:call, :map, [{:fn, _, _} = fn_expr, list_expr]}, ctx) do
+    case Map.get(ctx.env, :map) do
+      nil -> check_builtin_map_anon_s(fn_expr, list_expr, ctx)
+      _user_defined -> check_generic_call_s(:map, [fn_expr, list_expr], ctx)
     end
   end
-
-
 
   # filter: (a → bool) → (list a) → (list a)
-  # (filter predicate list) - keeps elements where predicate returns true
-  # Named function version - skip built-in if user defined filter
-  defp check_impl({:call, :filter, [func_name, list_expr]}, env) when is_atom(func_name) do
-    case Map.get(env, :filter) do
-      nil -> check_builtin_filter(func_name, list_expr, env)
-      _user_defined -> check_generic_call(:filter, [func_name, list_expr], env)
+  defp check_impl_s({:call, :filter, [func_name, list_expr]}, ctx) when is_atom(func_name) do
+    case Map.get(ctx.env, :filter) do
+      nil -> check_builtin_filter_s(func_name, list_expr, ctx)
+      _user_defined -> check_generic_call_s(:filter, [func_name, list_expr], ctx)
     end
   end
-
-
-
-  # filter with anonymous function (either 3-tuple or 4-tuple with location)
-  defp check_impl({:call, :filter, [{:fn, _, _, _} = fn_expr, list_expr]}, env) do
-    case Map.get(env, :filter) do
-      nil -> check({:call, :filter, [strip_fn_loc(fn_expr), list_expr]}, env)
-      _user_defined -> check_generic_call(:filter, [fn_expr, list_expr], env)
+  defp check_impl_s({:call, :filter, [{:fn, _, _, _} = fn_expr, list_expr]}, ctx) do
+    case Map.get(ctx.env, :filter) do
+      nil -> check_s({:call, :filter, [strip_fn_loc(fn_expr), list_expr]}, ctx)
+      _user_defined -> check_generic_call_s(:filter, [fn_expr, list_expr], ctx)
     end
   end
-  defp check_impl({:call, :filter, [{:fn, _, _} = fn_expr, list_expr]}, env) do
-    case Map.get(env, :filter) do
-      nil -> check_builtin_filter_anon(fn_expr, list_expr, env)
-      _user_defined -> check_generic_call(:filter, [fn_expr, list_expr], env)
+  defp check_impl_s({:call, :filter, [{:fn, _, _} = fn_expr, list_expr]}, ctx) do
+    case Map.get(ctx.env, :filter) do
+      nil -> check_builtin_filter_anon_s(fn_expr, list_expr, ctx)
+      _user_defined -> check_generic_call_s(:filter, [fn_expr, list_expr], ctx)
     end
   end
-
-
 
   # fold: (b → a → b) → b → (list a) → b
-  # (fold func init list) - left fold
-  # Named function version - skip built-in if user defined fold
-  defp check_impl({:call, :fold, [func_name, init_expr, list_expr]}, env) when is_atom(func_name) do
-    case Map.get(env, :fold) do
-      nil -> check_builtin_fold(func_name, init_expr, list_expr, env)
-      _user_defined -> check_generic_call(:fold, [func_name, init_expr, list_expr], env)
+  defp check_impl_s({:call, :fold, [func_name, init_expr, list_expr]}, ctx) when is_atom(func_name) do
+    case Map.get(ctx.env, :fold) do
+      nil -> check_builtin_fold_s(func_name, init_expr, list_expr, ctx)
+      _user_defined -> check_generic_call_s(:fold, [func_name, init_expr, list_expr], ctx)
+    end
+  end
+  defp check_impl_s({:call, :fold, [{:fn, _, _, _} = fn_expr, init_expr, list_expr]}, ctx) do
+    case Map.get(ctx.env, :fold) do
+      nil -> check_s({:call, :fold, [strip_fn_loc(fn_expr), init_expr, list_expr]}, ctx)
+      _user_defined -> check_generic_call_s(:fold, [fn_expr, init_expr, list_expr], ctx)
+    end
+  end
+  defp check_impl_s({:call, :fold, [{:fn, _, _} = fn_expr, init_expr, list_expr]}, ctx) do
+    case Map.get(ctx.env, :fold) do
+      nil -> check_builtin_fold_anon_s(fn_expr, init_expr, list_expr, ctx)
+      _user_defined -> check_generic_call_s(:fold, [fn_expr, init_expr, list_expr], ctx)
     end
   end
 
-
-
-  # fold with anonymous function (either 3-tuple or 4-tuple with location)
-  defp check_impl({:call, :fold, [{:fn, _, _, _} = fn_expr, init_expr, list_expr]}, env) do
-    case Map.get(env, :fold) do
-      nil -> check({:call, :fold, [strip_fn_loc(fn_expr), init_expr, list_expr]}, env)
-      _user_defined -> check_generic_call(:fold, [fn_expr, init_expr, list_expr], env)
-    end
-  end
-  defp check_impl({:call, :fold, [{:fn, _, _} = fn_expr, init_expr, list_expr]}, env) do
-    case Map.get(env, :fold) do
-      nil -> check_builtin_fold_anon(fn_expr, init_expr, list_expr, env)
-      _user_defined -> check_generic_call(:fold, [fn_expr, init_expr, list_expr], env)
-    end
-  end
-
-
-
-  # Special form: send (!) - validates message against typed PID
-  # (! pid message) → :ok, but only if message is valid for that PID
-  defp check_impl({:call, :"!", [pid_expr, msg_expr]}, env) do
-    with {:ok, pid_type, typed_pid} <- check(pid_expr, env),
-         {:ok, msg_type, typed_msg} <- check(msg_expr, env) do
+  # send (!)
+  defp check_impl_s({:call, :"!", [pid_expr, msg_expr]}, ctx) do
+    with {:ok, pid_type, typed_pid, ctx} <- check_s(pid_expr, ctx),
+         {:ok, msg_type, typed_msg, ctx} <- check_s(msg_expr, ctx) do
       case pid_type do
         {:pid, process_name, accepted_msgs} ->
-          # Extract the message atom from the type
           msg_atom = case msg_type do
             {:atom, a} -> a
             _ -> nil
           end
-
           if msg_atom in accepted_msgs do
-            {:ok, :ok, {:call, :"!", [typed_pid, typed_msg], :ok}}
+            {:ok, :ok, {:call, :"!", [typed_pid, typed_msg], :ok}, ctx}
           else
             {:error, Errors.invalid_message(process_name, msg_atom, accepted_msgs)}
           end
-
         :pid ->
-          # Untyped PID - allow any message (backward compat)
-          {:ok, :ok, {:call, :"!", [typed_pid, typed_msg], :ok}}
-
+          {:ok, :ok, {:call, :"!", [typed_pid, typed_msg], :ok}, ctx}
         other ->
           {:error, Errors.send_to_non_pid(other)}
       end
     end
   end
 
-  # Special form: unsafe send (!!) - sends to any PID without message validation
-  # (!! pid message) → :ok, requires PID but skips message type checking
-  # Use this for remote PIDs or when the PID's message type is unknown
-  defp check_impl({:call, :"!!", [pid_expr, msg_expr]}, env) do
-    with {:ok, pid_type, typed_pid} <- check(pid_expr, env),
-         {:ok, _msg_type, typed_msg} <- check(msg_expr, env) do
+  # unsafe send (!!)
+  defp check_impl_s({:call, :"!!", [pid_expr, msg_expr]}, ctx) do
+    with {:ok, pid_type, typed_pid, ctx} <- check_s(pid_expr, ctx),
+         {:ok, _msg_type, typed_msg, ctx} <- check_s(msg_expr, ctx) do
       case pid_type do
-        # Case 1: Typed PID - we know the process type, but we deliberately
-        # skip message validation. The underscore _ ignores the process name
-        # and accepted messages — we don't care what they are.
-        {:pid, _process_name, _accepted_msgs} ->
-          {:ok, :ok, {:call, :"!!", [typed_pid, typed_msg], :ok}}
-
-        # Case 2: Untyped PID - a raw PID without type information.
-        # This happens when PIDs come from external sources or parameters.
-        :pid ->
-          {:ok, :ok, {:call, :"!!", [typed_pid, typed_msg], :ok}}
-
-        # Case 3: :any type - this is the "truly unsafe" case.
-        # The parameter has no type annotation, so we allow it.
-        # This is the whole point of !! — trusting the developer.
-        :any ->
-          {:ok, :ok, {:call, :"!!", [typed_pid, typed_msg], :ok}}
-
-        # Case 4: Not a PID at all - this is still an error!
-        # We catch obvious mistakes like (!! 42 :msg) or (!! "string" :msg).
-        # The "unsafe" part is about messages, not about accepting garbage.
-        other ->
-          {:error, Errors.send_to_non_pid(other)}
+        {:pid, _, _} -> {:ok, :ok, {:call, :"!!", [typed_pid, typed_msg], :ok}, ctx}
+        :pid -> {:ok, :ok, {:call, :"!!", [typed_pid, typed_msg], :ok}, ctx}
+        :any -> {:ok, :ok, {:call, :"!!", [typed_pid, typed_msg], :ok}, ctx}
+        other -> {:error, Errors.send_to_non_pid(other)}
       end
     end
   end
 
-  # If expression: (if cond then else)
-  defp check_impl({:if, condition, then_branch, else_branch}, env) do
-    with {:ok, cond_type, typed_cond} <- check(condition, env),
+  # if expression
+  defp check_impl_s({:if, condition, then_branch, else_branch}, ctx) do
+    with {:ok, cond_type, typed_cond, ctx} <- check_s(condition, ctx),
          :ok <- expect_bool(cond_type),
-         {:ok, then_type, typed_then} <- check(then_branch, env),
-         {:ok, else_type, typed_else} <- check(else_branch, env),
-         :ok <- expect_same_type(then_type, else_type) do
-      {:ok, then_type, {:if, typed_cond, typed_then, typed_else, then_type}}
+         {:ok, then_type, typed_then, ctx} <- check_s(then_branch, ctx),
+         {:ok, else_type, typed_else, ctx} <- check_s(else_branch, ctx),
+         {:ok, ctx} <- expect_same_type_s(then_type, else_type, ctx) do
+      {:ok, then_type, {:if, typed_cond, typed_then, typed_else, then_type}, ctx}
     end
   end
 
-  # Match expression: (match expr [pattern body] ...)
-  defp check_impl({:match, expr, clauses}, env) do
-    with {:ok, expr_type, typed_expr} <- check(expr, env),
-         {:ok, result_type, typed_clauses} <- check_match_clauses(clauses, expr_type, env) do
-      {:ok, result_type, {:match, typed_expr, typed_clauses, result_type}}
+  # match expression
+  defp check_impl_s({:match, expr, clauses}, ctx) do
+    with {:ok, expr_type, typed_expr, ctx} <- check_s(expr, ctx),
+         {:ok, result_type, typed_clauses, ctx} <- check_match_clauses_s(clauses, expr_type, ctx) do
+      {:ok, result_type, {:match, typed_expr, typed_clauses, result_type}, ctx}
     end
   end
 
-  # Receive expression: (receive [pattern body] ...)
-  # Blocks until a message matching one of the patterns arrives
-  # Patterns are typed as :any (full typed PIDs would constrain this)
-  defp check_impl({:receive, clauses}, env) do
-    with {:ok, result_type, typed_clauses} <- check_receive_clauses(clauses, env) do
-      {:ok, result_type, {:receive, typed_clauses, result_type}}
+  # receive expression
+  defp check_impl_s({:receive, clauses}, ctx) do
+    with {:ok, result_type, typed_clauses, ctx} <- check_receive_clauses_s(clauses, ctx) do
+      {:ok, result_type, {:receive, typed_clauses, result_type}, ctx}
     end
   end
 
-  # Let binding: (let [x 1 y 2] body)
-  # Each binding extends the env for subsequent bindings and body
-  defp check_impl({:let, bindings, body}, env) do
-    case check_bindings(bindings, env, []) do
-      {:ok, extended_env, typed_bindings} ->
-        case check(body, extended_env) do
-          {:ok, body_type, typed_body} ->
-            {:ok, body_type, {:let, typed_bindings, typed_body, body_type}}
+  # let binding
+  defp check_impl_s({:let, bindings, body}, ctx) do
+    case check_bindings_s(bindings, ctx, []) do
+      {:ok, ctx, typed_bindings} ->
+        case check_s(body, ctx) do
+          {:ok, body_type, typed_body, ctx} ->
+            {:ok, body_type, {:let, typed_bindings, typed_body, body_type}, ctx}
           error -> error
         end
       error -> error
     end
   end
 
-  # Qualified call: (erlang:hd xs) or (Vaisto.TypeChecker.Core/empty-subst)
-  # Must come before generic function call to match first
-  defp check_impl({:call, {:qualified, mod, func}, args}, env) do
-    # Look up the extern in environment using "mod:func" key
+  # Qualified call
+  defp check_impl_s({:call, {:qualified, mod, func}, args}, ctx) do
     extern_name = :"#{mod}:#{func}"
-    case Map.get(env, extern_name) do
+    case Map.get(ctx.env, extern_name) do
       nil ->
-        # Not registered - allow with :any return type (dynamic typing for interop)
-        # This enables cross-module calls without explicit externs
-        with {:ok, _arg_types, typed_args} <- check_args(args, env) do
-          {:ok, :any, {:call, {:qualified, mod, func}, typed_args, :any}}
+        with {:ok, _arg_types, typed_args, ctx} <- check_args_s(args, ctx) do
+          {:ok, :any, {:call, {:qualified, mod, func}, typed_args, :any}, ctx}
         end
       {:fn, _param_types, ret_type} ->
-        with {:ok, _arg_types, typed_args} <- check_args(args, env) do
-          # Note: we're not enforcing arg type checking for externs yet
-          {:ok, ret_type, {:call, {:qualified, mod, func}, typed_args, ret_type}}
+        with {:ok, _arg_types, typed_args, ctx} <- check_args_s(args, ctx) do
+          {:ok, ret_type, {:call, {:qualified, mod, func}, typed_args, ret_type}, ctx}
         end
       other ->
         {:error, Errors.extern_not_a_function(mod, func, other)}
     end
   end
 
-  # Helper for generic function call handling (used when user overrides built-ins)
-
-  # Arithmetic operators with numeric type widening
-  # Handles: +, -, *, / with int/float/num type hierarchy
-  defp check_impl({:call, op, [left, right]}, env) when op in [:+, :-, :*] do
-    with {:ok, left_type, typed_left} <- check(left, env),
-         {:ok, right_type, typed_right} <- check(right, env),
+  # Arithmetic operators
+  defp check_impl_s({:call, op, [left, right]}, ctx) when op in [:+, :-, :*] do
+    with {:ok, left_type, typed_left, ctx} <- check_s(left, ctx),
+         {:ok, right_type, typed_right, ctx} <- check_s(right, ctx),
          {:ok, result_type} <- check_numeric_op(op, left_type, right_type) do
-      {:ok, result_type, {:call, op, [typed_left, typed_right], result_type}}
+      {:ok, result_type, {:call, op, [typed_left, typed_right], result_type}, ctx}
     end
   end
 
-  # Division always returns float
-  defp check_impl({:call, :/, [left, right]}, env) do
-    with {:ok, left_type, typed_left} <- check(left, env),
-         {:ok, right_type, typed_right} <- check(right, env),
+  # Division
+  defp check_impl_s({:call, :/, [left, right]}, ctx) do
+    with {:ok, left_type, typed_left, ctx} <- check_s(left, ctx),
+         {:ok, right_type, typed_right, ctx} <- check_s(right, ctx),
          :ok <- expect_numeric(left_type, "division"),
          :ok <- expect_numeric(right_type, "division") do
-      {:ok, :float, {:call, :/, [typed_left, typed_right], :float}}
+      {:ok, :float, {:call, :/, [typed_left, typed_right], :float}, ctx}
     end
   end
 
-  # Comparison operators with numeric type support
-  defp check_impl({:call, op, [left, right]}, env) when op in [:<, :>, :<=, :>=] do
-    with {:ok, left_type, typed_left} <- check(left, env),
-         {:ok, right_type, typed_right} <- check(right, env),
+  # Comparison operators
+  defp check_impl_s({:call, op, [left, right]}, ctx) when op in [:<, :>, :<=, :>=] do
+    with {:ok, left_type, typed_left, ctx} <- check_s(left, ctx),
+         {:ok, right_type, typed_right, ctx} <- check_s(right, ctx),
          :ok <- expect_numeric(left_type, "comparison"),
          :ok <- expect_numeric(right_type, "comparison") do
-      {:ok, :bool, {:call, op, [typed_left, typed_right], :bool}}
+      {:ok, :bool, {:call, op, [typed_left, typed_right], :bool}, ctx}
     end
   end
 
-  # Function call (general case)
-  # If func is a local variable holding a function, emit {:apply, var, args, type}
-  # If func is a module-level function, emit {:call, name, args, type}
-  defp check_impl({:call, func, args}, env) when is_atom(func) do
-    with {:ok, func_type} <- lookup_function(func, env) do
+  # Function call (atom) — full ctx threading with unify_call_s
+  defp check_impl_s({:call, func, args}, ctx) when is_atom(func) do
+    with {:ok, func_type} <- lookup_function(func, ctx.env) do
       case func_type do
         {:constrained_method, vars, constraints, fn_type, method_name} ->
-          check_class_method_call(method_name, vars, constraints, fn_type, args, env)
+          check_class_method_call_s(method_name, vars, constraints, fn_type, args, ctx)
 
         {:forall, vars, fn_type} ->
-          # Polymorphic function — instantiate with fresh tvars and unify
           base_id = :erlang.unique_integer([:positive, :monotonic]) * 1000
           fresh_subst = vars
             |> Enum.with_index()
             |> Map.new(fn {var, idx} -> {var, {:tvar, base_id + idx}} end)
           inst_fn_type = Vaisto.TypeSystem.Core.apply_subst(fresh_subst, fn_type)
 
-          with {:ok, arg_types, typed_args} <- check_args(args, env),
-               {:ok, ret_type} <- unify_call_poly(inst_fn_type, arg_types, args) do
-            {:ok, ret_type, {:call, func, typed_args, ret_type}}
+          with {:ok, arg_types, typed_args, ctx} <- check_args_s(args, ctx),
+               {:ok, ret_type, ctx} <- unify_call_s(inst_fn_type, arg_types, ctx, args) do
+            {:ok, ret_type, {:call, func, typed_args, ret_type}, ctx}
           end
 
         _ ->
-          with {:ok, arg_types, typed_args} <- check_args(args, env),
-               {:ok, ret_type} <- unify_call(func_type, arg_types, args) do
-            if is_local_var?(func, env) do
-              {:ok, ret_type, {:apply, {:var, func, func_type}, typed_args, ret_type}}
+          with {:ok, arg_types, typed_args, ctx} <- check_args_s(args, ctx),
+               {:ok, ret_type, ctx} <- unify_call_s(func_type, arg_types, ctx, args) do
+            if is_local_var?(func, ctx.env) do
+              {:ok, ret_type, {:apply, {:var, func, func_type}, typed_args, ret_type}, ctx}
             else
-              {:ok, ret_type, {:call, func, typed_args, ret_type}}
+              {:ok, ret_type, {:call, func, typed_args, ret_type}, ctx}
             end
           end
       end
     end
   end
 
-  defp check_impl({:call, func, args}, env) do
-    with {:ok, func_type} <- lookup_function(func, env),
-         {:ok, arg_types, typed_args} <- check_args(args, env),
-         {:ok, ret_type} <- unify_call(func_type, arg_types, args) do
-      {:ok, ret_type, {:call, func, typed_args, ret_type}}
+  # Function call (expression) — full ctx threading
+  defp check_impl_s({:call, func, args}, ctx) do
+    with {:ok, func_type} <- lookup_function(func, ctx.env),
+         {:ok, arg_types, typed_args, ctx} <- check_args_s(args, ctx),
+         {:ok, ret_type, ctx} <- unify_call_s(func_type, arg_types, ctx, args) do
+      {:ok, ret_type, {:call, func, typed_args, ret_type}, ctx}
     end
   end
 
   # Process definition
-  defp check_impl({:process, name, initial_state, handlers}, env) do
-    with {:ok, state_type, _} <- check(initial_state, env),
-         {:ok, typed_handlers} <- check_handlers(handlers, state_type, env) do
+  defp check_impl_s({:process, name, initial_state, handlers}, ctx) do
+    with {:ok, state_type, _, ctx} <- check_s(initial_state, ctx),
+         {:ok, typed_handlers, ctx} <- check_handlers_s(handlers, state_type, ctx) do
       process_type = {:process, state_type, handler_types(handlers)}
-      {:ok, process_type, {:process, name, initial_state, typed_handlers, process_type}}
+      {:ok, process_type, {:process, name, initial_state, typed_handlers, process_type}, ctx}
     end
   end
 
   # Supervision tree
-  defp check_impl({:supervise, strategy, children}, env) do
+  defp check_impl_s({:supervise, strategy, children}, ctx) do
     with :ok <- validate_strategy(strategy),
-         {:ok, typed_children} <- check_children(children, env) do
-      {:ok, :supervisor, {:supervise, strategy, typed_children, :supervisor}}
+         {:ok, typed_children} <- check_children(children, ctx.env) do
+      {:ok, :supervisor, {:supervise, strategy, typed_children, :supervisor}, ctx}
     end
   end
 
-  # Product type (record): (deftype Point [x :int y :int])
-  # Registers a constructor function and a record type
-  defp check_impl({:deftype, name, {:product, fields}}, _env) do
-    # Normalize field types
+  # Product type (record)
+  defp check_impl_s({:deftype, name, {:product, fields}}, ctx) do
     normalized_fields = Enum.map(fields, fn {field_name, type} ->
       {field_name, parse_type_expr(type)}
     end)
     record_type = {:record, name, normalized_fields}
-    {:ok, record_type, {:deftype, name, {:product, normalized_fields}, record_type}}
+    {:ok, record_type, {:deftype, name, {:product, normalized_fields}, record_type}, ctx}
   end
 
-  # Sum type (ADT): (deftype Result (Ok v) (Error msg))
-  # Registers constructor functions for each variant
-  # Each constructor returns the sum type
-  #
-  # Type parameters are collected and made into type variables.
-  # For example: (deftype Option (Some a) (None))
-  # - Collects type param 'a' -> {:tvar, 0}
-  # - Some constructor: ({:tvar, 0}) -> Option
-  # - None constructor: () -> Option
-  #
-  # This enables type inference to propagate concrete types through constructors.
-  defp check_impl({:deftype, name, {:sum, variants}}, _env) do
-    # Collect all type parameters used across variants
+  # Sum type (ADT)
+  defp check_impl_s({:deftype, name, {:sum, variants}}, ctx) do
     all_params = variants
-    |> Enum.flat_map(fn {_ctor, params} -> params end)
-    |> Enum.uniq()
-
-    # Create type variable mapping: param_name -> {:tvar, index}
+      |> Enum.flat_map(fn {_ctor, params} -> params end)
+      |> Enum.uniq()
     param_map = all_params
-    |> Enum.with_index()
-    |> Map.new(fn {param, idx} -> {param, {:tvar, idx}} end)
-
-    # Normalize variants with type variables instead of :any
+      |> Enum.with_index()
+      |> Map.new(fn {param, idx} -> {param, {:tvar, idx}} end)
     normalized_variants = Enum.map(variants, fn {ctor_name, type_params} ->
       field_types = Enum.map(type_params, fn param ->
         Map.get(param_map, param, :any)
       end)
       {ctor_name, field_types}
     end)
-
     sum_type = {:sum, name, normalized_variants}
-    {:ok, sum_type, {:deftype, name, {:sum, normalized_variants}, sum_type}}
+    {:ok, sum_type, {:deftype, name, {:sum, normalized_variants}, sum_type}, ctx}
   end
 
-  # Legacy support: old-style deftype without wrapper
-  defp check_impl({:deftype, name, fields}, env) when is_list(fields) do
-    check({:deftype, name, {:product, fields}}, env)
+  # Legacy deftype
+  defp check_impl_s({:deftype, name, fields}, ctx) when is_list(fields) do
+    check_s({:deftype, name, {:product, fields}}, ctx)
   end
 
-  # Function definition: (defn add [x :int y :int] (+ x y))
-  # Params are now [{:x, :int}, {:y, :int}] tuples with types
-  defp check_impl({:defn, name, params, body, declared_ret_type}, env) do
-    # Extract param names and types
+  # Function definition with return type
+  defp check_impl_s({:defn, name, params, body, declared_ret_type}, ctx) do
     param_names = Enum.map(params, fn {n, _t} -> n end)
     param_types = Enum.map(params, fn {_n, t} -> t end)
     param_env = Map.new(params)
 
-    # Add the function itself to env for recursion
     self_type = {:fn, param_types, declared_ret_type}
-    # Mark parameters as local vars so they use f.(x) syntax if called as functions
-    extended_env = env
+    extended_env = ctx.env
       |> Map.merge(param_env)
       |> Map.put(name, self_type)
       |> then(fn e -> Enum.reduce(param_names, e, &add_local_var(&2, &1)) end)
 
-    case check(body, extended_env) do
-      {:ok, inferred_ret_type, typed_body} ->
-        # If return type was declared, verify it matches
-        if declared_ret_type != :any and not types_match?(declared_ret_type, inferred_ret_type) do
+    extended_ctx = %{ctx | env: extended_env}
+
+    case check_s(body, extended_ctx) do
+      {:ok, inferred_ret_type, typed_body, ctx} ->
+        if declared_ret_type != :any and not types_unifiable?(declared_ret_type, inferred_ret_type) do
           {:error, Errors.return_type_mismatch(declared_ret_type, inferred_ret_type)}
         else
           final_ret_type = if declared_ret_type != :any, do: declared_ret_type, else: inferred_ret_type
           func_type = {:fn, param_types, final_ret_type}
-          {:ok, func_type, {:defn, name, param_names, typed_body, func_type}}
+          {:ok, func_type, {:defn, name, param_names, typed_body, func_type}, ctx}
         end
       error -> error
     end
   end
 
-  # Legacy form without return type annotation
-  defp check_impl({:defn, name, params, body}, env) do
-    check({:defn, name, params, body, :any}, env)
+  # Legacy defn without return type
+  defp check_impl_s({:defn, name, params, body}, ctx) do
+    check_s({:defn, name, params, body, :any}, ctx)
   end
 
-  # Value binding: (def name value)
-  # Creates a module-level constant
-  defp check_impl({:defval, name, value}, env) do
-    case check(value, env) do
-      {:ok, val_type, typed_value} ->
-        {:ok, val_type, {:defval, name, typed_value, val_type}}
+  # Value binding
+  defp check_impl_s({:defval, name, value}, ctx) do
+    case check_s(value, ctx) do
+      {:ok, val_type, typed_value, ctx} ->
+        {:ok, val_type, {:defval, name, typed_value, val_type}, ctx}
       error -> error
     end
   end
 
-  # Anonymous function: (fn [x] (* x 2))
-  # Uses Hindley-Milner inference to determine parameter types
-  defp check_impl({:fn, params, body}, env) do
-    # Try inference first for better type information
-    case Vaisto.TypeSystem.Infer.infer({:fn, params, body}, env) do
+  # Anonymous function — uses Infer first, falls back to manual check
+  defp check_impl_s({:fn, params, body}, ctx) do
+    case Vaisto.TypeSystem.Infer.infer({:fn, params, body}, ctx.env) do
       {:ok, func_type, typed_ast} ->
-        {:ok, func_type, typed_ast}
+        {:ok, func_type, typed_ast, ctx}
 
       {:error, _} ->
-        # Fall back to :any for params if inference fails
-        # Handle pattern parameters by extracting their bindings
         {typed_params, param_bindings} = Enum.map_reduce(params, [], fn
           {:tuple_pattern, _elements} = pattern, acc ->
-            # Extract variable bindings from the tuple pattern
-            bindings = extract_pattern_bindings(pattern, :any, env)
-            typed_pattern = type_pattern(pattern, :any, env)
+            bindings = extract_pattern_bindings(pattern, :any, ctx.env)
+            typed_pattern = type_pattern(pattern, :any, ctx.env)
             {typed_pattern, bindings ++ acc}
           var, acc when is_atom(var) and var not in [:_, true, false] ->
             {{:var, var, :any}, [{var, :any} | acc]}
@@ -935,109 +823,115 @@ defmodule Vaisto.TypeChecker do
         end)
 
         param_types = Enum.map(params, fn _ -> :any end)
-        param_env = Map.new(param_bindings)
-        extended_env = Map.merge(env, param_env)
+        extended_ctx = %{ctx | env: Map.merge(ctx.env, Map.new(param_bindings))}
 
-        case check(body, extended_env) do
-          {:ok, ret_type, typed_body} ->
+        case check_s(body, extended_ctx) do
+          {:ok, ret_type, typed_body, ctx} ->
             func_type = {:fn, param_types, ret_type}
-            {:ok, func_type, {:fn, typed_params, typed_body, func_type}}
+            {:ok, func_type, {:fn, typed_params, typed_body, func_type}, ctx}
           error -> error
         end
     end
   end
 
   # Multi-clause function definition
-  # (defn len [[] 0] [[h | t] (+ 1 (len t))])
-  defp check_impl({:defn_multi, name, clauses}, env) do
-    # Determine arity from first clause pattern
-    # List patterns ([], [h|t], {:list, ...}) → arity 1 (single list argument)
-    # Record patterns ({:call, name, args}) → arity = length(args)
+  defp check_impl_s({:defn_multi, name, clauses}, ctx) do
     {first_pattern, _} = hd(clauses)
     arity = case first_pattern do
-      [] -> 1  # Empty list pattern
-      {:cons, _, _} -> 1  # Cons pattern [h | t]
-      {:list, _} -> 1  # List literal pattern
-      {:call, _, args} -> length(args)  # Record pattern
+      [] -> 1
+      {:cons, _, _} -> 1
+      {:list, _} -> 1
+      {:call, _, args} -> length(args)
       _ -> 1
     end
 
-    # Infer parameter types from patterns
     param_types = infer_multi_clause_param_types(clauses, arity)
-
-    # Add function to env for recursion (with inferred param types)
     self_type = {:fn, param_types, :any}
-    extended_env = Map.put(env, name, self_type)
+    extended_ctx = %{ctx | env: Map.put(ctx.env, name, self_type)}
 
-    # Type check each clause
-    typed_clauses_result = Enum.reduce_while(clauses, {:ok, []}, fn {pattern, body}, {:ok, acc} ->
-      # Extract bindings from pattern
+    typed_clauses_result = Enum.reduce_while(clauses, {:ok, [], extended_ctx}, fn {pattern, body}, {:ok, acc, ctx} ->
       bindings = extract_multi_pattern_bindings(pattern)
-      clause_env = Enum.reduce(bindings, extended_env, fn {var, type}, e ->
+      clause_ctx = %{ctx | env: Enum.reduce(bindings, ctx.env, fn {var, type}, e ->
         Map.put(e, var, type)
-      end)
+      end)}
 
-      case check(body, clause_env) do
-        {:ok, body_type, typed_body} ->
-          typed_pattern = type_multi_pattern(pattern, env)
-          {:cont, {:ok, [{typed_pattern, typed_body, body_type} | acc]}}
+      case check_s(body, clause_ctx) do
+        {:ok, body_type, typed_body, ctx} ->
+          typed_pattern = type_multi_pattern(pattern, ctx.env)
+          {:cont, {:ok, [{typed_pattern, typed_body, body_type} | acc], ctx}}
         error ->
           {:halt, error}
       end
     end)
 
     case typed_clauses_result do
-      {:ok, typed_clauses} ->
-        # Unify return types from all clauses
+      {:ok, typed_clauses, ctx} ->
         ret_types = Enum.map(typed_clauses, fn {_, _, ret_type} -> ret_type end)
         unified_ret_type = join_types_list(ret_types)
         func_type = {:fn, param_types, unified_ret_type}
-        {:ok, func_type, {:defn_multi, name, arity, Enum.reverse(typed_clauses), func_type}}
+        {:ok, func_type, {:defn_multi, name, arity, Enum.reverse(typed_clauses), func_type}, ctx}
       error -> error
     end
   end
 
-  # Record construction: (point 1 2) when point is a record type
-  # Handled in function call - lookup_function returns the constructor type
-
-  # Extern declaration: (extern erlang:hd [:any] :any)
-  # Registers the function signature in the environment
-  defp check_impl({:extern, mod, func, arg_types, ret_type}, _env) do
-    # Parse type expressions (e.g., {:call, :List, [:any]} → {:list, :any})
+  # Extern declaration
+  defp check_impl_s({:extern, mod, func, arg_types, ret_type}, ctx) do
     parsed_arg_types = Enum.map(arg_types, &parse_type_expr/1)
     parsed_ret_type = parse_type_expr(ret_type)
     func_type = {:fn, parsed_arg_types, parsed_ret_type}
-    {:ok, :extern, {:extern, mod, func, func_type}}
+    {:ok, :extern, {:extern, mod, func, func_type}, ctx}
   end
 
-  # Module declaration: (ns MyModule)
-  # Compile-time only - sets the module name for the current file
-  defp check_impl({:ns, name}, _env) do
-    {:ok, :ns, {:ns, name}}
-  end
+  # Module declaration
+  defp check_impl_s({:ns, name}, ctx), do: {:ok, :ns, {:ns, name}, ctx}
 
-  # Import declaration: (import Std.List) or (import Std.List :as L)
-  # Compile-time only - brings another module's exports into scope
-  # The actual loading of the interface is done by the build system
-  defp check_impl({:import, module, alias_name}, _env) do
-    {:ok, :import, {:import, module, alias_name}}
-  end
+  # Import declaration
+  defp check_impl_s({:import, module, alias_name}, ctx), do: {:ok, :import, {:import, module, alias_name}, ctx}
 
   # Type class declaration
-  defp check_impl({:defclass, class_name, type_params, methods}, env) do
-    # Validate: class definition is already collected in signature pass
-    classes = Map.get(env, :__classes__, %{})
+  defp check_impl_s({:defclass, class_name, type_params, methods}, ctx) do
+    classes = Map.get(ctx.env, :__classes__, %{})
     case Map.get(classes, class_name) do
       {:class, _, _, _, _} ->
-        {:ok, :defclass, {:defclass, class_name, type_params, methods, :defclass}}
+        {:ok, :defclass, {:defclass, class_name, type_params, methods, :defclass}, ctx}
       {:class, _, _, _} ->
-        {:ok, :defclass, {:defclass, class_name, type_params, methods, :defclass}}
+        {:ok, :defclass, {:defclass, class_name, type_params, methods, :defclass}, ctx}
       nil ->
         {:error, Errors.unknown_expression({:defclass, class_name})}
     end
   end
 
-  # Type class instance
+  # Instance and constrained instance: delegate method body checking to old check_impl
+  defp check_impl_s({:instance, class_name, for_type, methods}, ctx) do
+    case check_impl({:instance, class_name, for_type, methods}, ctx.env) do
+      {:ok, type, ast} -> {:ok, type, ast, ctx}
+      {:error, _} = err -> err
+    end
+  end
+
+  defp check_impl_s({:instance_constrained, class_name, type_name, type_params, constraints, methods}, ctx) do
+    case check_impl({:instance_constrained, class_name, type_name, type_params, constraints, methods}, ctx.env) do
+      {:ok, type, ast} -> {:ok, type, ast, ctx}
+      {:error, _} = err -> err
+    end
+  end
+
+  defp check_impl_s({:deftype_deriving, name, type_def, classes}, ctx) do
+    case check_impl({:deftype_deriving, name, type_def, classes}, ctx.env) do
+      {:ok, type, ast} -> {:ok, type, ast, ctx}
+      {:error, _} = err -> err
+    end
+  end
+
+  # Parse error propagation
+  defp check_impl_s({:error, %Error{} = error}, _ctx), do: {:error, error}
+  defp check_impl_s({:error, msg}, _ctx) when is_binary(msg), do: {:error, Errors.parse_error(msg)}
+
+  # ============================================================================
+  # Legacy check_impl clauses — retained for instance/deriving bodies only
+  # These call check(body, local_env) which re-enters through check/2 → check_s
+  # ============================================================================
+
   defp check_impl({:instance, class_name, for_type, methods}, env) do
     classes = Map.get(env, :__classes__, %{})
     case Map.get(classes, class_name) do
@@ -1177,6 +1071,25 @@ defmodule Vaisto.TypeChecker do
     {:error, _} = err -> err
   end
 
+  # Standalone deftype_deriving (single expression, not in a module)
+  defp check_impl({:deftype_deriving, name, type_def, classes}, env) do
+    loc = %Vaisto.Parser.Loc{}
+    case check({:deftype, name, type_def, loc}, env) do
+      {:ok, _type, typed_deftype} ->
+        new_env = update_env_from_typed_form(typed_deftype, env)
+        results = Enum.map(classes, fn class ->
+          synthesize_and_check_instance(class, name, type_def, loc, new_env)
+        end)
+        case Enum.find(results, &match?({:error, _}, &1)) do
+          {:error, _} = err -> err
+          nil ->
+            typed_instances = Enum.map(results, fn {:ok, _t, typed} -> typed end)
+            {:ok, :module, {:module, [typed_deftype | typed_instances]}}
+        end
+      {:error, _} = err -> err
+    end
+  end
+
   # Build mapping from tvar IDs in a resolved type to named type params
   defp build_tvar_to_param_mapping({:sum, _name, variants}, type_params) do
     tvar_ids = variants
@@ -1230,35 +1143,6 @@ defmodule Vaisto.TypeChecker do
   defp extract_class_parts({:class, _name, tvar_ids, method_sigs}),
     do: {tvar_ids, method_sigs, %{}}
 
-  # Standalone deftype_deriving (single expression, not in a module)
-  defp check_impl({:deftype_deriving, name, type_def, classes}, env) do
-    loc = %Vaisto.Parser.Loc{}
-    case check({:deftype, name, type_def, loc}, env) do
-      {:ok, _type, typed_deftype} ->
-        new_env = update_env_from_typed_form(typed_deftype, env)
-        results = Enum.map(classes, fn class ->
-          synthesize_and_check_instance(class, name, type_def, loc, new_env)
-        end)
-        case Enum.find(results, &match?({:error, _}, &1)) do
-          {:error, _} = err -> err
-          nil ->
-            typed_instances = Enum.map(results, fn {:ok, _t, typed} -> typed end)
-            {:ok, :module, {:module, [typed_deftype | typed_instances]}}
-        end
-      {:error, _} = err -> err
-    end
-  end
-
-  # Handle parse errors (propagate them as type errors with location info)
-  # Parse error - location is stripped by generic handler and added via with_loc
-  defp check_impl({:error, %Error{} = error}, _env) do
-    {:error, error}
-  end
-
-  defp check_impl({:error, msg}, _env) when is_binary(msg) do
-    {:error, Errors.parse_error(msg)}
-  end
-
   # Parse type expressions from extern declarations and type annotations
   # Atom-wrapped type from parser: {:atom, :int} → :int
   defp parse_type_expr({:atom, t}) when is_atom(t), do: t
@@ -1288,9 +1172,7 @@ defmodule Vaisto.TypeChecker do
   defp strip_fn_loc({:fn, params, body, %Vaisto.Parser.Loc{}}), do: {:fn, params, body}
   defp strip_fn_loc(other), do: other
 
-  # Add location to error messages
-  # Pass through success results, enhance errors with line/column
-  defp with_loc({:ok, _, _} = result, _loc), do: result
+  # Add location to error messages — enhance errors with line/column
 
   # Structured error - add location info if not already present
   defp with_loc({:error, %Error{primary_span: nil} = error}, %Vaisto.Parser.Loc{} = loc) do
@@ -1315,190 +1197,6 @@ defmodule Vaisto.TypeChecker do
     end
   end
 
-  # Helper functions
-
-  # Map literal: #{ :key val :key2 val2 }
-  # Creates a row type with known fields
-  defp check_map_literal(pairs, env) do
-    case check_map_pairs(pairs, env, [], []) do
-      {:ok, field_types, typed_pairs} ->
-        # Row type with closed (no tail variable)
-        map_type = {:row, field_types, :closed}
-        {:ok, map_type, {:map, typed_pairs, map_type}}
-      error -> error
-    end
-  end
-
-  defp check_map_pairs([], _env, field_types, typed_pairs) do
-    {:ok, Enum.reverse(field_types), Enum.reverse(typed_pairs)}
-  end
-  defp check_map_pairs([{key_expr, val_expr} | rest], env, field_types, typed_pairs) do
-    with {:ok, _key_type, typed_key} <- check(key_expr, env),
-         {:ok, val_type, typed_val} <- check(val_expr, env) do
-      # Extract atom key for row type field
-      field_name = case typed_key do
-        {:lit, :atom, a} -> a
-        _ -> :dynamic  # Non-atom keys get dynamic field name
-      end
-      check_map_pairs(rest, env, [{field_name, val_type} | field_types], [{typed_key, typed_val} | typed_pairs])
-    end
-  end
-
-  defp check_builtin_map(func_name, list_expr, env) do
-    with {:ok, func_type} <- lookup_function(func_name, env),
-         {:ok, list_type, typed_list} <- check(list_expr, env) do
-      case {func_type, list_type} do
-        {{:fn, [_arg_type], ret_type}, {:list, _elem_type}} ->
-          result_type = {:list, ret_type}
-          {:ok, result_type, {:call, :map, [func_name, typed_list], result_type}}
-        {{:fn, [_], ret_type}, :any} ->
-          result_type = {:list, ret_type}
-          {:ok, result_type, {:call, :map, [func_name, typed_list], result_type}}
-        {{:fn, args, _}, _} when length(args) != 1 ->
-          {:error, Errors.mapper_arity(:map, 1, length(args))}
-        {_, {:list, _}} ->
-          {:error, Errors.not_a_function(:map, func_type)}
-        {_, :any} ->
-          {:error, Errors.not_a_function(:map, func_type)}
-        {_, other} ->
-          {:error, Errors.not_a_list(:map, other)}
-      end
-    end
-  end
-
-  defp check_builtin_map_anon(fn_expr, list_expr, env) do
-    with {:ok, func_type, typed_fn} <- check(fn_expr, env),
-         {:ok, list_type, typed_list} <- check(list_expr, env) do
-      case {func_type, list_type} do
-        {{:fn, [_arg_type], ret_type}, {:list, _elem_type}} ->
-          result_type = {:list, ret_type}
-          {:ok, result_type, {:call, :map, [typed_fn, typed_list], result_type}}
-        {{:fn, [_], ret_type}, :any} ->
-          result_type = {:list, ret_type}
-          {:ok, result_type, {:call, :map, [typed_fn, typed_list], result_type}}
-        {{:fn, args, _}, _} when length(args) != 1 ->
-          {:error, Errors.mapper_arity(:map, 1, length(args))}
-        {_, other} ->
-          {:error, Errors.not_a_list(:map, other)}
-      end
-    end
-  end
-
-  defp check_builtin_filter(func_name, list_expr, env) do
-    with {:ok, func_type} <- lookup_function(func_name, env),
-         {:ok, list_type, typed_list} <- check(list_expr, env) do
-      case {func_type, list_type} do
-        {{:fn, [_arg_type], :bool}, {:list, elem_type}} ->
-          {:ok, list_type, {:call, :filter, [func_name, typed_list], {:list, elem_type}}}
-        {{:fn, [_arg_type], :any}, {:list, elem_type}} ->
-          {:ok, list_type, {:call, :filter, [func_name, typed_list], {:list, elem_type}}}
-        {{:fn, [_], :bool}, :any} ->
-          {:ok, {:list, :any}, {:call, :filter, [func_name, typed_list], {:list, :any}}}
-        {{:fn, [_], ret_type}, _} when ret_type not in [:bool, :any] ->
-          {:error, Errors.predicate_not_bool(ret_type)}
-        {{:fn, args, _}, _} when length(args) != 1 ->
-          {:error, Errors.mapper_arity(:filter, 1, length(args))}
-        {_, {:list, _}} ->
-          {:error, Errors.not_a_function(:filter, func_type)}
-        {_, :any} ->
-          {:error, Errors.not_a_function(:filter, func_type)}
-        {_, other} ->
-          {:error, Errors.not_a_list(:filter, other)}
-      end
-    end
-  end
-
-  defp check_builtin_filter_anon(fn_expr, list_expr, env) do
-    with {:ok, func_type, typed_fn} <- check(fn_expr, env),
-         {:ok, list_type, typed_list} <- check(list_expr, env) do
-      case {func_type, list_type} do
-        {{:fn, [_arg_type], :bool}, {:list, elem_type}} ->
-          {:ok, list_type, {:call, :filter, [typed_fn, typed_list], {:list, elem_type}}}
-        {{:fn, [_arg_type], :any}, {:list, elem_type}} ->
-          {:ok, list_type, {:call, :filter, [typed_fn, typed_list], {:list, elem_type}}}
-        {{:fn, [_], :bool}, :any} ->
-          {:ok, {:list, :any}, {:call, :filter, [typed_fn, typed_list], {:list, :any}}}
-        {{:fn, [_], ret_type}, _} when ret_type not in [:bool, :any] ->
-          {:error, Errors.predicate_not_bool(ret_type)}
-        {{:fn, args, _}, _} when length(args) != 1 ->
-          {:error, Errors.mapper_arity(:filter, 1, length(args))}
-        {_, other} ->
-          {:error, Errors.not_a_list(:filter, other)}
-      end
-    end
-  end
-
-  defp check_builtin_fold(func_name, init_expr, list_expr, env) do
-    with {:ok, func_type} <- lookup_function(func_name, env),
-         {:ok, init_type, typed_init} <- check(init_expr, env),
-         {:ok, list_type, typed_list} <- check(list_expr, env) do
-      case {func_type, list_type} do
-        {{:fn, [_acc_type, _elem_type], ret_type}, {:list, _}} ->
-          {:ok, ret_type, {:call, :fold, [func_name, typed_init, typed_list], ret_type}}
-        {{:fn, [_, _], ret_type}, :any} ->
-          {:ok, ret_type, {:call, :fold, [func_name, typed_init, typed_list], ret_type}}
-        {{:fn, args, _}, _} when length(args) != 2 ->
-          {:error, Errors.mapper_arity(:fold, 2, length(args))}
-        {_, {:list, _}} ->
-          {:ok, init_type, {:call, :fold, [func_name, typed_init, typed_list], init_type}}
-        {_, :any} ->
-          {:ok, init_type, {:call, :fold, [func_name, typed_init, typed_list], init_type}}
-        {_, other} ->
-          {:error, Errors.not_a_list(:fold, other)}
-      end
-    end
-  end
-
-  defp check_builtin_fold_anon(fn_expr, init_expr, list_expr, env) do
-    with {:ok, func_type, typed_fn} <- check(fn_expr, env),
-         {:ok, init_type, typed_init} <- check(init_expr, env),
-         {:ok, list_type, typed_list} <- check(list_expr, env) do
-      case {func_type, list_type} do
-        {{:fn, [_acc_type, _elem_type], ret_type}, {:list, _}} ->
-          {:ok, ret_type, {:call, :fold, [typed_fn, typed_init, typed_list], ret_type}}
-        {{:fn, [_, _], ret_type}, :any} ->
-          {:ok, ret_type, {:call, :fold, [typed_fn, typed_init, typed_list], ret_type}}
-        {{:fn, args, _}, _} when length(args) != 2 ->
-          {:error, Errors.mapper_arity(:fold, 2, length(args))}
-        {_, {:list, _}} ->
-          {:ok, init_type, {:call, :fold, [typed_fn, typed_init, typed_list], init_type}}
-        {_, :any} ->
-          {:ok, init_type, {:call, :fold, [typed_fn, typed_init, typed_list], init_type}}
-        {_, other} ->
-          {:error, Errors.not_a_list(:fold, other)}
-      end
-    end
-  end
-
-  # Helper for generic function call handling (used when user overrides built-ins)
-  defp check_generic_call(func, args, env) do
-    with {:ok, func_type} <- lookup_function(func, env),
-         {:ok, arg_types, typed_args} <- check_args(args, env),
-         {:ok, ret_type} <- unify_call(func_type, arg_types) do
-      {:ok, ret_type, {:call, func, typed_args, ret_type}}
-    end
-  end
-
-  # Type class method call resolution
-  # Instantiates fresh tvars, checks args, unifies, then resolves the class constraint
-  defp check_class_method_call(method_name, vars, constraints, fn_type, args, env) do
-    # Create fresh tvar substitution (using large IDs to avoid collision)
-    base_id = :erlang.unique_integer([:positive, :monotonic]) * 1000
-    fresh_subst = vars
-      |> Enum.with_index()
-      |> Map.new(fn {var, idx} -> {var, {:tvar, base_id + idx}} end)
-
-    inst_fn_type = Vaisto.TypeSystem.Core.apply_subst(fresh_subst, fn_type)
-    inst_constraints = Enum.map(constraints, fn {class, t} ->
-      {class, Vaisto.TypeSystem.Core.apply_subst(fresh_subst, t)}
-    end)
-
-    with {:ok, arg_types, typed_args} <- check_args(args, env),
-         {:ok, ret_type} <- unify_call(inst_fn_type, arg_types, args) do
-      # Resolve constraints: check if concrete instances exist
-      resolve_class_constraints(inst_constraints, method_name, ret_type, typed_args, arg_types, env)
-    end
-  end
 
   defp resolve_class_constraints(constraints, method_name, ret_type, typed_args, arg_types, env) do
     instances = Map.get(env, :__instances__, %{})
@@ -1741,6 +1439,112 @@ defmodule Vaisto.TypeChecker do
   defp typed_ast_type({:fn_ref, _, _, type}), do: type
   defp typed_ast_type(_), do: :any
 
+  # ============================================================================
+  # Apply substitution to typed AST — resolves all tvars in the output
+  # ============================================================================
+
+  alias Vaisto.TypeSystem.Core, as: C
+
+  defp apply_subst_to_ast(subst, ast) when subst == %{}, do: ast
+
+  # Literals — no type to resolve
+  defp apply_subst_to_ast(_subst, {:lit, _, _} = lit), do: lit
+
+  # Variables and references
+  defp apply_subst_to_ast(subst, {:var, name, type}),
+    do: {:var, name, C.apply_subst(subst, type)}
+  defp apply_subst_to_ast(subst, {:fn_ref, name, arity, type}),
+    do: {:fn_ref, name, arity, C.apply_subst(subst, type)}
+
+  # Collections
+  defp apply_subst_to_ast(subst, {:list, elems, type}),
+    do: {:list, apply_subst_to_asts(subst, elems), C.apply_subst(subst, type)}
+  defp apply_subst_to_ast(subst, {:cons, head, tail, type}),
+    do: {:cons, apply_subst_to_ast(subst, head), apply_subst_to_ast(subst, tail), C.apply_subst(subst, type)}
+  defp apply_subst_to_ast(subst, {:tuple, elems, type}),
+    do: {:tuple, apply_subst_to_asts(subst, elems), C.apply_subst(subst, type)}
+  defp apply_subst_to_ast(subst, {:map, pairs, type}),
+    do: {:map, Enum.map(pairs, fn {k, v} -> {apply_subst_to_ast(subst, k), apply_subst_to_ast(subst, v)} end), C.apply_subst(subst, type)}
+
+  # Control flow
+  defp apply_subst_to_ast(subst, {:if, cond_ast, then_ast, else_ast, type}),
+    do: {:if, apply_subst_to_ast(subst, cond_ast), apply_subst_to_ast(subst, then_ast), apply_subst_to_ast(subst, else_ast), C.apply_subst(subst, type)}
+  defp apply_subst_to_ast(subst, {:match, expr, clauses, type}),
+    do: {:match, apply_subst_to_ast(subst, expr), apply_subst_to_clauses(subst, clauses), C.apply_subst(subst, type)}
+  defp apply_subst_to_ast(subst, {:receive, clauses, type}),
+    do: {:receive, apply_subst_to_clauses(subst, clauses), C.apply_subst(subst, type)}
+  defp apply_subst_to_ast(subst, {:do, exprs, type}),
+    do: {:do, apply_subst_to_asts(subst, exprs), C.apply_subst(subst, type)}
+
+  # Bindings
+  defp apply_subst_to_ast(subst, {:let, bindings, body, type}),
+    do: {:let, bindings, apply_subst_to_ast(subst, body), C.apply_subst(subst, type)}
+  defp apply_subst_to_ast(subst, {:fn, params, body, type}),
+    do: {:fn, params, apply_subst_to_ast(subst, body), C.apply_subst(subst, type)}
+
+  # Calls
+  defp apply_subst_to_ast(subst, {:call, func, args, type}),
+    do: {:call, func, apply_subst_to_asts(subst, args), C.apply_subst(subst, type)}
+  defp apply_subst_to_ast(subst, {:apply, func_ast, args, type}),
+    do: {:apply, apply_subst_to_ast(subst, func_ast), apply_subst_to_asts(subst, args), C.apply_subst(subst, type)}
+
+  # Definitions
+  defp apply_subst_to_ast(subst, {:defn, name, params, body, type}),
+    do: {:defn, name, params, apply_subst_to_ast(subst, body), C.apply_subst(subst, type)}
+  defp apply_subst_to_ast(subst, {:defn_multi, name, arity, clauses, type}),
+    do: {:defn_multi, name, arity, apply_subst_to_clauses(subst, clauses), C.apply_subst(subst, type)}
+  defp apply_subst_to_ast(subst, {:defval, name, value, type}),
+    do: {:defval, name, apply_subst_to_ast(subst, value), C.apply_subst(subst, type)}
+  defp apply_subst_to_ast(_subst, {:deftype, _, _, _} = node), do: node
+
+  # Process/concurrency
+  defp apply_subst_to_ast(subst, {:process, name, init, handlers, type}),
+    do: {:process, name, apply_subst_to_ast(subst, init), apply_subst_to_clauses(subst, handlers), C.apply_subst(subst, type)}
+  defp apply_subst_to_ast(subst, {:supervise, strategy, children, type}),
+    do: {:supervise, strategy, apply_subst_to_asts(subst, children), C.apply_subst(subst, type)}
+
+  # Field access
+  defp apply_subst_to_ast(subst, {:field_access, expr, field, type}),
+    do: {:field_access, apply_subst_to_ast(subst, expr), field, C.apply_subst(subst, type)}
+  defp apply_subst_to_ast(subst, {:field_access, expr, field, type, constraint}),
+    do: {:field_access, apply_subst_to_ast(subst, expr), field, C.apply_subst(subst, type), C.apply_subst(subst, constraint)}
+
+  # Declarations — pass through
+  defp apply_subst_to_ast(_subst, {:extern, _, _, _} = node), do: node
+  defp apply_subst_to_ast(_subst, {:ns, _} = node), do: node
+  defp apply_subst_to_ast(_subst, {:import, _, _} = node), do: node
+
+  # Type class nodes
+  defp apply_subst_to_ast(subst, {:class_call, class, method, inst, args, type}),
+    do: {:class_call, class, method, inst, apply_subst_to_asts(subst, args), C.apply_subst(subst, type)}
+  defp apply_subst_to_ast(subst, {:class_call, class, method, inst, args, type, constraints}),
+    do: {:class_call, class, method, inst, apply_subst_to_asts(subst, args), C.apply_subst(subst, type), constraints}
+  defp apply_subst_to_ast(subst, {:constraint_call, idx, method, args, type}),
+    do: {:constraint_call, idx, method, apply_subst_to_asts(subst, args), C.apply_subst(subst, type)}
+
+  # Instance nodes
+  defp apply_subst_to_ast(_subst, {:instance, _, _, _, _} = node), do: node
+  defp apply_subst_to_ast(_subst, {:instance_constrained, _, _, _, _, _, _} = node), do: node
+  defp apply_subst_to_ast(_subst, {:defclass, _, _, _, _} = node), do: node
+
+  # Module container
+  defp apply_subst_to_ast(subst, {:module, forms}),
+    do: {:module, apply_subst_to_asts(subst, forms)}
+
+  # Catch-all — pass through unchanged (patterns, atoms, etc.)
+  defp apply_subst_to_ast(_subst, other), do: other
+
+  defp apply_subst_to_asts(subst, asts) when is_list(asts),
+    do: Enum.map(asts, &apply_subst_to_ast(subst, &1))
+
+  defp apply_subst_to_clauses(subst, clauses) when is_list(clauses) do
+    Enum.map(clauses, fn
+      {pattern, body, type} ->
+        {pattern, apply_subst_to_ast(subst, body), C.apply_subst(subst, type)}
+      other -> other
+    end)
+  end
+
   # Resolve the constraint type from argument types
   # If the constraint is {:tvar, N}, look at actual arg types
   defp resolve_constraint_type({:tvar, _}, [first_arg_type | _]) do
@@ -1794,243 +1598,6 @@ defmodule Vaisto.TypeChecker do
     Map.put(env, :__local_vars__, MapSet.put(local_vars, name))
   end
 
-  defp check_bindings([], env, acc) do
-    {:ok, env, Enum.reverse(acc)}
-  end
-
-  # Simple variable binding: (let [x expr] ...)
-  defp check_bindings([{name, expr} | rest], env, acc) when is_atom(name) do
-    case check(expr, env) do
-      {:ok, type, typed_expr} ->
-        extended_env = env
-          |> Map.put(name, type)
-          |> add_local_var(name)
-        check_bindings(rest, extended_env, [{name, typed_expr, type} | acc])
-      error -> error
-    end
-  end
-
-  # Tuple pattern destructuring: (let [{x y} expr] ...)
-  defp check_bindings([{{:tuple_pattern, elements}, expr} | rest], env, acc) do
-    case check(expr, env) do
-      {:ok, _type, typed_expr} ->
-        # Extract variable bindings from the tuple pattern
-        bindings = extract_pattern_bindings({:tuple_pattern, elements}, :any, env)
-        extended_env = Enum.reduce(bindings, env, fn {var, var_type}, e ->
-          Map.put(e, var, var_type)
-        end)
-        # Type the pattern
-        typed_pattern = type_pattern({:tuple_pattern, elements}, :any, env)
-        check_bindings(rest, extended_env, [{typed_pattern, typed_expr, :any} | acc])
-      error -> error
-    end
-  end
-
-  # Cons pattern destructuring in let: (let [[head | tail] expr] ...)
-  # Represented as {:bracket, {:cons, head, tail}}
-  defp check_bindings([{{:bracket, {:cons, head, tail}}, expr} | rest], env, acc) do
-    case check(expr, env) do
-      {:ok, {:list, elem_type}, typed_expr} ->
-        # head gets elem_type, tail gets list type
-        extended_env = env
-          |> Map.put(head, elem_type)
-          |> add_local_var(head)
-          |> Map.put(tail, {:list, elem_type})
-          |> add_local_var(tail)
-        typed_pattern = {:cons_pattern, head, tail, {:list, elem_type}}
-        check_bindings(rest, extended_env, [{typed_pattern, typed_expr, {:list, elem_type}} | acc])
-      {:ok, type, typed_expr} ->
-        # Expression type not a list - use :any for elements
-        extended_env = env
-          |> Map.put(head, :any)
-          |> add_local_var(head)
-          |> Map.put(tail, {:list, :any})
-          |> add_local_var(tail)
-        typed_pattern = {:cons_pattern, head, tail, type}
-        check_bindings(rest, extended_env, [{typed_pattern, typed_expr, type} | acc])
-      error -> error
-    end
-  end
-
-  # Check match clauses - each clause pattern extends env for its body
-  # Also checks exhaustiveness for sum types
-  defp check_match_clauses(clauses, expr_type, env) do
-    results = Enum.map(clauses, fn {pattern, body} ->
-      check_match_clause(pattern, body, expr_type, env)
-    end)
-
-    case Enum.find(results, &match?({:error, _}, &1)) do
-      {:error, _} = err -> err
-      nil ->
-        typed_clauses = Enum.map(results, fn {:ok, clause} -> clause end)
-        [{_pattern, _body, first_type} | rest_clauses] = typed_clauses
-
-        # Unify all branch types, accumulating the result (e.g. int+float→float)
-        unified_result = Enum.reduce_while(rest_clauses, {:ok, first_type}, fn {_, _, body_type}, {:ok, acc_type} ->
-          case unify_types(acc_type, body_type) do
-            {:ok, unified} -> {:cont, {:ok, unified}}
-            {:error, _} = err -> {:halt, err}
-          end
-        end)
-
-        case unified_result do
-          {:error, _} = err -> err
-          {:ok, result_type} ->
-            # Exhaustiveness check for sum types
-            case check_exhaustiveness(clauses, expr_type) do
-              :ok -> {:ok, result_type, typed_clauses}
-              {:error, _} = err -> err
-            end
-        end
-    end
-  end
-
-  # Check if pattern matching on sum types covers all variants
-  defp check_exhaustiveness(clauses, {:sum, type_name, variants}) do
-    # Extract constructor names from patterns
-    covered = clauses
-      |> Enum.map(fn {pattern, _body} -> extract_variant_name(pattern) end)
-      |> Enum.reject(&is_nil/1)
-      |> MapSet.new()
-
-    # Check if there's a catch-all pattern (underscore or variable)
-    has_catch_all = Enum.any?(clauses, fn {pattern, _body} ->
-      is_catch_all_pattern?(pattern)
-    end)
-
-    if has_catch_all do
-      :ok
-    else
-      all_variants = variants |> Enum.map(fn {name, _} -> name end) |> MapSet.new()
-      missing = MapSet.difference(all_variants, covered)
-
-      if MapSet.size(missing) == 0 do
-        :ok
-      else
-        {:error, Errors.non_exhaustive_sum(type_name, MapSet.to_list(missing))}
-      end
-    end
-  end
-
-  # For :any type with tuple patterns, check for non-exhaustive result-like matches
-  # Only error on clearly incomplete patterns like matching {:ok v} without {:error e}
-  # Other single-pattern tuple matches (like {:point x y}) are allowed
-  defp check_exhaustiveness(clauses, :any) do
-    has_catch_all = Enum.any?(clauses, fn {pattern, _body} ->
-      is_catch_all_pattern?(pattern)
-    end)
-
-    if has_catch_all do
-      :ok
-    else
-      # Check for result-like patterns: {:ok ...} without {:error ...} or vice versa
-      tags = clauses
-        |> Enum.map(fn {pattern, _body} -> extract_tuple_tag(pattern) end)
-        |> Enum.filter(&(&1 != nil))
-        |> MapSet.new()
-
-      result_tags = MapSet.new([:ok, :error])
-      has_result_tags = not MapSet.disjoint?(tags, result_tags)
-      missing_result_tags = MapSet.difference(result_tags, tags)
-
-      # Only error if using result-like tags without covering both
-      if has_result_tags and MapSet.size(missing_result_tags) > 0 do
-        {:error, Errors.non_exhaustive_result(MapSet.to_list(missing_result_tags))}
-      else
-        :ok
-      end
-    end
-  end
-
-  # Non-sum types don't need exhaustiveness checking (for now)
-  defp check_exhaustiveness(_clauses, _expr_type), do: :ok
-  # Extract variant constructor name from pattern
-  defp extract_variant_name({:call, name, _, _}), do: name
-  defp extract_variant_name({:pattern, name, _, _}), do: name
-  defp extract_variant_name(_), do: nil
-
-  # Extract tag (first element) from tuple pattern
-  # Parser produces: {:atom, :ok} for atom literals
-  # TypeChecker produces: {:lit, :atom, :ok} for typed literals
-  defp extract_tuple_tag({:tuple, [{:lit, :atom, tag} | _], _}) when is_atom(tag), do: tag
-  defp extract_tuple_tag({:tuple, [{:atom, tag} | _], _}) when is_atom(tag), do: tag
-  defp extract_tuple_tag({:tuple, [tag | _], _}) when is_atom(tag), do: tag
-  defp extract_tuple_tag({:tuple_pattern, [{:lit, :atom, tag} | _]}) when is_atom(tag), do: tag
-  defp extract_tuple_tag({:tuple_pattern, [{:atom, tag} | _]}) when is_atom(tag), do: tag
-  defp extract_tuple_tag({:tuple_pattern, [tag | _]}) when is_atom(tag), do: tag
-  defp extract_tuple_tag(_), do: nil
-
-  # Check if pattern is a catch-all (matches anything)
-  defp is_catch_all_pattern?(:_), do: true
-  defp is_catch_all_pattern?(name) when is_atom(name) and name != :_, do: true
-  defp is_catch_all_pattern?({:var, _, _}), do: true
-  defp is_catch_all_pattern?(_), do: false
-
-  defp check_match_clause(pattern, body, expr_type, env) do
-    # Fresh-instantiate sum type tvars per clause so each branch is independent
-    instantiated_type = instantiate_sum_tvars(expr_type)
-
-    # Extract bindings from pattern and add to env
-    bindings = extract_pattern_bindings(pattern, instantiated_type, env)
-    extended_env = Enum.reduce(bindings, env, fn {name, type}, acc ->
-      Map.put(acc, name, type)
-    end)
-
-    # Type the pattern itself
-    typed_pattern = type_pattern(pattern, instantiated_type, env)
-
-    case check(body, extended_env) do
-      {:ok, body_type, typed_body} ->
-        {:ok, {typed_pattern, typed_body, body_type}}
-      error -> error
-    end
-  end
-
-  # Check receive clauses - patterns receive messages typed as :any
-  defp check_receive_clauses(clauses, env) do
-    results = Enum.map(clauses, fn {pattern, body} ->
-      check_receive_clause(pattern, body, env)
-    end)
-
-    case Enum.find(results, &match?({:error, _}, &1)) do
-      {:error, _} = err -> err
-      nil ->
-        typed_clauses = Enum.map(results, fn {:ok, clause} -> clause end)
-        # All clauses must have the same result type - use the first one
-        [{_pattern, _body, result_type} | _] = typed_clauses
-        {:ok, result_type, typed_clauses}
-    end
-  end
-
-  defp check_receive_clause(pattern, body, env) do
-    # Receive patterns match messages of type :any
-    # Extract bindings from pattern - variables get :any type
-    bindings = extract_pattern_bindings(pattern, :any, env)
-    extended_env = Enum.reduce(bindings, env, fn {name, type}, acc ->
-      Map.put(acc, name, type)
-    end)
-
-    # Type the pattern itself
-    typed_pattern = type_pattern(pattern, :any, env)
-
-    case check(body, extended_env) do
-      {:ok, body_type, typed_body} ->
-        {:ok, {typed_pattern, typed_body, body_type}}
-      error -> error
-    end
-  end
-
-  # Raw tuple expression: {:tuple_pattern, elements} when used as expression
-  # Returns :any type since raw Erlang tuples are for interop with untyped code
-  # This allows mixing different tuple shapes in if/match branches
-  defp check_tuple_expr(elements, env) do
-    case check_args(elements, env) do
-      {:ok, _types, typed_elements} ->
-        # Use :any for tuple type - these are for Erlang interop
-        {:ok, :any, {:tuple, typed_elements, :any}}
-      error -> error
-    end
-  end
 
   # Extract variable bindings from a pattern with proper types
   # (point x y) matching against {:record, :point, [{:x, :int}, {:y, :int}]}
@@ -2131,6 +1698,75 @@ defmodule Vaisto.TypeChecker do
   defp extract_pattern_bindings({:atom, _}, _type, _env), do: []
 
   defp extract_pattern_bindings(_, _, _), do: []
+
+  # Exhaustiveness checking for match expressions
+  defp check_exhaustiveness(clauses, {:sum, type_name, variants}) do
+    covered = clauses
+      |> Enum.map(fn {pattern, _body} -> extract_variant_name(pattern) end)
+      |> Enum.reject(&is_nil/1)
+      |> MapSet.new()
+
+    has_catch_all = Enum.any?(clauses, fn {pattern, _body} ->
+      is_catch_all_pattern?(pattern)
+    end)
+
+    if has_catch_all do
+      :ok
+    else
+      all_variants = variants |> Enum.map(fn {name, _} -> name end) |> MapSet.new()
+      missing = MapSet.difference(all_variants, covered)
+
+      if MapSet.size(missing) == 0 do
+        :ok
+      else
+        {:error, Errors.non_exhaustive_sum(type_name, MapSet.to_list(missing))}
+      end
+    end
+  end
+
+  defp check_exhaustiveness(clauses, :any) do
+    has_catch_all = Enum.any?(clauses, fn {pattern, _body} ->
+      is_catch_all_pattern?(pattern)
+    end)
+
+    if has_catch_all do
+      :ok
+    else
+      tags = clauses
+        |> Enum.map(fn {pattern, _body} -> extract_tuple_tag(pattern) end)
+        |> Enum.filter(&(&1 != nil))
+        |> MapSet.new()
+
+      result_tags = MapSet.new([:ok, :error])
+      has_result_tags = not MapSet.disjoint?(tags, result_tags)
+      missing_result_tags = MapSet.difference(result_tags, tags)
+
+      if has_result_tags and MapSet.size(missing_result_tags) > 0 do
+        {:error, Errors.non_exhaustive_result(MapSet.to_list(missing_result_tags))}
+      else
+        :ok
+      end
+    end
+  end
+
+  defp check_exhaustiveness(_clauses, _expr_type), do: :ok
+
+  defp extract_variant_name({:call, name, _, _}), do: name
+  defp extract_variant_name({:pattern, name, _, _}), do: name
+  defp extract_variant_name(_), do: nil
+
+  defp extract_tuple_tag({:tuple, [{:lit, :atom, tag} | _], _}) when is_atom(tag), do: tag
+  defp extract_tuple_tag({:tuple, [{:atom, tag} | _], _}) when is_atom(tag), do: tag
+  defp extract_tuple_tag({:tuple, [tag | _], _}) when is_atom(tag), do: tag
+  defp extract_tuple_tag({:tuple_pattern, [{:lit, :atom, tag} | _]}) when is_atom(tag), do: tag
+  defp extract_tuple_tag({:tuple_pattern, [{:atom, tag} | _]}) when is_atom(tag), do: tag
+  defp extract_tuple_tag({:tuple_pattern, [tag | _]}) when is_atom(tag), do: tag
+  defp extract_tuple_tag(_), do: nil
+
+  defp is_catch_all_pattern?(:_), do: true
+  defp is_catch_all_pattern?(name) when is_atom(name) and name != :_, do: true
+  defp is_catch_all_pattern?({:var, _, _}), do: true
+  defp is_catch_all_pattern?(_), do: false
 
   # Type a pattern for the typed AST
   # Normalize patterns with location metadata first
@@ -2348,160 +1984,357 @@ defmodule Vaisto.TypeChecker do
   defp type_multi_pattern(lit, _env) when is_integer(lit), do: {:lit, :int, lit}
   defp type_multi_pattern(lit, _env) when is_atom(lit), do: {:lit, :atom, lit}
 
-  defp check_args(args, env) do
-    results = Enum.map(args, &check(&1, env))
 
-    case Enum.find(results, &match?({:error, _}, &1)) do
-      {:error, _} = err -> err
-      nil ->
-        types = Enum.map(results, fn {:ok, t, _} -> t end)
-        typed = Enum.map(results, fn {:ok, _, ast} -> ast end)
-        {:ok, types, typed}
+  # Context-threaded map literal checking
+  defp check_map_literal_s(pairs, ctx) do
+    case check_map_pairs_s(pairs, ctx, [], []) do
+      {:ok, field_types, typed_pairs, ctx} ->
+        map_type = {:row, field_types, :closed}
+        {:ok, map_type, {:map, typed_pairs, map_type}, ctx}
+      error -> error
     end
   end
 
-  # Check a sequence of expressions, return typed list and type of last expression
-  defp check_exprs_sequence([], _env), do: {:ok, [], :unit}
-  defp check_exprs_sequence(exprs, env) do
-    results = Enum.map(exprs, &check(&1, env))
-
-    case Enum.find(results, &match?({:error, _}, &1)) do
-      {:error, _} = err -> err
-      nil ->
-        typed = Enum.map(results, fn {:ok, _, ast} -> ast end)
-        {_, last_type, _} = List.last(results)
-        {:ok, typed, last_type}
-    end
+  defp check_map_pairs_s([], ctx, field_types, typed_pairs) do
+    {:ok, Enum.reverse(field_types), Enum.reverse(typed_pairs), ctx}
   end
-
-  # Header clause to define default for original_args
-  defp unify_call(func_type, actual_args, original_args \\ [])
-
-  defp unify_call({:fn, expected_args, ret_type}, actual_args, original_args) do
-    if length(expected_args) != length(actual_args) do
-      {:error, Errors.arity_mismatch(:function, length(expected_args), length(actual_args))}
-    else
-      mismatches =
-        Enum.zip([expected_args, actual_args, original_args ++ List.duplicate(nil, length(actual_args))])
-        |> Enum.with_index()
-        |> Enum.filter(fn {{exp, act, _}, _} -> not types_match?(exp, act) end)
-
-      case mismatches do
-        [] -> {:ok, ret_type}
-        [{{expected, actual, orig_arg}, idx} | _] ->
-          # Extract location from original argument if available
-          span_opts = case extract_loc(orig_arg) do
-            nil -> []
-            loc -> [span: Error.span_from_loc(loc)]
-          end
-          {:error, Errors.type_mismatch(expected, actual,
-            Keyword.merge(span_opts, [note: "at argument #{idx + 1}"]))}
+  defp check_map_pairs_s([{key_expr, val_expr} | rest], ctx, field_types, typed_pairs) do
+    with {:ok, _key_type, typed_key, ctx} <- check_s(key_expr, ctx),
+         {:ok, val_type, typed_val, ctx} <- check_s(val_expr, ctx) do
+      field_name = case typed_key do
+        {:lit, :atom, a} -> a
+        _ -> :dynamic
       end
+      check_map_pairs_s(rest, ctx,
+        [{field_name, val_type} | field_types],
+        [{typed_key, typed_val} | typed_pairs])
     end
   end
 
-  # When the function type is :any (untyped higher-order function parameter)
-  # allow any arguments and return :any
-  defp unify_call(:any, _actual_args, _original_args) do
-    {:ok, :any}
+  # Context-threaded check_args: folds left-to-right, threading substitution
+  defp check_args_s(args, ctx) do
+    Enum.reduce_while(args, {:ok, [], [], ctx}, fn arg, {:ok, types, typed, ctx} ->
+      case check_s(arg, ctx) do
+        {:ok, type, ast, ctx} -> {:cont, {:ok, [type | types], [ast | typed], ctx}}
+        {:error, _} = err -> {:halt, err}
+      end
+    end)
+    |> case do
+      {:ok, types, typed, ctx} -> {:ok, Enum.reverse(types), Enum.reverse(typed), ctx}
+      {:error, _} = err -> err
+    end
   end
 
-  # Polymorphic call unification — uses real unification to enforce that
-  # type variables shared across parameters resolve consistently.
-  # E.g., (== : forall a. a -> a -> bool) rejects (== 1 "hello")
-  # Uses types_match? as fallback for :any and other types that Unify doesn't handle.
-  defp unify_call_poly({:fn, expected_args, ret_type}, actual_args, original_args) do
-    if length(expected_args) != length(actual_args) do
-      {:error, Errors.arity_mismatch(:function, length(expected_args), length(actual_args))}
-    else
-      result = Enum.zip([expected_args, actual_args, original_args ++ List.duplicate(nil, length(actual_args))])
-        |> Enum.with_index()
-        |> Enum.reduce_while({:ok, %{}}, fn {{exp, act, _orig}, idx}, {:ok, subst} ->
-          resolved_exp = Vaisto.TypeSystem.Core.apply_subst(subst, exp)
-          # :any is compatible with everything — skip unification for it
-          cond do
-            resolved_exp == :any or act == :any ->
-              # If exp is a tvar, bind it to :any so subsequent args see consistency
-              case exp do
-                {:tvar, id} -> {:cont, {:ok, Map.put_new(subst, id, :any)}}
-                _ -> {:cont, {:ok, subst}}
-              end
+  # Context-threaded check_exprs_sequence: threads substitution through expression list
+  defp check_exprs_sequence_s([], ctx), do: {:ok, [], :unit, ctx}
+  defp check_exprs_sequence_s(exprs, ctx) do
+    Enum.reduce_while(exprs, {:ok, [], :unit, ctx}, fn expr, {:ok, typed, _last_type, ctx} ->
+      case check_s(expr, ctx) do
+        {:ok, type, ast, ctx} -> {:cont, {:ok, [ast | typed], type, ctx}}
+        {:error, _} = err -> {:halt, err}
+      end
+    end)
+    |> case do
+      {:ok, typed, last_type, ctx} -> {:ok, Enum.reverse(typed), last_type, ctx}
+      {:error, _} = err -> err
+    end
+  end
 
-            true ->
-              case Vaisto.TypeSystem.Unify.unify(resolved_exp, act, subst) do
-                {:ok, new_subst, _} -> {:cont, {:ok, new_subst}}
-                {:error, _} ->
-                  # Allow numeric widening (int ↔ float) for polymorphic args
-                  if numeric_compatible?(resolved_exp, act) do
-                    case exp do
-                      {:tvar, id} -> {:cont, {:ok, Map.put(subst, id, :num)}}
-                      _ -> {:cont, {:ok, subst}}
-                    end
-                  else
-                    {:halt, {:error, Errors.type_mismatch(resolved_exp, act, note: "at argument #{idx + 1}")}}
-                  end
-              end
+  # Context-threaded check_bindings: threads substitution through let bindings
+  defp check_bindings_s([], ctx, acc), do: {:ok, ctx, Enum.reverse(acc)}
+
+  defp check_bindings_s([{name, expr} | rest], ctx, acc) when is_atom(name) do
+    case check_s(expr, ctx) do
+      {:ok, type, typed_expr, ctx} ->
+        extended_ctx = %{ctx | env: ctx.env |> Map.put(name, type) |> add_local_var(name)}
+        check_bindings_s(rest, extended_ctx, [{name, typed_expr, type} | acc])
+      error -> error
+    end
+  end
+
+  defp check_bindings_s([{{:tuple_pattern, elements}, expr} | rest], ctx, acc) do
+    case check_s(expr, ctx) do
+      {:ok, _type, typed_expr, ctx} ->
+        bindings = extract_pattern_bindings({:tuple_pattern, elements}, :any, ctx.env)
+        extended_ctx = %{ctx | env: Enum.reduce(bindings, ctx.env, fn {var, var_type}, e ->
+          Map.put(e, var, var_type)
+        end)}
+        typed_pattern = type_pattern({:tuple_pattern, elements}, :any, ctx.env)
+        check_bindings_s(rest, extended_ctx, [{typed_pattern, typed_expr, :any} | acc])
+      error -> error
+    end
+  end
+
+  defp check_bindings_s([{{:bracket, {:cons, head, tail}}, expr} | rest], ctx, acc) do
+    case check_s(expr, ctx) do
+      {:ok, {:list, elem_type}, typed_expr, ctx} ->
+        extended_ctx = %{ctx | env: ctx.env
+          |> Map.put(head, elem_type) |> add_local_var(head)
+          |> Map.put(tail, {:list, elem_type}) |> add_local_var(tail)}
+        typed_pattern = {:cons_pattern, head, tail, {:list, elem_type}}
+        check_bindings_s(rest, extended_ctx, [{typed_pattern, typed_expr, {:list, elem_type}} | acc])
+      {:ok, type, typed_expr, ctx} ->
+        extended_ctx = %{ctx | env: ctx.env
+          |> Map.put(head, :any) |> add_local_var(head)
+          |> Map.put(tail, {:list, :any}) |> add_local_var(tail)}
+        typed_pattern = {:cons_pattern, head, tail, type}
+        check_bindings_s(rest, extended_ctx, [{typed_pattern, typed_expr, type} | acc])
+      error -> error
+    end
+  end
+
+  # Context-threaded check_match_clauses
+  defp check_match_clauses_s(clauses, expr_type, ctx) do
+    results = Enum.map(clauses, fn {pattern, body} ->
+      check_match_clause_s(pattern, body, expr_type, ctx)
+    end)
+
+    case Enum.find(results, &match?({:error, _}, &1)) do
+      {:error, _} = err -> err
+      nil ->
+        typed_clauses = Enum.map(results, fn {:ok, clause, _ctx} -> clause end)
+        # Thread ctx from last clause (accumulates all branch substitutions)
+        last_ctx = results |> List.last() |> elem(2)
+        [{_pattern, _body, first_type} | rest_clauses] = typed_clauses
+
+        unified_result = Enum.reduce_while(rest_clauses, {:ok, first_type, last_ctx}, fn {_, _, body_type}, {:ok, acc_type, ctx} ->
+          case unify_types_s(acc_type, body_type, ctx) do
+            {:ok, unified, ctx} -> {:cont, {:ok, unified, ctx}}
+            {:error, _} = err -> {:halt, err}
           end
         end)
 
-      case result do
-        {:ok, subst} -> {:ok, Vaisto.TypeSystem.Core.apply_subst(subst, ret_type)}
+        case unified_result do
+          {:error, _} = err -> err
+          {:ok, result_type, ctx} ->
+            case check_exhaustiveness(clauses, expr_type) do
+              :ok -> {:ok, result_type, typed_clauses, ctx}
+              {:error, _} = err -> err
+            end
+        end
+    end
+  end
+
+  defp check_match_clause_s(pattern, body, expr_type, ctx) do
+    instantiated_type = instantiate_sum_tvars(expr_type)
+    bindings = extract_pattern_bindings(pattern, instantiated_type, ctx.env)
+    extended_ctx = %{ctx | env: Enum.reduce(bindings, ctx.env, fn {name, type}, acc ->
+      Map.put(acc, name, type)
+    end)}
+    typed_pattern = type_pattern(pattern, instantiated_type, ctx.env)
+
+    case check_s(body, extended_ctx) do
+      {:ok, body_type, typed_body, ctx} ->
+        {:ok, {typed_pattern, typed_body, body_type}, ctx}
+      error -> error
+    end
+  end
+
+  # Context-threaded check_receive_clauses
+  defp check_receive_clauses_s(clauses, ctx) do
+    results = Enum.map(clauses, fn {pattern, body} ->
+      check_receive_clause_s(pattern, body, ctx)
+    end)
+
+    case Enum.find(results, &match?({:error, _}, &1)) do
+      {:error, _} = err -> err
+      nil ->
+        typed_clauses = Enum.map(results, fn {:ok, clause, _ctx} -> clause end)
+        last_ctx = results |> List.last() |> elem(2)
+        [{_pattern, _body, result_type} | _] = typed_clauses
+        {:ok, result_type, typed_clauses, last_ctx}
+    end
+  end
+
+  defp check_receive_clause_s(pattern, body, ctx) do
+    bindings = extract_pattern_bindings(pattern, :any, ctx.env)
+    extended_ctx = %{ctx | env: Enum.reduce(bindings, ctx.env, fn {name, type}, acc ->
+      Map.put(acc, name, type)
+    end)}
+    typed_pattern = type_pattern(pattern, :any, ctx.env)
+
+    case check_s(body, extended_ctx) do
+      {:ok, body_type, typed_body, ctx} ->
+        {:ok, {typed_pattern, typed_body, body_type}, ctx}
+      error -> error
+    end
+  end
+
+  # Context-threaded check_handlers
+  defp check_handlers_s(handlers, state_type, ctx) do
+    handler_ctx = %{ctx | env: Map.put(ctx.env, :state, state_type)}
+
+    Enum.reduce_while(handlers, {:ok, [], handler_ctx}, fn {msg, body}, {:ok, acc, ctx} ->
+      case check_s(body, ctx) do
+        {:ok, ret_type, typed_body, ctx} -> {:cont, {:ok, [{msg, typed_body, ret_type} | acc], ctx}}
+        {:error, _} = err -> {:halt, err}
+      end
+    end)
+    |> case do
+      {:ok, typed, ctx} -> {:ok, Enum.reverse(typed), ctx}
+      {:error, _} = err -> err
+    end
+  end
+
+  # Context-threaded check_generic_call
+  defp check_generic_call_s(func, args, ctx) do
+    with {:ok, func_type} <- lookup_function(func, ctx.env),
+         {:ok, arg_types, typed_args, ctx} <- check_args_s(args, ctx),
+         {:ok, ret_type, ctx} <- unify_call_s(func_type, arg_types, ctx) do
+      {:ok, ret_type, {:call, func, typed_args, ret_type}, ctx}
+    end
+  end
+
+  # Context-threaded check_class_method_call
+  defp check_class_method_call_s(method_name, vars, constraints, fn_type, args, ctx) do
+    base_id = :erlang.unique_integer([:positive, :monotonic]) * 1000
+    fresh_subst = vars
+      |> Enum.with_index()
+      |> Map.new(fn {var, idx} -> {var, {:tvar, base_id + idx}} end)
+
+    inst_fn_type = Vaisto.TypeSystem.Core.apply_subst(fresh_subst, fn_type)
+    inst_constraints = Enum.map(constraints, fn {class, t} ->
+      {class, Vaisto.TypeSystem.Core.apply_subst(fresh_subst, t)}
+    end)
+
+    with {:ok, arg_types, typed_args, ctx} <- check_args_s(args, ctx),
+         {:ok, ret_type, ctx} <- unify_call_s(inst_fn_type, arg_types, ctx, args) do
+      # Resolve constraints using the old helper (stateless resolution)
+      case resolve_class_constraints(inst_constraints, method_name, ret_type, typed_args, arg_types, ctx.env) do
+        {:ok, ret_type, ast} -> {:ok, ret_type, ast, ctx}
         {:error, _} = err -> err
       end
     end
   end
 
-  # Extract location from AST node (location is always the last element of tuple AST nodes)
-  defp extract_loc(nil), do: nil
-  defp extract_loc(tuple) when is_tuple(tuple) do
-    last = elem(tuple, tuple_size(tuple) - 1)
-    case last do
-      %Vaisto.Parser.Loc{} = loc -> loc
-      _ -> nil
+  # Context-threaded HOF builtins
+
+  defp check_builtin_map_s(func_name, list_expr, ctx) do
+    with {:ok, func_type} <- lookup_function(func_name, ctx.env),
+         {:ok, list_type, typed_list, ctx} <- check_s(list_expr, ctx) do
+      case {func_type, list_type} do
+        {{:fn, [_arg_type], ret_type}, {:list, _elem_type}} ->
+          result_type = {:list, ret_type}
+          {:ok, result_type, {:call, :map, [func_name, typed_list], result_type}, ctx}
+        {{:fn, [_], ret_type}, :any} ->
+          result_type = {:list, ret_type}
+          {:ok, result_type, {:call, :map, [func_name, typed_list], result_type}, ctx}
+        {{:fn, args, _}, _} when length(args) != 1 ->
+          {:error, Errors.mapper_arity(:map, 1, length(args))}
+        {_, {:list, _}} ->
+          {:error, Errors.not_a_function(:map, func_type)}
+        {_, :any} ->
+          {:error, Errors.not_a_function(:map, func_type)}
+        {_, other} ->
+          {:error, Errors.not_a_list(:map, other)}
+      end
     end
   end
-  defp extract_loc(_), do: nil
 
-  # Boolean subtype check — returns true if two types are structurally compatible.
-  # Used by `unify_call/3` to validate argument types against parameter types.
-  # Does NOT produce a substitution or a unified result type.
-  defp types_match?(:any, _), do: true
-  defp types_match?(_, :any), do: true
-  # Type variables match anything (for parametric polymorphism)
-  defp types_match?({:tvar, _}, _), do: true
-  defp types_match?(_, {:tvar, _}), do: true
-  defp types_match?(t, t), do: true
-  # Singleton atoms match each other (they unify to :atom)
-  defp types_match?({:atom, _}, {:atom, _}), do: true
-  defp types_match?({:atom, _}, :atom), do: true
-  defp types_match?(:atom, {:atom, _}), do: true
-  # Numeric subtyping (directional):
-  # - :int and :float are subtypes of :num (can pass int/float where num expected)
-  # - :int is NOT a subtype of :float (can't pass int where float expected - debatable)
-  # - :float is NOT a subtype of :int (can't pass float where int expected)
-  # expected = :num accepts actual = :int or :float
-  defp types_match?(:num, :int), do: true
-  defp types_match?(:num, :float), do: true
-  # But NOT: types_match?(:int, :float) or types_match?(:float, :int)
-  # List covariance: {:list, :int} matches {:list, :any}
-  defp types_match?({:list, elem1}, {:list, elem2}), do: types_match?(elem1, elem2)
-  # Function types: contravariant in args, covariant in return
-  defp types_match?({:fn, args1, ret1}, {:fn, args2, ret2}) when length(args1) == length(args2) do
-    args_match = Enum.zip(args1, args2) |> Enum.all?(fn {a1, a2} -> types_match?(a2, a1) end)
-    args_match and types_match?(ret1, ret2)
-  end
-  # Record types with same name match if fields match
-  defp types_match?({:record, name, fields1}, {:record, name, fields2}) do
-    Enum.all?(fields1, fn {field_name, type1} ->
-      case List.keyfind(fields2, field_name, 0) do
-        {^field_name, type2} -> types_match?(type1, type2)
-        nil -> false
+  defp check_builtin_map_anon_s(fn_expr, list_expr, ctx) do
+    with {:ok, func_type, typed_fn, ctx} <- check_s(fn_expr, ctx),
+         {:ok, list_type, typed_list, ctx} <- check_s(list_expr, ctx) do
+      case {func_type, list_type} do
+        {{:fn, [_arg_type], ret_type}, {:list, _elem_type}} ->
+          result_type = {:list, ret_type}
+          {:ok, result_type, {:call, :map, [typed_fn, typed_list], result_type}, ctx}
+        {{:fn, [_], ret_type}, :any} ->
+          result_type = {:list, ret_type}
+          {:ok, result_type, {:call, :map, [typed_fn, typed_list], result_type}, ctx}
+        {{:fn, args, _}, _} when length(args) != 1 ->
+          {:error, Errors.mapper_arity(:map, 1, length(args))}
+        {_, other} ->
+          {:error, Errors.not_a_list(:map, other)}
       end
-    end)
+    end
   end
-  # Sum types with same name always match
-  defp types_match?({:sum, name, _}, {:sum, name, _}), do: true
-  defp types_match?(_, _), do: false
+
+  defp check_builtin_filter_s(func_name, list_expr, ctx) do
+    with {:ok, func_type} <- lookup_function(func_name, ctx.env),
+         {:ok, list_type, typed_list, ctx} <- check_s(list_expr, ctx) do
+      case {func_type, list_type} do
+        {{:fn, [_arg_type], :bool}, {:list, elem_type}} ->
+          {:ok, list_type, {:call, :filter, [func_name, typed_list], {:list, elem_type}}, ctx}
+        {{:fn, [_arg_type], :any}, {:list, elem_type}} ->
+          {:ok, list_type, {:call, :filter, [func_name, typed_list], {:list, elem_type}}, ctx}
+        {{:fn, [_], :bool}, :any} ->
+          {:ok, {:list, :any}, {:call, :filter, [func_name, typed_list], {:list, :any}}, ctx}
+        {{:fn, [_], ret_type}, _} when ret_type not in [:bool, :any] ->
+          {:error, Errors.predicate_not_bool(ret_type)}
+        {{:fn, args, _}, _} when length(args) != 1 ->
+          {:error, Errors.mapper_arity(:filter, 1, length(args))}
+        {_, {:list, _}} ->
+          {:error, Errors.not_a_function(:filter, func_type)}
+        {_, :any} ->
+          {:error, Errors.not_a_function(:filter, func_type)}
+        {_, other} ->
+          {:error, Errors.not_a_list(:filter, other)}
+      end
+    end
+  end
+
+  defp check_builtin_filter_anon_s(fn_expr, list_expr, ctx) do
+    with {:ok, func_type, typed_fn, ctx} <- check_s(fn_expr, ctx),
+         {:ok, list_type, typed_list, ctx} <- check_s(list_expr, ctx) do
+      case {func_type, list_type} do
+        {{:fn, [_arg_type], :bool}, {:list, elem_type}} ->
+          {:ok, list_type, {:call, :filter, [typed_fn, typed_list], {:list, elem_type}}, ctx}
+        {{:fn, [_arg_type], :any}, {:list, elem_type}} ->
+          {:ok, list_type, {:call, :filter, [typed_fn, typed_list], {:list, elem_type}}, ctx}
+        {{:fn, [_], :bool}, :any} ->
+          {:ok, {:list, :any}, {:call, :filter, [typed_fn, typed_list], {:list, :any}}, ctx}
+        {{:fn, [_], ret_type}, _} when ret_type not in [:bool, :any] ->
+          {:error, Errors.predicate_not_bool(ret_type)}
+        {{:fn, args, _}, _} when length(args) != 1 ->
+          {:error, Errors.mapper_arity(:filter, 1, length(args))}
+        {_, other} ->
+          {:error, Errors.not_a_list(:filter, other)}
+      end
+    end
+  end
+
+  defp check_builtin_fold_s(func_name, init_expr, list_expr, ctx) do
+    with {:ok, func_type} <- lookup_function(func_name, ctx.env),
+         {:ok, init_type, typed_init, ctx} <- check_s(init_expr, ctx),
+         {:ok, list_type, typed_list, ctx} <- check_s(list_expr, ctx) do
+      case {func_type, list_type} do
+        {{:fn, [_acc_type, _elem_type], ret_type}, {:list, _}} ->
+          {:ok, ret_type, {:call, :fold, [func_name, typed_init, typed_list], ret_type}, ctx}
+        {{:fn, [_, _], ret_type}, :any} ->
+          {:ok, ret_type, {:call, :fold, [func_name, typed_init, typed_list], ret_type}, ctx}
+        {{:fn, args, _}, _} when length(args) != 2 ->
+          {:error, Errors.mapper_arity(:fold, 2, length(args))}
+        {_, {:list, _}} ->
+          {:ok, init_type, {:call, :fold, [func_name, typed_init, typed_list], init_type}, ctx}
+        {_, :any} ->
+          {:ok, init_type, {:call, :fold, [func_name, typed_init, typed_list], init_type}, ctx}
+        {_, other} ->
+          {:error, Errors.not_a_list(:fold, other)}
+      end
+    end
+  end
+
+  defp check_builtin_fold_anon_s(fn_expr, init_expr, list_expr, ctx) do
+    with {:ok, func_type, typed_fn, ctx} <- check_s(fn_expr, ctx),
+         {:ok, init_type, typed_init, ctx} <- check_s(init_expr, ctx),
+         {:ok, list_type, typed_list, ctx} <- check_s(list_expr, ctx) do
+      case {func_type, list_type} do
+        {{:fn, [_acc_type, _elem_type], ret_type}, {:list, _}} ->
+          {:ok, ret_type, {:call, :fold, [typed_fn, typed_init, typed_list], ret_type}, ctx}
+        {{:fn, [_, _], ret_type}, :any} ->
+          {:ok, ret_type, {:call, :fold, [typed_fn, typed_init, typed_list], ret_type}, ctx}
+        {{:fn, args, _}, _} when length(args) != 2 ->
+          {:error, Errors.mapper_arity(:fold, 2, length(args))}
+        {_, {:list, _}} ->
+          {:ok, init_type, {:call, :fold, [typed_fn, typed_init, typed_list], init_type}, ctx}
+        {_, :any} ->
+          {:ok, init_type, {:call, :fold, [typed_fn, typed_init, typed_list], init_type}, ctx}
+        {_, other} ->
+          {:error, Errors.not_a_list(:fold, other)}
+      end
+    end
+  end
+
 
   defp expect_bool(:bool), do: :ok
   defp expect_bool(:any), do: :ok
@@ -2538,63 +2371,89 @@ defmodule Vaisto.TypeChecker do
     {:error, Errors.type_mismatch(:num, t1, hint: "#{op} requires numeric operands, got #{inspect(t1)} and #{inspect(t2)}")}
   end
 
+  # Stateless compatibility check using real unification (no substitution threaded).
+  defp types_unifiable?(t1, t2) do
+    match?({:ok, _, _}, Vaisto.TypeSystem.Unify.unify(t1, t2))
+  end
+
   @numeric_types [:int, :float, :num]
   defp numeric_compatible?(t1, t2), do: t1 in @numeric_types and t2 in @numeric_types
 
-  # Branch-arm unifier — returns `{:ok, unified_type}` or `{:error, msg}`.
-  # Used when branches must return compatible types (if/match/cond).
-  # Handles numeric widening (int+float→float) but does NOT produce a substitution.
-  defp unify_types(t, t), do: {:ok, t}
-  defp unify_types(:any, t), do: {:ok, t}
-  defp unify_types(t, :any), do: {:ok, t}
-  # Singleton atoms unify to universal :atom
-  defp unify_types({:atom, _}, {:atom, _}), do: {:ok, :atom}
-  defp unify_types({:atom, _}, :atom), do: {:ok, :atom}
-  defp unify_types(:atom, {:atom, _}), do: {:ok, :atom}
-  # Numeric type widening: int + float → float
-  defp unify_types(:int, :float), do: {:ok, :float}
-  defp unify_types(:float, :int), do: {:ok, :float}
-  defp unify_types(:int, :num), do: {:ok, :num}
-  defp unify_types(:num, :int), do: {:ok, :num}
-  defp unify_types(:float, :num), do: {:ok, :num}
-  defp unify_types(:num, :float), do: {:ok, :num}
-  # List types unify if element types unify
-  defp unify_types({:list, t1}, {:list, t2}) do
-    case unify_types(t1, t2) do
-      {:ok, unified} -> {:ok, {:list, unified}}
-      error -> error
-    end
-  end
-  # Type variables unify with anything
-  defp unify_types({:tvar, _} = t, _), do: {:ok, t}
-  defp unify_types(_, {:tvar, _} = t), do: {:ok, t}
-  # Same sum types unify
-  defp unify_types({:sum, name, _} = t, {:sum, name, _}), do: {:ok, t}
-  # Otherwise, error
-  defp unify_types(t1, t2), do: {:error, Errors.branch_type_mismatch(t1, t2)}
+  # Context-threaded versions — accumulate unification substitutions into ctx
 
-  defp expect_same_type(t1, t2) do
-    case unify_types(t1, t2) do
-      {:ok, _unified} -> :ok
-      error -> error
+  defp unify_types_s(t1, t2, ctx) do
+    # Apply current substitution first to resolve any already-bound tvars
+    resolved_t1 = Vaisto.TypeSystem.Core.apply_subst(ctx.subst, t1)
+    resolved_t2 = Vaisto.TypeSystem.Core.apply_subst(ctx.subst, t2)
+
+    case Vaisto.TypeSystem.Unify.unify(resolved_t1, resolved_t2, ctx.subst) do
+      {:ok, new_subst, _} ->
+        unified = Vaisto.TypeSystem.Core.apply_subst(new_subst, resolved_t1)
+        {:ok, unified, %{ctx | subst: new_subst}}
+      {:error, _} ->
+        if numeric_compatible?(resolved_t1, resolved_t2),
+          do: {:ok, :num, ctx},
+          else: {:error, Errors.branch_type_mismatch(resolved_t1, resolved_t2)}
     end
   end
 
-  defp check_handlers(handlers, state_type, env) do
-    handler_env = Map.put(env, :state, state_type)
-    
-    results = Enum.map(handlers, fn {msg, body} ->
-      case check(body, handler_env) do
-        {:ok, ret_type, typed_body} -> {:ok, {msg, typed_body, ret_type}}
-        error -> error
-      end
-    end)
-
-    case Enum.find(results, &match?({:error, _}, &1)) do
+  defp expect_same_type_s(t1, t2, ctx) do
+    case unify_types_s(t1, t2, ctx) do
+      {:ok, _unified, ctx} -> {:ok, ctx}
       {:error, _} = err -> err
-      nil -> {:ok, Enum.map(results, fn {:ok, h} -> h end)}
     end
   end
+
+  defp unify_call_s(func_type, actual_args, ctx, original_args \\ [])
+
+  defp unify_call_s({:fn, expected_args, ret_type}, actual_args, ctx, original_args) do
+    unify_call_poly_s({:fn, expected_args, ret_type}, actual_args, ctx, original_args)
+  end
+
+  defp unify_call_s(:any, _actual_args, ctx, _original_args) do
+    {:ok, :any, ctx}
+  end
+
+  defp unify_call_poly_s({:fn, expected_args, ret_type}, actual_args, ctx, original_args) do
+    if length(expected_args) != length(actual_args) do
+      {:error, Errors.arity_mismatch(:function, length(expected_args), length(actual_args))}
+    else
+      padded_orig = original_args ++ List.duplicate(nil, length(actual_args))
+
+      result = Enum.zip([expected_args, actual_args, padded_orig])
+        |> Enum.with_index()
+        |> Enum.reduce_while({:ok, ctx.subst}, fn {{exp, act, _orig}, idx}, {:ok, subst} ->
+          resolved_exp = Vaisto.TypeSystem.Core.apply_subst(subst, exp)
+          cond do
+            resolved_exp == :any or act == :any ->
+              case exp do
+                {:tvar, id} -> {:cont, {:ok, Map.put_new(subst, id, :any)}}
+                _ -> {:cont, {:ok, subst}}
+              end
+
+            true ->
+              case Vaisto.TypeSystem.Unify.unify(resolved_exp, act, subst) do
+                {:ok, new_subst, _} -> {:cont, {:ok, new_subst}}
+                {:error, _} ->
+                  if match?({:tvar, _}, exp) and numeric_compatible?(resolved_exp, act) do
+                    {:tvar, id} = exp
+                    {:cont, {:ok, Map.put(subst, id, :num)}}
+                  else
+                    {:halt, {:error, Errors.type_mismatch(resolved_exp, act, note: "at argument #{idx + 1}")}}
+                  end
+              end
+          end
+        end)
+
+      case result do
+        {:ok, subst} ->
+          resolved_ret = Vaisto.TypeSystem.Core.apply_subst(subst, ret_type)
+          {:ok, resolved_ret, %{ctx | subst: subst}}
+        {:error, _} = err -> err
+      end
+    end
+  end
+
 
   defp handler_types(handlers) do
     Enum.map(handlers, fn
