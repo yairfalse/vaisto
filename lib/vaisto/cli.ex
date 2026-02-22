@@ -12,8 +12,7 @@ defmodule Vaisto.CLI do
   The standard prelude (Result, Option types) is automatically included.
   """
 
-  alias Vaisto.Compilation
-  alias Vaisto.Error
+  alias Vaisto.{Compilation, Errors}
   alias Vaisto.Package.{Manifest, Namespace}
 
   # Embed the prelude at compile time
@@ -71,7 +70,7 @@ defmodule Vaisto.CLI do
       )
 
     case invalid do
-      [{flag, _} | _] -> {:error, Error.new("unknown option: #{flag}", hint: "Run vaistoc --help to see available options")}
+      [{flag, _} | _] -> {:error, Errors.cli_error("unknown option: #{flag}", hint: "Run vaistoc --help to see available options")}
       [] ->
         cond do
           opts[:help] ->
@@ -88,7 +87,7 @@ defmodule Vaisto.CLI do
             {:compile, input, output, backend}
 
           true ->
-            {:error, Error.new("invalid arguments", hint: "Run vaistoc --help to see available options")}
+            {:error, Errors.cli_error("invalid arguments", hint: "Run vaistoc --help to see available options")}
         end
     end
   end
@@ -102,7 +101,7 @@ defmodule Vaisto.CLI do
 
     case invalid do
       [{flag, _} | _] ->
-        {:error, Error.new("unknown build option: #{flag}", hint: "Run vaistoc --help to see available options")}
+        {:error, Errors.cli_error("unknown build option: #{flag}", hint: "Run vaistoc --help to see available options")}
 
       [] ->
         # No positional args = try manifest mode (flags like --backend apply on top)
@@ -132,11 +131,11 @@ defmodule Vaisto.CLI do
   defp parse_init([]), do: {:init, Path.basename(File.cwd!())}
 
   defp parse_add([path | _]) when byte_size(path) > 0, do: {:add, path}
-  defp parse_add([]), do: {:error, Error.new("add requires a path argument", hint: "Usage: vaistoc add ../my-dep")}
+  defp parse_add([]), do: {:error, Errors.cli_error("add requires a path argument", hint: "Usage: vaistoc add ../my-dep")}
 
   defp parse_backend("core"), do: :core
   defp parse_backend("elixir"), do: :elixir
-  defp parse_backend(other), do: {:error, Error.new("unknown backend: #{other}", hint: "Valid backends: core, elixir")}
+  defp parse_backend(other), do: {:error, Errors.cli_error("unknown backend: #{other}", hint: "Valid backends: core, elixir")}
 
   defp default_output(input) do
     dir = Path.dirname(input)

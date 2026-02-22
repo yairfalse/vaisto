@@ -1189,5 +1189,25 @@ defmodule Vaisto.TypeClassTest do
       assert err.message =~ "Functor"
       assert err.note =~ "only Eq and Show"
     end
+
+    test "unknown_type_class suggests similar name" do
+      err = Vaisto.Errors.unknown_type_class(:Sho, [:Show, :Eq, :Ord])
+      assert err.hint =~ "did you mean `Show`?"
+    end
+
+    test "unknown_type_class no suggestion for unrelated name" do
+      err = Vaisto.Errors.unknown_type_class(:Zzzzz, [:Show, :Eq, :Ord])
+      assert err.hint == nil
+    end
+
+    test "unknown_type_class_in_constraint suggests similar name" do
+      err = Vaisto.Errors.unknown_type_class_in_constraint(:Sho, [:Show, :Eq])
+      assert err.hint =~ "did you mean `Show`?"
+    end
+
+    test "unknown_type_class_in_constraint falls back without suggestion" do
+      err = Vaisto.Errors.unknown_type_class_in_constraint(:Zzzzz, [:Show, :Eq])
+      assert err.hint =~ "constraints must reference"
+    end
   end
 end

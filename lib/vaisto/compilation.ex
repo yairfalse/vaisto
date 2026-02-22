@@ -25,7 +25,7 @@ defmodule Vaisto.Compilation do
 
   require Logger
 
-  alias Vaisto.{Parser, TypeChecker, Backend, Error, ErrorFormatter}
+  alias Vaisto.{Parser, TypeChecker, Backend, Error, Errors, ErrorFormatter}
 
   @type compile_opts :: [
           prelude: String.t() | nil,
@@ -87,7 +87,7 @@ defmodule Vaisto.Compilation do
     try do
       {:ok, Parser.parse(source, opts)}
     rescue
-      e -> {:error, Error.new("parse error", note: Exception.message(e))}
+      e -> {:error, Errors.compilation_error(Exception.message(e))}
     end
   end
 
@@ -133,11 +133,7 @@ defmodule Vaisto.Compilation do
         Backend.Elixir.compile(typed_ast, module_name)
 
       other ->
-        {:error,
-         Error.new("unknown backend",
-           note: "#{inspect(other)} is not valid",
-           hint: "use :core or :elixir"
-         )}
+        {:error, Errors.unknown_backend(other)}
     end
   end
 

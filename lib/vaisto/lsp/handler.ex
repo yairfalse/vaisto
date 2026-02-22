@@ -206,7 +206,7 @@ defmodule Vaisto.LSP.Handler do
       TypeChecker.check(ast)
     rescue
       e ->
-        {:error, Vaisto.Error.new("analysis error", note: Exception.message(e))}
+        {:error, Vaisto.Errors.compilation_error(Exception.message(e))}
     end
   end
 

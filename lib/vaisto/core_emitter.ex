@@ -10,7 +10,7 @@ defmodule Vaisto.CoreEmitter do
   """
 
   alias Vaisto.Backend.Shared
-  alias Vaisto.Error
+  alias Vaisto.{Error, Errors}
   alias Vaisto.TypeChecker
 
   @doc """
@@ -55,7 +55,7 @@ defmodule Vaisto.CoreEmitter do
           compile_core(core_ast, module_name, load?)
       end
     rescue
-      e -> {:error, Error.new("compilation error", note: Exception.message(e))}
+      e -> {:error, Errors.compilation_error(Exception.message(e))}
     end
   end
 
@@ -75,7 +75,7 @@ defmodule Vaisto.CoreEmitter do
         rescue
           _ -> "Internal compiler error: #{inspect(errors, limit: :infinity)}"
         end
-        {:error, Error.new("BEAM compilation failed", note: formatted)}
+        {:error, Errors.beam_compilation_failed(formatted)}
     end
   end
 

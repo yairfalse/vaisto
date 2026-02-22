@@ -123,14 +123,10 @@ defmodule Vaisto.Errors do
   @doc "Function not found"
   def unknown_function(name, opts \\ []) do
     name_str = format_function_name(name)
-    hint = case suggest_function(name) do
-      nil -> nil
-      suggestion -> "did you mean `#{suggestion}`?"
-    end
     Error.new("unknown function",
       Keyword.merge(opts, [
         note: "`#{name_str}` is not defined",
-        hint: hint
+        hint: suggest_function(name)
       ])
     )
   end
@@ -251,17 +247,23 @@ defmodule Vaisto.Errors do
   # ============================================================================
 
   @doc "Reference to an undefined type class"
-  def unknown_type_class(name) do
+  def unknown_type_class(name, known_classes \\ []) do
+    hint = suggest_name(name, known_classes)
     Error.new("unknown type class",
-      note: "`#{name}` is not defined as a type class"
+      note: "`#{name}` is not defined as a type class",
+      hint: hint
     )
   end
 
   @doc "Reference to an undefined type class in a constraint"
-  def unknown_type_class_in_constraint(name) do
+  def unknown_type_class_in_constraint(name, known_classes \\ []) do
+    hint = case suggest_name(name, known_classes) do
+      nil -> "constraints must reference defined type classes"
+      suggestion -> suggestion
+    end
     Error.new("unknown type class in constraint",
       note: "`#{name}` is not defined as a type class",
-      hint: "constraints must reference defined type classes"
+      hint: hint
     )
   end
 
@@ -318,18 +320,76 @@ defmodule Vaisto.Errors do
   end
 
   # ============================================================================
+  # CLI Errors
+  # ============================================================================
+
+  @doc "CLI argument validation error"
+  def cli_error(message, opts \\ []) do
+    Error.new(message, opts)
+  end
+
+  # ============================================================================
+  # Compilation Errors
+  # ============================================================================
+
+  @doc "Compilation error (wraps exception messages)"
+  def compilation_error(note, opts \\ []) do
+    Error.new("compilation error", Keyword.merge(opts, [note: note]))
+  end
+
+  @doc "BEAM compilation failed"
+  def beam_compilation_failed(detail, opts \\ []) do
+    Error.new("BEAM compilation failed", Keyword.merge(opts, [note: detail]))
+  end
+
+  @doc "Unknown backend specified"
+  def unknown_backend(backend, opts \\ []) do
+    Error.new("unknown backend",
+      Keyword.merge(opts, [
+        note: "#{inspect(backend)} is not valid",
+        hint: "use :core or :elixir"
+      ])
+    )
+  end
+
+  # ============================================================================
+  # Build Errors
+  # ============================================================================
+
+  @doc "No manifest found in directory"
+  def no_manifest(dir, opts \\ []) do
+    Error.new("no vaisto.toml found in #{dir}", opts)
+  end
+
+  @doc "Dependency resolution error"
+  def dependency_error(name, reason, opts \\ []) do
+    Error.new("dependency `#{name}`: #{reason}", opts)
+  end
+
+  @doc "No source files found"
+  def no_source_files(dir \\ nil, opts \\ []) do
+    msg = if dir, do: "no .va files found in #{dir}", else: "no .va files found in source directories"
+    Error.new(msg, opts)
+  end
+
+  # ============================================================================
   # Helpers
   # ============================================================================
 
   defp suggest_function(name) when is_atom(name) do
-    name_str = Atom.to_string(name)
-    common = ~w(map filter fold head tail cons empty? length if let match defn deftype)
-
-    Enum.find(common, fn func ->
-      String.jaro_distance(name_str, func) > 0.75
-    end)
+    common = ~w(map filter fold head tail cons empty? length if let match defn deftype)a
+    suggest_name(name, common)
   end
   defp suggest_function(_), do: nil
+
+  defp suggest_name(name, candidates) when is_atom(name) and is_list(candidates) do
+    name_str = Atom.to_string(name)
+    result = Enum.find(candidates, fn candidate ->
+      String.jaro_distance(name_str, Atom.to_string(candidate)) > 0.75
+    end)
+    if result, do: "did you mean `#{result}`?", else: nil
+  end
+  defp suggest_name(_, _), do: nil
 
   defp format_function_name({:module_path, parts}) when is_list(parts) do
     Enum.join(parts, ".")

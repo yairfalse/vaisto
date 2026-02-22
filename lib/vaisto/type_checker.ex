@@ -992,7 +992,7 @@ defmodule Vaisto.TypeChecker do
         end
 
       nil ->
-        {:error, Errors.unknown_type_class(class_name)}
+        {:error, Errors.unknown_type_class(class_name, Map.keys(classes))}
     end
   catch
     {:error, _} = err -> err
@@ -1065,7 +1065,7 @@ defmodule Vaisto.TypeChecker do
         end
 
       nil ->
-        {:error, Errors.unknown_type_class(class_name)}
+        {:error, Errors.unknown_type_class(class_name, Map.keys(classes))}
     end
   catch
     {:error, _} = err -> err
@@ -1122,7 +1122,7 @@ defmodule Vaisto.TypeChecker do
       class_def = Map.get(classes, class_name)
       case class_def do
         nil ->
-          {:halt, {:error, Errors.unknown_type_class_in_constraint(class_name)}}
+          {:halt, {:error, Errors.unknown_type_class_in_constraint(class_name, Map.keys(classes))}}
         _ ->
           {class_tvar_ids, method_sigs, _} = extract_class_parts(class_def)
           # Build method types substituting class tvar → constraint tvar (the named param)
