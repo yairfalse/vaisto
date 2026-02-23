@@ -121,12 +121,31 @@ defmodule Vaisto.LSP.Protocol do
 
     message = build_message(error)
 
-    %{
+    diag = %{
       "range" => range(line, col, line, col + length),
       "severity" => 1,  # Error
       "source" => "vaisto",
       "message" => message
     }
+
+    case error.secondary_spans do
+      [] -> diag
+      spans ->
+        uri = if error.file, do: "file://#{error.file}", else: ""
+        related = Enum.map(spans, fn sec ->
+          sec_line = sec.line - 1
+          sec_col = sec.col - 1
+          sec_len = Map.get(sec, :length, 1)
+          %{
+            "location" => %{
+              "uri" => uri,
+              "range" => range(sec_line, sec_col, sec_line, sec_col + sec_len)
+            },
+            "message" => Map.get(sec, :label, "related")
+          }
+        end)
+        Map.put(diag, "relatedInformation", related)
+    end
   end
 
   defp build_message(%Vaisto.Error{} = error) do

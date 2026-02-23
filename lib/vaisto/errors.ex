@@ -112,7 +112,17 @@ defmodule Vaisto.Errors do
   # ============================================================================
 
   @doc "Variable not defined in scope"
-  def undefined_variable(name, opts \\ []) do
+  def undefined_variable(name, known_names_or_opts \\ [])
+
+  def undefined_variable(name, known_names) when is_list(known_names) and known_names != [] and is_atom(hd(known_names)) do
+    hint = suggest_name(name, known_names)
+    Error.new("undefined variable",
+      note: "`#{name}` is not defined in this scope",
+      hint: hint
+    )
+  end
+
+  def undefined_variable(name, opts) do
     Error.new("undefined variable",
       Keyword.merge(opts, [
         note: "`#{name}` is not defined in this scope"
@@ -121,7 +131,18 @@ defmodule Vaisto.Errors do
   end
 
   @doc "Function not found"
-  def unknown_function(name, opts \\ []) do
+  def unknown_function(name, known_names_or_opts \\ [])
+
+  def unknown_function(name, known_names) when is_list(known_names) and known_names != [] and is_atom(hd(known_names)) do
+    name_str = format_function_name(name)
+    hint = suggest_name(name, known_names) || suggest_function(name)
+    Error.new("unknown function",
+      note: "`#{name_str}` is not defined",
+      hint: hint
+    )
+  end
+
+  def unknown_function(name, opts) do
     name_str = format_function_name(name)
     Error.new("unknown function",
       Keyword.merge(opts, [
@@ -141,7 +162,17 @@ defmodule Vaisto.Errors do
   end
 
   @doc "Process not defined"
-  def unknown_process(name, opts \\ []) do
+  def unknown_process(name, known_names_or_opts \\ [])
+
+  def unknown_process(name, known_names) when is_list(known_names) and known_names != [] and is_atom(hd(known_names)) do
+    hint = suggest_name(name, known_names)
+    Error.new("unknown process",
+      note: "process `#{name}` is not defined in this module",
+      hint: hint
+    )
+  end
+
+  def unknown_process(name, opts) do
     Error.new("unknown process",
       Keyword.merge(opts, [
         note: "process `#{name}` is not defined in this module"

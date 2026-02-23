@@ -7,7 +7,7 @@ defmodule Vaisto.LSP.Handler do
 
   require Logger
 
-  alias Vaisto.LSP.{Protocol, Hover, Completion, SignatureHelp, References, Position}
+  alias Vaisto.LSP.{Protocol, Hover, Completion, SignatureHelp, References, Position, InlayHints}
   alias Vaisto.{Parser, TypeChecker}
 
   @doc """
@@ -67,6 +67,9 @@ defmodule Vaisto.LSP.Handler do
       "textDocument/rename" ->
         handle_rename(id, params, state)
 
+      "textDocument/inlayHint" ->
+        handle_inlay_hint(id, params, state)
+
       _ ->
         # Unknown method - return method not found for requests, ignore notifications
         if id do
@@ -104,7 +107,8 @@ defmodule Vaisto.LSP.Handler do
       "referencesProvider" => true,
       "renameProvider" => %{
         "prepareProvider" => true
-      }
+      },
+      "inlayHintProvider" => true
     }
 
     result = %{
@@ -444,6 +448,24 @@ defmodule Vaisto.LSP.Handler do
     else
       {Protocol.error_response(id, -32602, "Document not found"), state}
     end
+  end
+
+  # ============================================================================
+  # Inlay Hints
+  # ============================================================================
+
+  defp handle_inlay_hint(id, %{"textDocument" => doc}, state) do
+    uri = doc["uri"]
+    text = state.documents[uri]
+
+    hints = if text do
+      file = uri_to_path(uri)
+      InlayHints.collect(text, file)
+    else
+      []
+    end
+
+    {Protocol.response(id, hints), state}
   end
 
   # ============================================================================

@@ -334,7 +334,7 @@ defmodule Vaisto.TypeChecker do
   defp check_impl_s({:var, name}, ctx) do
     case Map.get(ctx.env, name) do
       nil ->
-        {:error, Errors.undefined_variable(name)}
+        {:error, Errors.undefined_variable(name, local_var_names(ctx.env))}
       {:fn, params, _ret} = type ->
         if is_local_var?(name, ctx.env) do
           {:ok, type, {:var, name, type}, ctx}
@@ -1562,7 +1562,7 @@ defmodule Vaisto.TypeChecker do
 
   defp lookup_function(name, env) do
     case Map.get(env, name) do
-      nil -> {:error, Errors.unknown_function(name)}
+      nil -> {:error, Errors.unknown_function(name, fn_names(env))}
       {:fn, _, {:sum, _, _}} = ctor_type -> {:ok, instantiate_constructor_type(ctor_type)}
       {:fn, _, {:record, _, _}} = ctor_type -> {:ok, instantiate_constructor_type(ctor_type)}
       {:forall, vars, {:constrained, constraints, fn_type}} ->
@@ -1574,7 +1574,7 @@ defmodule Vaisto.TypeChecker do
   defp lookup_process(name, env) when is_atom(name) do
     case Map.get(env, name) do
       {:process, _, _} = process_type -> {:ok, process_type}
-      nil -> {:error, Errors.unknown_process(name)}
+      nil -> {:error, Errors.unknown_process(name, process_names(env))}
       other -> {:error, Errors.type_mismatch(:process, other,
                   note: "`#{name}` is not a process")}
     end
@@ -1590,6 +1590,22 @@ defmodule Vaisto.TypeChecker do
   defp add_local_var(env, name) do
     local_vars = Map.get(env, :__local_vars__, MapSet.new())
     Map.put(env, :__local_vars__, MapSet.put(local_vars, name))
+  end
+
+  # Extract local variable names from env for did-you-mean suggestions
+  defp local_var_names(env) do
+    local_vars = Map.get(env, :__local_vars__, MapSet.new())
+    MapSet.to_list(local_vars)
+  end
+
+  # Extract function names from env for did-you-mean suggestions
+  defp fn_names(env) do
+    for {name, {:fn, _, _}} <- env, is_atom(name), do: name
+  end
+
+  # Extract process names from env for did-you-mean suggestions
+  defp process_names(env) do
+    for {name, {:process, _, _}} <- env, is_atom(name), do: name
   end
 
 
