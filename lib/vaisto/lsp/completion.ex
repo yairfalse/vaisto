@@ -65,6 +65,10 @@ defmodule Vaisto.LSP.Completion do
     {"or", "Logical or", "(or a b) → bool", [:bool, :bool], :bool},
     {"not", "Logical not", "(not a) → bool", [:bool], :bool},
 
+    # Integer division
+    {"div", "Integer division", "(div a b) → int", [:int, :int], :int},
+    {"rem", "Integer remainder", "(rem a b) → int", [:int, :int], :int},
+
     # List operations
     {"list", "Create a list", "(list a b c) → [a, b, c]", [:any], {:list, :any}},
     {"head", "First element", "(head xs) → element", [{:list, :any}], :any},

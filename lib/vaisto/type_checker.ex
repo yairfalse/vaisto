@@ -663,6 +663,34 @@ defmodule Vaisto.TypeChecker do
     end
   end
 
+  # Boolean binary operators
+  defp check_impl_s({:call, op, [left, right]}, ctx) when op in [:and, :or] do
+    with {:ok, left_type, typed_left, ctx} <- check_s(left, ctx),
+         {:ok, right_type, typed_right, ctx} <- check_s(right, ctx),
+         :ok <- expect_bool(left_type, op),
+         :ok <- expect_bool(right_type, op) do
+      {:ok, :bool, {:call, op, [typed_left, typed_right], :bool}, ctx}
+    end
+  end
+
+  # Boolean unary not
+  defp check_impl_s({:call, :not, [arg]}, ctx) do
+    with {:ok, arg_type, typed_arg, ctx} <- check_s(arg, ctx),
+         :ok <- expect_bool(arg_type, :not) do
+      {:ok, :bool, {:call, :not, [typed_arg], :bool}, ctx}
+    end
+  end
+
+  # Integer division operators
+  defp check_impl_s({:call, op, [left, right]}, ctx) when op in [:div, :rem] do
+    with {:ok, left_type, typed_left, ctx} <- check_s(left, ctx),
+         {:ok, right_type, typed_right, ctx} <- check_s(right, ctx),
+         :ok <- expect_int(left_type, op),
+         :ok <- expect_int(right_type, op) do
+      {:ok, :int, {:call, op, [typed_left, typed_right], :int}, ctx}
+    end
+  end
+
   # Comparison operators
   defp check_impl_s({:call, op, [left, right]}, ctx) when op in [:<, :>, :<=, :>=] do
     with {:ok, left_type, typed_left, ctx} <- check_s(left, ctx),
@@ -2357,6 +2385,16 @@ defmodule Vaisto.TypeChecker do
   defp expect_numeric(:any, _op), do: :ok
   defp expect_numeric({:tvar, _}, _op), do: :ok  # Type variables are assumed numeric in polymorphic contexts
   defp expect_numeric(other, op), do: {:error, Errors.type_mismatch(:num, other, hint: "`#{op}` requires numeric operands")}
+
+  defp expect_bool(:bool, _op), do: :ok
+  defp expect_bool(:any, _op), do: :ok
+  defp expect_bool({:tvar, _}, _op), do: :ok
+  defp expect_bool(other, op), do: {:error, Errors.type_mismatch(:bool, other, hint: "`#{op}` requires boolean operands")}
+
+  defp expect_int(:int, _op), do: :ok
+  defp expect_int(:any, _op), do: :ok
+  defp expect_int({:tvar, _}, _op), do: :ok
+  defp expect_int(other, op), do: {:error, Errors.type_mismatch(:int, other, hint: "`#{op}` requires integer operands")}
 
   # Determine result type for arithmetic operations
   # int op int → int

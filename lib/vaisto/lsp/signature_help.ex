@@ -125,6 +125,24 @@ defmodule Vaisto.LSP.SignatureHelp do
       ]
     },
 
+    # Integer division
+    "div" => %{
+      label: "(div a b) → int",
+      doc: "Integer division. Truncates toward zero.",
+      params: [
+        %{label: "a", doc: "Dividend (int)"},
+        %{label: "b", doc: "Divisor (int)"}
+      ]
+    },
+    "rem" => %{
+      label: "(rem a b) → int",
+      doc: "Integer remainder. Sign follows the dividend.",
+      params: [
+        %{label: "a", doc: "Dividend (int)"},
+        %{label: "b", doc: "Divisor (int)"}
+      ]
+    },
+
     # List operations
     "list" => %{
       label: "(list elem...) → [elem]",

@@ -419,7 +419,7 @@ defmodule Vaisto.CoreEmitter do
 
   # Expression transformation that handles state variable
   defp to_core_expr_with_state({:var, :state, _type}, state_var), do: state_var
-  defp to_core_expr_with_state({:call, op, [left, right], _type}, state_var) when op in [:+, :-, :*, :/] do
+  defp to_core_expr_with_state({:call, op, [left, right], _type}, state_var) when op in [:+, :-, :*, :/, :and, :or, :div, :rem] do
     :cerl.c_call(
       :cerl.c_atom(:erlang),
       :cerl.c_atom(op),
@@ -619,12 +619,21 @@ defmodule Vaisto.CoreEmitter do
     :cerl.c_seq(first_expr, rest_expr)
   end
 
-  # Arithmetic: (+ a b) → erlang:'+'(a, b)
-  defp to_core_expr({:call, op, [left, right], _type}, user_fns, local_vars) when op in [:+, :-, :*, :/] do
+  # Arithmetic and boolean binary: (+ a b), (and a b), (div a b) → erlang:op(a, b)
+  defp to_core_expr({:call, op, [left, right], _type}, user_fns, local_vars) when op in [:+, :-, :*, :/, :and, :or, :div, :rem] do
     :cerl.c_call(
       :cerl.c_atom(:erlang),
       :cerl.c_atom(op),
       [to_core_expr(left, user_fns, local_vars), to_core_expr(right, user_fns, local_vars)]
+    )
+  end
+
+  # Unary not: (not a) → erlang:'not'(a)
+  defp to_core_expr({:call, :not, [arg], _type}, user_fns, local_vars) do
+    :cerl.c_call(
+      :cerl.c_atom(:erlang),
+      :cerl.c_atom(:not),
+      [to_core_expr(arg, user_fns, local_vars)]
     )
   end
 
@@ -911,7 +920,7 @@ defmodule Vaisto.CoreEmitter do
   end
 
   # Arithmetic/comparison operators that are BIFs, not user functions
-  @bif_operators [:+, :-, :*, :/, :==, :!=, :<, :>, :<=, :>=]
+  @bif_operators [:+, :-, :*, :/, :==, :!=, :<, :>, :<=, :>=, :and, :or, :not, :div, :rem]
 
   # fold: lists:foldl/3 with folder function (named function or BIF operator)
   defp to_core_expr({:call, :fold, [func_name, init_expr, list_expr], _type}, user_fns, local_vars) when is_atom(func_name) do
