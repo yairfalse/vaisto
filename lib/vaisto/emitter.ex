@@ -748,6 +748,12 @@ defmodule Vaisto.Emitter do
     end
   end
 
+  # As-pattern: (x @ inner) → x = inner_pattern
+  defp emit_pattern({:as_pattern, {:var, name, _type}, inner_pattern, _pat_type}) do
+    inner_ast = emit_pattern(inner_pattern)
+    {:=, [], [Macro.var(name, nil), inner_ast]}
+  end
+
   # Record pattern → tagged tuple pattern {:record_name, var1, var2, ...}
   defp emit_pattern({:pattern, name, args, _type}) do
     pattern_args = Enum.map(args, &emit_pattern/1)
@@ -818,6 +824,18 @@ defmodule Vaisto.Emitter do
   defp emit_fn_pattern({:lit, :bool, b}), do: b
 
   # Untyped atoms (underscore, etc)
+  # As-pattern in multi-clause function
+  defp emit_fn_pattern({:as_pattern, {:var, name, _type}, inner_pattern, _pat_type}) do
+    inner_ast = emit_fn_pattern(inner_pattern)
+    {:=, [], [Macro.var(name, nil), inner_ast]}
+  end
+
+  # Constructor pattern in multi-clause function
+  defp emit_fn_pattern({:pattern, name, args, _type}) do
+    pattern_args = Enum.map(args, &emit_fn_pattern/1)
+    {:{}, [], [name | pattern_args]}
+  end
+
   defp emit_fn_pattern(:_), do: Macro.var(:_, nil)
   defp emit_fn_pattern(a) when is_atom(a), do: Macro.var(a, nil)
   defp emit_fn_pattern(n) when is_integer(n), do: n

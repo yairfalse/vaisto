@@ -46,6 +46,10 @@ defmodule Vaisto.Backend.Shared do
     extract_pattern_vars(head) ++ extract_pattern_vars(tail)
   end
 
+  def extract_pattern_vars({:as_pattern, {:var, name, _type}, inner, _pat_type}) do
+    [name | extract_pattern_vars(inner)]
+  end
+
   def extract_pattern_vars({:pattern, _name, args, _type}) do
     Enum.flat_map(args, &extract_pattern_vars/1)
   end

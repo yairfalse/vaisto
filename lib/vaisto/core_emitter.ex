@@ -1236,6 +1236,12 @@ defmodule Vaisto.CoreEmitter do
   # --- Pattern transformation ---
 
   # Record pattern → tuple pattern {:record_name, var1, var2, ...}
+  # As-pattern: bind variable to whole value AND match inner pattern
+  defp to_core_pattern({:as_pattern, {:var, name, _type}, inner_pattern, _pat_type}) do
+    inner_core = to_core_pattern(inner_pattern)
+    :cerl.c_alias(:cerl.c_var(name), inner_core)
+  end
+
   defp to_core_pattern({:pattern, name, args, _type}) when is_atom(name) do
     pattern_args = Enum.map(args, &to_core_pattern/1)
     :cerl.c_tuple([:cerl.c_atom(name) | pattern_args])
@@ -1352,6 +1358,18 @@ defmodule Vaisto.CoreEmitter do
     unique_id = System.unique_integer([:positive])
     :cerl.c_var(:"_#{unique_id}")
   end
+  # As-pattern in multi-clause function
+  defp to_core_multi_pattern({:as_pattern, {:var, name, _type}, inner_pattern, _pat_type}) do
+    inner_core = to_core_multi_pattern(inner_pattern)
+    :cerl.c_alias(:cerl.c_var(name), inner_core)
+  end
+
+  # Constructor pattern in multi-clause function
+  defp to_core_multi_pattern({:pattern, name, args, _type}) when is_atom(name) do
+    pattern_args = Enum.map(args, &to_core_multi_pattern/1)
+    :cerl.c_tuple([:cerl.c_atom(name) | pattern_args])
+  end
+
   defp to_core_multi_pattern(a) when is_atom(a), do: :cerl.c_var(a)
   defp to_core_multi_pattern(n) when is_integer(n), do: :cerl.c_int(n)
 

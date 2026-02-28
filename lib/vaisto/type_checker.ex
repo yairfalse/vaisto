@@ -952,46 +952,50 @@ defmodule Vaisto.TypeChecker do
     self_type = {:fn, param_types, :any}
     extended_ctx = %{ctx | env: Map.put(ctx.env, name, self_type)}
 
-    typed_clauses_result = Enum.reduce_while(clauses, {:ok, [], extended_ctx}, fn {pattern, guard, body}, {:ok, acc, ctx} ->
-      bindings = extract_multi_pattern_bindings(pattern)
-      clause_ctx = %{ctx | env: Enum.reduce(bindings, ctx.env, fn {var, type}, e ->
-        Map.put(e, var, type)
-      end)}
+    typed_clauses_result = Enum.reduce(clauses, {:ok, [], [], extended_ctx}, fn
+      {pattern, guard, body}, {:ok, typed_acc, error_acc, ctx} ->
+        bindings = extract_multi_pattern_bindings(pattern)
+        clause_ctx = %{ctx | env: Enum.reduce(bindings, ctx.env, fn {var, type}, e ->
+          Map.put(e, var, type)
+        end)}
 
-      # Check guard if present
-      guard_result = if guard do
-        case check_s(guard, clause_ctx) do
-          {:ok, guard_type, typed_guard, ctx} ->
-            case expect_bool(guard_type) do
-              :ok -> {:ok, typed_guard, ctx}
-              {:error, _} = err -> err
-            end
-          error -> error
-        end
-      else
-        {:ok, nil, clause_ctx}
-      end
-
-      case guard_result do
-        {:ok, typed_guard, ctx} ->
-          case check_s(body, ctx) do
-            {:ok, body_type, typed_body, ctx} ->
-              typed_pattern = type_multi_pattern(pattern, ctx.env)
-              {:cont, {:ok, [{typed_pattern, typed_guard, typed_body, body_type} | acc], ctx}}
-            error ->
-              {:halt, error}
+        # Check guard if present
+        guard_result = if guard do
+          case check_s(guard, clause_ctx) do
+            {:ok, guard_type, typed_guard, ctx} ->
+              case expect_bool(guard_type) do
+                :ok -> {:ok, typed_guard, ctx}
+                {:error, _} = err -> err
+              end
+            error -> error
           end
-        error -> {:halt, error}
-      end
+        else
+          {:ok, nil, clause_ctx}
+        end
+
+        case guard_result do
+          {:ok, typed_guard, ctx} ->
+            case check_s(body, ctx) do
+              {:ok, body_type, typed_body, ctx} ->
+                typed_pattern = type_multi_pattern(pattern, ctx.env)
+                {:ok, [{typed_pattern, typed_guard, typed_body, body_type} | typed_acc], error_acc, ctx}
+              {:error, err} ->
+                {:ok, typed_acc, [err | error_acc], ctx}
+            end
+          {:error, err} -> {:ok, typed_acc, [err | error_acc], ctx}
+        end
     end)
 
     case typed_clauses_result do
-      {:ok, typed_clauses, ctx} ->
+      {:ok, typed_clauses, [], ctx} ->
         ret_types = Enum.map(typed_clauses, fn {_, _, _, ret_type} -> ret_type end)
         unified_ret_type = join_types_list(ret_types)
         func_type = {:fn, param_types, unified_ret_type}
         {:ok, func_type, {:defn_multi, name, arity, Enum.reverse(typed_clauses), func_type}, ctx}
-      error -> error
+      {:ok, _, [single_error], _} ->
+        {:error, single_error}
+      {:ok, _, errors, _} ->
+        {:error, Enum.reverse(errors)}
     end
   end
 
@@ -1296,6 +1300,11 @@ defmodule Vaisto.TypeChecker do
   # Add location to error messages — enhance errors with line/column
 
   # Structured error - add location info if not already present
+  # Multi-error list from defn_multi error recovery
+  defp with_loc({:error, errors}, %Vaisto.Parser.Loc{} = loc) when is_list(errors) do
+    {:error, Enum.map(errors, fn err -> elem(with_loc({:error, err}, loc), 1) end)}
+  end
+
   defp with_loc({:error, %Error{primary_span: nil} = error}, %Vaisto.Parser.Loc{} = loc) do
     span = Error.span_from_loc(loc)
     {:error, %{error | file: loc.file, primary_span: span}}
@@ -1738,19 +1747,38 @@ defmodule Vaisto.TypeChecker do
     extract_pattern_bindings({:call, name, args}, type, env)
   end
 
-  defp extract_pattern_bindings({:call, record_name, args}, {:record, record_name, fields}, _env) do
+  # As-pattern: (x @ inner_pattern) — parses as {:call, x, [:@, inner], loc}
+  defp extract_pattern_bindings({:call, var, [:@, inner_pattern]}, type, env) when is_atom(var) and var not in [:_, true, false] do
+    [{var, type} | extract_pattern_bindings(inner_pattern, type, env)]
+  end
+
+  defp extract_pattern_bindings({:call, record_name, args}, {:record, record_name, fields}, env) do
     Enum.zip(args, fields)
-    |> Enum.filter(fn {arg, _field} -> is_atom(arg) and arg not in [:_, true, false] end)
-    |> Enum.map(fn {var_name, {_field_name, field_type}} -> {var_name, field_type} end)
+    |> Enum.flat_map(fn
+      {var, {_fname, ftype}} when is_atom(var) and var not in [:_, true, false] ->
+        [{var, ftype}]
+      {{:call, _, _, _} = nested, {_fname, ftype}} ->
+        extract_pattern_bindings(nested, ftype, env)
+      {{:call, _, _} = nested, {_fname, ftype}} ->
+        extract_pattern_bindings(nested, ftype, env)
+      _ -> []
+    end)
   end
 
   # Variant pattern against sum type
-  defp extract_pattern_bindings({:call, ctor_name, args}, {:sum, _sum_name, variants}, _env) do
+  defp extract_pattern_bindings({:call, ctor_name, args}, {:sum, _sum_name, variants}, env) do
     case List.keyfind(variants, ctor_name, 0) do
       {^ctor_name, field_types} ->
         Enum.zip(args, field_types)
-        |> Enum.filter(fn {arg, _} -> is_atom(arg) and arg not in [:_, true, false] end)
-        |> Enum.map(fn {var_name, field_type} -> {var_name, field_type} end)
+        |> Enum.flat_map(fn
+          {var, ftype} when is_atom(var) and var not in [:_, true, false] ->
+            [{var, ftype}]
+          {{:call, _, _, _} = nested, ftype} ->
+            extract_pattern_bindings(nested, ftype, env)
+          {{:call, _, _} = nested, ftype} ->
+            extract_pattern_bindings(nested, ftype, env)
+          _ -> []
+        end)
       nil ->
         []
     end
@@ -1788,9 +1816,12 @@ defmodule Vaisto.TypeChecker do
         extract_pattern_bindings({:call, record_name, args}, sum_type, env)
       _ ->
         # Can't find record type, fall back to :any for all vars
-        args
-        |> Enum.filter(fn arg -> is_atom(arg) and arg not in [:_, true, false] end)
-        |> Enum.map(fn var_name -> {var_name, :any} end)
+        Enum.flat_map(args, fn
+          var when is_atom(var) and var not in [:_, true, false] -> [{var, :any}]
+          {:call, _, _, _} = nested -> extract_pattern_bindings(nested, :any, env)
+          {:call, _, _} = nested -> extract_pattern_bindings(nested, :any, env)
+          _ -> []
+        end)
     end
   end
 
@@ -1882,6 +1913,10 @@ defmodule Vaisto.TypeChecker do
 
   defp check_exhaustiveness(_clauses, _expr_type), do: :ok
 
+  # As-pattern: (x @ (Ok v)) parses as {:call, x, [:@, inner], loc}
+  defp extract_variant_name({:call, var, [:@, inner], _loc}) when is_atom(var), do: extract_variant_name(inner)
+  defp extract_variant_name({:call, var, [:@, inner]}) when is_atom(var), do: extract_variant_name(inner)
+  defp extract_variant_name({:as_pattern, _var, inner, _type}), do: extract_variant_name(inner)
   defp extract_variant_name({:call, name, _, _}), do: name
   defp extract_variant_name({:pattern, name, _, _}), do: name
   defp extract_variant_name(_), do: nil
@@ -1905,14 +1940,22 @@ defmodule Vaisto.TypeChecker do
     type_pattern({:call, record_name, args}, expected_type, env)
   end
 
+  # As-pattern: (x @ inner_pattern) — parses as {:call, x, [:@, inner], loc}
+  defp type_pattern({:call, var, [:@, inner_pattern]}, type, env) when is_atom(var) and var not in [:_, true, false] do
+    typed_inner = type_pattern(inner_pattern, type, env)
+    {:as_pattern, {:var, var, type}, typed_inner, type}
+  end
+
   # Uses field types from the record definition
-  defp type_pattern({:call, record_name, args}, {:record, record_name, fields}, _env) do
+  defp type_pattern({:call, record_name, args}, {:record, record_name, fields}, env) do
     typed_args = Enum.zip(args, fields)
     |> Enum.map(fn
       {var, {_field_name, field_type}} when is_atom(var) and var not in [:_, true, false] ->
         {:var, var, field_type}
-      {{:call, _, _} = nested, _field} ->
-        type_pattern(nested, :any, %{})
+      {{:call, _, _, _} = nested, {_field_name, field_type}} ->
+        type_pattern(nested, field_type, env)
+      {{:call, _, _} = nested, {_field_name, field_type}} ->
+        type_pattern(nested, field_type, env)
       {lit, _field} ->
         lit
     end)
@@ -1920,7 +1963,7 @@ defmodule Vaisto.TypeChecker do
   end
 
   # Variant pattern against sum type: (Ok v) matched against Result
-  defp type_pattern({:call, ctor_name, args}, {:sum, sum_name, variants}, _env) do
+  defp type_pattern({:call, ctor_name, args}, {:sum, sum_name, variants}, env) do
     # Find the variant in the sum type
     case List.keyfind(variants, ctor_name, 0) do
       {^ctor_name, field_types} ->
@@ -1929,6 +1972,10 @@ defmodule Vaisto.TypeChecker do
         |> Enum.map(fn
           {var, field_type} when is_atom(var) and var not in [:_, true, false] ->
             {:var, var, field_type}
+          {{:call, _, _, _} = nested, field_type} ->
+            type_pattern(nested, field_type, env)
+          {{:call, _, _} = nested, field_type} ->
+            type_pattern(nested, field_type, env)
           {lit, _field_type} when is_integer(lit) or is_float(lit) ->
             lit
           {:_, _field_type} ->
@@ -2038,6 +2085,13 @@ defmodule Vaisto.TypeChecker do
 
   # Extract bindings from patterns in multi-clause functions
   # Empty list pattern: []
+  # As-pattern in multi-clause: (x @ pattern) parses as {:call, x, [:@, inner], loc}
+  defp extract_multi_pattern_bindings({:call, var, [:@, inner], %Vaisto.Parser.Loc{}}) when is_atom(var) and var not in [:_, true, false] do
+    [{var, :any} | extract_multi_pattern_bindings(inner)]
+  end
+  defp extract_multi_pattern_bindings({:call, var, [:@, inner]}) when is_atom(var) and var not in [:_, true, false] do
+    [{var, :any} | extract_multi_pattern_bindings(inner)]
+  end
   defp extract_multi_pattern_bindings([]), do: []
   # Non-empty list pattern from parser: [x] parses as [:x]
   defp extract_multi_pattern_bindings(elems) when is_list(elems) do
@@ -2060,6 +2114,9 @@ defmodule Vaisto.TypeChecker do
   # Cons pattern: {:cons, head, tail}
   defp extract_multi_pattern_bindings({:cons, head, tail}) do
     extract_multi_pattern_bindings(head) ++ extract_multi_pattern_bindings(tail)
+  end
+  defp extract_multi_pattern_bindings({:call, _name, args, %Vaisto.Parser.Loc{}}) do
+    Enum.flat_map(args, &extract_multi_pattern_bindings/1)
   end
   defp extract_multi_pattern_bindings({:call, _name, args}) do
     Enum.flat_map(args, &extract_multi_pattern_bindings/1)
@@ -2104,6 +2161,17 @@ defmodule Vaisto.TypeChecker do
     typed_head = type_multi_pattern(head, env)
     typed_tail = type_multi_pattern(tail, env)
     {:cons, typed_head, typed_tail, {:list, :any}}
+  end
+  # As-pattern in multi-clause: (x @ pattern) parses as {:call, x, [:@, inner], loc}
+  defp type_multi_pattern({:call, var, [:@, inner], %Vaisto.Parser.Loc{}}, env) when is_atom(var) and var not in [:_, true, false] do
+    type_multi_pattern({:call, var, [:@, inner]}, env)
+  end
+  defp type_multi_pattern({:call, var, [:@, inner]}, env) when is_atom(var) and var not in [:_, true, false] do
+    typed_inner = type_multi_pattern(inner, env)
+    {:as_pattern, {:var, var, :any}, typed_inner, :any}
+  end
+  defp type_multi_pattern({:call, name, args, %Vaisto.Parser.Loc{}}, env) do
+    type_multi_pattern({:call, name, args}, env)
   end
   defp type_multi_pattern({:call, name, args}, env) do
     typed_args = Enum.map(args, &type_multi_pattern(&1, env))
@@ -3049,8 +3117,9 @@ defmodule Vaisto.TypeChecker do
         check_module_forms(rest, new_env, [typed_form | acc], errors)
 
       {:error, err} ->
-        # Continue checking remaining forms, accumulate error
-        check_module_forms(rest, env, acc, [err | errors])
+        # Continue checking remaining forms, accumulate error(s)
+        new_errors = if is_list(err), do: Enum.reverse(err) ++ errors, else: [err | errors]
+        check_module_forms(rest, env, acc, new_errors)
     end
   end
 
