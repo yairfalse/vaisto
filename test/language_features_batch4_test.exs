@@ -389,4 +389,35 @@ defmodule Vaisto.LanguageFeaturesBatch4Test do
       assert mod.main() == 1
     end
   end
+
+  # ═══════════════════════════════════════════════════════════════════
+  # Algorithm W Primitives Consistency
+  # ═══════════════════════════════════════════════════════════════════
+
+  describe "Infer primitives match TypeEnv primitives" do
+    test "standalone Infer.infer knows about and/or/not" do
+      # These operators were missing from Infer.@primitives
+      ast = Vaisto.Parser.parse("(fn [x y] (and x y))")
+      assert {:ok, {:fn, [:bool, :bool], :bool}, _typed} = Vaisto.TypeSystem.Infer.infer(ast)
+    end
+
+    test "standalone Infer.infer knows about div/rem" do
+      ast = Vaisto.Parser.parse("(fn [x y] (div x y))")
+      assert {:ok, {:fn, [:int, :int], :int}, _typed} = Vaisto.TypeSystem.Infer.infer(ast)
+    end
+
+    test "standalone Infer.infer knows about ++" do
+      ast = Vaisto.Parser.parse("(fn [x y] (++ x y))")
+      assert {:ok, {:fn, [:string, :string], :string}, _typed} = Vaisto.TypeSystem.Infer.infer(ast)
+    end
+
+    test "lambda with boolean ops compiles e2e" do
+      code = """
+      (defn apply-and [f] (f true false))
+      (defn main [] (apply-and (fn [x y] (and x y))))
+      """
+      {:ok, mod} = Runner.compile_and_load(code, :LambdaBoolOps)
+      assert mod.main() == false
+    end
+  end
 end

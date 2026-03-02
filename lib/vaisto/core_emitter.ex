@@ -461,6 +461,29 @@ defmodule Vaisto.CoreEmitter do
       [to_core_expr_with_state(left, state_var), to_core_expr_with_state(right, state_var)]
     )
   end
+  defp to_core_expr_with_state({:call, :not, [arg], _type}, state_var) do
+    :cerl.c_call(
+      :cerl.c_atom(:erlang),
+      :cerl.c_atom(:not),
+      [to_core_expr_with_state(arg, state_var)]
+    )
+  end
+  defp to_core_expr_with_state({:call, op, [left, right], _type}, state_var) when op in [:==, :!=, :<, :>, :<=, :>=] do
+    :cerl.c_call(
+      :cerl.c_atom(:erlang),
+      :cerl.c_atom(op),
+      [to_core_expr_with_state(left, state_var), to_core_expr_with_state(right, state_var)]
+    )
+  end
+  defp to_core_expr_with_state({:if, condition, then_branch, else_branch, _type}, state_var) do
+    cond_core = to_core_expr_with_state(condition, state_var)
+    then_core = to_core_expr_with_state(then_branch, state_var)
+    else_core = to_core_expr_with_state(else_branch, state_var)
+    true_clause = :cerl.c_clause([:cerl.c_atom(true)], then_core)
+    false_clause = :cerl.c_clause([:cerl.c_atom(false)], else_core)
+    :cerl.c_case(cond_core, [true_clause, false_clause])
+  end
+  defp to_core_expr_with_state({:lit, _, _} = lit, _state_var), do: to_core_expr(lit)
   defp to_core_expr_with_state(other, _state_var), do: to_core_expr(other)
 
   # --- Expression transformation ---
