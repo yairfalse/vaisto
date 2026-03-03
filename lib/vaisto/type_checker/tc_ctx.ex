@@ -10,11 +10,11 @@ defmodule Vaisto.TypeChecker.TcCtx do
   alias Vaisto.TypeSystem.Core
   alias Vaisto.TypeSystem.Unify
 
-  defstruct [:env, :subst, row_counter: 0, counter: 10_000, constraints: []]
+  defstruct [:env, :subst, row_counter: 0, counter: 10_000, constraints: [], constrained_tvars: MapSet.new()]
 
   @doc "Create a new context from a type environment."
   def new(env) do
-    %__MODULE__{env: env, subst: Core.empty_subst(), row_counter: 0, counter: 10_000}
+    %__MODULE__{env: env, subst: Core.empty_subst(), row_counter: 0, counter: 10_000, constrained_tvars: MapSet.new()}
   end
 
   @doc "Unify two types within this context, updating the substitution and row counter."
@@ -89,6 +89,40 @@ defmodule Vaisto.TypeChecker.TcCtx do
       {[], _} -> type
       {_, []} -> {:forall, quantified, type}
       _ -> {:forall, quantified, {:constrained, relevant, type}}
+    end
+  end
+
+  @doc "Mark a type variable as constrained (used by a typeclassed operation)."
+  def mark_constrained(%__MODULE__{} = ctx, {:tvar, id}) do
+    %{ctx | constrained_tvars: MapSet.put(ctx.constrained_tvars, id)}
+  end
+  def mark_constrained(ctx, _), do: ctx
+
+  @doc """
+  Generalize a type conservatively.
+
+  `eligible_tvars` is the set of tvar IDs created by freshening — only these
+  can be quantified. Constrained tvars (from typeclassed operations) are pinned
+  to `:any`. All other tvars (e.g. from ADT definitions) are left as-is.
+  """
+  def generalize_conservative(%__MODULE__{subst: subst, constrained_tvars: constrained}, type, eligible_tvars) do
+    # Pin constrained tvars to :any BEFORE applying the main subst
+    pin_subst = constrained
+      |> Enum.map(fn id -> {id, :any} end)
+      |> Map.new()
+
+    merged_subst = Map.merge(subst, pin_subst)
+    type = Core.apply_subst(merged_subst, type)
+    type_vars = Core.free_vars(type)
+
+    # Only quantify tvars that are both free in the type AND eligible (from freshening)
+    quantified = type_vars
+      |> Enum.filter(&MapSet.member?(eligible_tvars, &1))
+      |> Enum.sort()
+
+    case quantified do
+      [] -> type
+      _ -> {:forall, quantified, type}
     end
   end
 

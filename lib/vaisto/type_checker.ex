@@ -448,6 +448,7 @@ defmodule Vaisto.TypeChecker do
     with {:ok, list_type, typed_list, ctx} <- check_s(list_expr, ctx) do
       case list_type do
         {:list, elem_type} -> {:ok, elem_type, {:call, :head, [typed_list], elem_type}, ctx}
+        {:tvar, _} -> {:ok, :any, {:call, :head, [typed_list], :any}, ctx}
         :any -> {:ok, :any, {:call, :head, [typed_list], :any}, ctx}
         other -> {:error, Errors.not_a_list(:head, other)}
       end
@@ -459,6 +460,7 @@ defmodule Vaisto.TypeChecker do
     with {:ok, list_type, typed_list, ctx} <- check_s(list_expr, ctx) do
       case list_type do
         {:list, _elem_type} = t -> {:ok, t, {:call, :tail, [typed_list], t}, ctx}
+        {:tvar, _} -> {:ok, {:list, :any}, {:call, :tail, [typed_list], {:list, :any}}, ctx}
         :any -> {:ok, {:list, :any}, {:call, :tail, [typed_list], {:list, :any}}, ctx}
         other -> {:error, Errors.not_a_list(:tail, other)}
       end
@@ -480,6 +482,9 @@ defmodule Vaisto.TypeChecker do
           else
             {:error, Errors.cons_type_mismatch(elem_type, list_type)}
           end
+        {:tvar, _} ->
+          result_type = {:list, elem_type}
+          {:ok, result_type, {:call, :cons, [typed_elem, typed_list], result_type}, ctx}
         :any ->
           result_type = {:list, elem_type}
           {:ok, result_type, {:call, :cons, [typed_elem, typed_list], result_type}, ctx}
@@ -494,6 +499,7 @@ defmodule Vaisto.TypeChecker do
     with {:ok, list_type, typed_list, ctx} <- check_s(list_expr, ctx) do
       case list_type do
         {:list, _} -> {:ok, :bool, {:call, :empty?, [typed_list], :bool}, ctx}
+        {:tvar, _} -> {:ok, :bool, {:call, :empty?, [typed_list], :bool}, ctx}
         :any -> {:ok, :bool, {:call, :empty?, [typed_list], :bool}, ctx}
         other -> {:error, Errors.not_a_list(:empty?, other)}
       end
@@ -505,6 +511,7 @@ defmodule Vaisto.TypeChecker do
     with {:ok, list_type, typed_list, ctx} <- check_s(list_expr, ctx) do
       case list_type do
         {:list, _} -> {:ok, :int, {:call, :length, [typed_list], :int}, ctx}
+        {:tvar, _} -> {:ok, :int, {:call, :length, [typed_list], :int}, ctx}
         :any -> {:ok, :int, {:call, :length, [typed_list], :int}, ctx}
         other -> {:error, Errors.not_a_list(:length, other)}
       end
@@ -617,6 +624,8 @@ defmodule Vaisto.TypeChecker do
           end
         :pid ->
           {:ok, :ok, {:call, :"!", [typed_pid, typed_msg], :ok}, ctx}
+        {:tvar, _} ->
+          {:ok, :ok, {:call, :"!", [typed_pid, typed_msg], :ok}, ctx}
         other ->
           {:error, Errors.send_to_non_pid(other)}
       end
@@ -630,6 +639,7 @@ defmodule Vaisto.TypeChecker do
       case pid_type do
         {:pid, _, _} -> {:ok, :ok, {:call, :"!!", [typed_pid, typed_msg], :ok}, ctx}
         :pid -> {:ok, :ok, {:call, :"!!", [typed_pid, typed_msg], :ok}, ctx}
+        {:tvar, _} -> {:ok, :ok, {:call, :"!!", [typed_pid, typed_msg], :ok}, ctx}
         :any -> {:ok, :ok, {:call, :"!!", [typed_pid, typed_msg], :ok}, ctx}
         other -> {:error, Errors.send_to_non_pid(other)}
       end
@@ -639,7 +649,7 @@ defmodule Vaisto.TypeChecker do
   # if expression
   defp check_impl_s({:if, condition, then_branch, else_branch}, ctx) do
     with {:ok, cond_type, typed_cond, ctx} <- check_s(condition, ctx),
-         :ok <- expect_bool(cond_type),
+         {:ok, ctx} <- expect_bool_s(cond_type, ctx),
          {:ok, then_type, typed_then, ctx} <- check_s(then_branch, ctx),
          {:ok, else_type, typed_else, ctx} <- check_s(else_branch, ctx),
          {:ok, ctx} <- expect_same_type_s(then_type, else_type, ctx) do
@@ -695,7 +705,7 @@ defmodule Vaisto.TypeChecker do
   # Unary negation: (- x)
   defp check_impl_s({:call, :-, [arg]}, ctx) do
     with {:ok, arg_type, typed_arg, ctx} <- check_s(arg, ctx),
-         :ok <- expect_numeric(arg_type, "negation") do
+         {:ok, ctx} <- expect_numeric_s(arg_type, "negation", ctx) do
       {:ok, arg_type, {:call, :-, [typed_arg], arg_type}, ctx}
     end
   end
@@ -704,8 +714,8 @@ defmodule Vaisto.TypeChecker do
   defp check_impl_s({:call, :++, [left, right]}, ctx) do
     with {:ok, left_type, typed_left, ctx} <- check_s(left, ctx),
          {:ok, right_type, typed_right, ctx} <- check_s(right, ctx),
-         :ok <- expect_string(left_type, :++),
-         :ok <- expect_string(right_type, :++) do
+         {:ok, ctx} <- expect_string_s(left_type, :++, ctx),
+         {:ok, ctx} <- expect_string_s(right_type, :++, ctx) do
       {:ok, :string, {:call, :++, [typed_left, typed_right], :string}, ctx}
     end
   end
@@ -714,7 +724,7 @@ defmodule Vaisto.TypeChecker do
   defp check_impl_s({:call, op, [left, right]}, ctx) when op in [:+, :-, :*] do
     with {:ok, left_type, typed_left, ctx} <- check_s(left, ctx),
          {:ok, right_type, typed_right, ctx} <- check_s(right, ctx),
-         {:ok, result_type} <- check_numeric_op(op, left_type, right_type) do
+         {:ok, result_type, ctx} <- check_numeric_op_s(op, left_type, right_type, ctx) do
       {:ok, result_type, {:call, op, [typed_left, typed_right], result_type}, ctx}
     end
   end
@@ -723,8 +733,8 @@ defmodule Vaisto.TypeChecker do
   defp check_impl_s({:call, :/, [left, right]}, ctx) do
     with {:ok, left_type, typed_left, ctx} <- check_s(left, ctx),
          {:ok, right_type, typed_right, ctx} <- check_s(right, ctx),
-         :ok <- expect_numeric(left_type, "division"),
-         :ok <- expect_numeric(right_type, "division") do
+         {:ok, ctx} <- expect_numeric_s(left_type, "division", ctx),
+         {:ok, ctx} <- expect_numeric_s(right_type, "division", ctx) do
       {:ok, :float, {:call, :/, [typed_left, typed_right], :float}, ctx}
     end
   end
@@ -733,8 +743,8 @@ defmodule Vaisto.TypeChecker do
   defp check_impl_s({:call, op, [left, right]}, ctx) when op in [:and, :or] do
     with {:ok, left_type, typed_left, ctx} <- check_s(left, ctx),
          {:ok, right_type, typed_right, ctx} <- check_s(right, ctx),
-         :ok <- expect_bool(left_type, op),
-         :ok <- expect_bool(right_type, op) do
+         {:ok, ctx} <- expect_bool_s(left_type, op, ctx),
+         {:ok, ctx} <- expect_bool_s(right_type, op, ctx) do
       {:ok, :bool, {:call, op, [typed_left, typed_right], :bool}, ctx}
     end
   end
@@ -742,7 +752,7 @@ defmodule Vaisto.TypeChecker do
   # Boolean unary not
   defp check_impl_s({:call, :not, [arg]}, ctx) do
     with {:ok, arg_type, typed_arg, ctx} <- check_s(arg, ctx),
-         :ok <- expect_bool(arg_type, :not) do
+         {:ok, ctx} <- expect_bool_s(arg_type, :not, ctx) do
       {:ok, :bool, {:call, :not, [typed_arg], :bool}, ctx}
     end
   end
@@ -751,8 +761,8 @@ defmodule Vaisto.TypeChecker do
   defp check_impl_s({:call, op, [left, right]}, ctx) when op in [:div, :rem] do
     with {:ok, left_type, typed_left, ctx} <- check_s(left, ctx),
          {:ok, right_type, typed_right, ctx} <- check_s(right, ctx),
-         :ok <- expect_int(left_type, op),
-         :ok <- expect_int(right_type, op) do
+         {:ok, ctx} <- expect_int_s(left_type, op, ctx),
+         {:ok, ctx} <- expect_int_s(right_type, op, ctx) do
       {:ok, :int, {:call, op, [typed_left, typed_right], :int}, ctx}
     end
   end
@@ -761,8 +771,8 @@ defmodule Vaisto.TypeChecker do
   defp check_impl_s({:call, op, [left, right]}, ctx) when op in [:<, :>, :<=, :>=] do
     with {:ok, left_type, typed_left, ctx} <- check_s(left, ctx),
          {:ok, right_type, typed_right, ctx} <- check_s(right, ctx),
-         :ok <- expect_numeric(left_type, "comparison"),
-         :ok <- expect_numeric(right_type, "comparison") do
+         {:ok, ctx} <- expect_numeric_s(left_type, "comparison", ctx),
+         {:ok, ctx} <- expect_numeric_s(right_type, "comparison", ctx) do
       {:ok, :bool, {:call, op, [typed_left, typed_right], :bool}, ctx}
     end
   end
@@ -801,7 +811,8 @@ defmodule Vaisto.TypeChecker do
 
   # Function call (expression) — full ctx threading
   defp check_impl_s({:call, func, args}, ctx) do
-    with {:ok, func_type} <- lookup_function(func, ctx.env),
+    with {:ok, raw_type, ctx} <- lookup_function_s(func, ctx),
+         {func_type, ctx} = TcCtx.instantiate(ctx, raw_type),
          {:ok, arg_types, typed_args, ctx} <- check_args_s(args, ctx),
          {:ok, ret_type, ctx} <- unify_call_s(func_type, arg_types, ctx, args, func) do
       {:ok, ret_type, {:call, func, typed_args, ret_type}, ctx}
@@ -861,27 +872,36 @@ defmodule Vaisto.TypeChecker do
   defp check_impl_s({:defn, name, params, body, declared_ret_type, guard}, ctx) do
     param_names = Enum.map(params, fn {n, _t} -> n end)
     param_types = Enum.map(params, fn {_n, t} -> t end)
-    param_env = Map.new(params)
 
-    self_type = {:fn, param_types, declared_ret_type}
+    {fresh_param_types, ctx} = freshen_any_params(param_types, ctx)
+    eligible_tvars = fresh_param_types
+      |> Enum.flat_map(fn {:tvar, id} -> [id]; _ -> [] end)
+      |> MapSet.new()
+    fresh_param_env = Enum.zip(param_names, fresh_param_types) |> Map.new()
+
+    self_type = {:fn, fresh_param_types, declared_ret_type}
     extended_env = ctx.env
-      |> Map.merge(param_env)
+      |> Map.merge(fresh_param_env)
       |> Map.put(name, self_type)
       |> then(fn e -> Enum.reduce(param_names, e, &add_local_var(&2, &1)) end)
 
-    extended_ctx = %{ctx | env: extended_env}
+    saved_constrained = ctx.constrained_tvars
+    extended_ctx = %{ctx | env: extended_env, constrained_tvars: MapSet.new()}
 
     # Check guard returns bool
     with {:ok, guard_type, typed_guard, ctx} <- check_s(guard, extended_ctx),
-         :ok <- expect_bool(guard_type) do
+         {:ok, ctx} <- expect_bool_s(guard_type, ctx) do
       case check_s(body, ctx) do
-        {:ok, inferred_ret_type, typed_body, ctx} ->
+        {:ok, inferred_ret_type, typed_body, body_ctx} ->
           if declared_ret_type != :any and not types_unifiable?(declared_ret_type, inferred_ret_type) do
             {:error, Errors.return_type_mismatch(declared_ret_type, inferred_ret_type)}
           else
             final_ret_type = if declared_ret_type != :any, do: declared_ret_type, else: inferred_ret_type
-            func_type = {:fn, param_types, final_ret_type}
-            {:ok, func_type, {:defn, name, param_names, typed_body, func_type, typed_guard}, ctx}
+            mono_type = {:fn, fresh_param_types, final_ret_type}
+            scheme = TcCtx.generalize_conservative(body_ctx, mono_type, eligible_tvars)
+            ast_type = pin_constrained_tvars(mono_type, body_ctx)
+            ctx_out = %{body_ctx | constrained_tvars: saved_constrained}
+            {:ok, scheme, {:defn, name, param_names, typed_body, ast_type, typed_guard}, ctx_out}
           end
         error -> error
       end
@@ -892,24 +912,39 @@ defmodule Vaisto.TypeChecker do
   defp check_impl_s({:defn, name, params, body, declared_ret_type}, ctx) do
     param_names = Enum.map(params, fn {n, _t} -> n end)
     param_types = Enum.map(params, fn {_n, t} -> t end)
-    param_env = Map.new(params)
 
-    self_type = {:fn, param_types, declared_ret_type}
+    # Freshen :any params with tvars for polymorphic inference
+    {fresh_param_types, ctx} = freshen_any_params(param_types, ctx)
+    eligible_tvars = fresh_param_types
+      |> Enum.flat_map(fn {:tvar, id} -> [id]; _ -> [] end)
+      |> MapSet.new()
+    fresh_param_env = Enum.zip(param_names, fresh_param_types) |> Map.new()
+
+    self_type = {:fn, fresh_param_types, declared_ret_type}
     extended_env = ctx.env
-      |> Map.merge(param_env)
+      |> Map.merge(fresh_param_env)
       |> Map.put(name, self_type)
       |> then(fn e -> Enum.reduce(param_names, e, &add_local_var(&2, &1)) end)
 
-    extended_ctx = %{ctx | env: extended_env}
+    # Save and reset constrained_tvars for this defn scope
+    saved_constrained = ctx.constrained_tvars
+    extended_ctx = %{ctx | env: extended_env, constrained_tvars: MapSet.new()}
 
     case check_s(body, extended_ctx) do
-      {:ok, inferred_ret_type, typed_body, ctx} ->
+      {:ok, inferred_ret_type, typed_body, body_ctx} ->
         if declared_ret_type != :any and not types_unifiable?(declared_ret_type, inferred_ret_type) do
           {:error, Errors.return_type_mismatch(declared_ret_type, inferred_ret_type)}
         else
           final_ret_type = if declared_ret_type != :any, do: declared_ret_type, else: inferred_ret_type
-          func_type = {:fn, param_types, final_ret_type}
-          {:ok, func_type, {:defn, name, param_names, typed_body, func_type}, ctx}
+          mono_type = {:fn, fresh_param_types, final_ret_type}
+
+          # Only quantify tvars we created for params (eligible_tvars)
+          scheme = TcCtx.generalize_conservative(body_ctx, mono_type, eligible_tvars)
+
+          # Typed AST uses monotype with constrained tvars pinned to :any
+          ast_type = pin_constrained_tvars(mono_type, body_ctx)
+          ctx_out = %{body_ctx | constrained_tvars: saved_constrained}
+          {:ok, scheme, {:defn, name, param_names, typed_body, ast_type}, ctx_out}
         end
       error -> error
     end
@@ -1717,17 +1752,7 @@ defmodule Vaisto.TypeChecker do
     end
   end
 
-  defp lookup_function(name, env) do
-    case Map.get(env, name) do
-      nil -> {:error, Errors.unknown_function(name, fn_names(env))}
-      {:fn, _, {:sum, _, _}} = ctor_type -> {:ok, instantiate_constructor_type(ctor_type)}
-      {:fn, _, {:record, _, _}} = ctor_type -> {:ok, instantiate_constructor_type(ctor_type)}
-      {:forall, vars, {:constrained, constraints, fn_type}} ->
-        {:ok, {:constrained_method, vars, constraints, fn_type, name}}
-      {:forall, _, _} = scheme -> {:ok, scheme}
-      type -> {:ok, type}
-    end
-  end
+
 
   # Stateful lookup that threads ctx for deterministic tvar generation
   defp lookup_function_s(name, ctx) do
@@ -2489,7 +2514,8 @@ defmodule Vaisto.TypeChecker do
   # Context-threaded HOF builtins
 
   defp check_builtin_map_s(func_name, list_expr, ctx) do
-    with {:ok, func_type} <- lookup_function(func_name, ctx.env),
+    with {:ok, raw_type, ctx} <- lookup_function_s(func_name, ctx),
+         {func_type, ctx} = TcCtx.instantiate(ctx, raw_type),
          {:ok, list_type, typed_list, ctx} <- check_s(list_expr, ctx) do
       case {func_type, list_type} do
         {{:fn, [_arg_type], ret_type}, {:list, _elem_type}} ->
@@ -2529,7 +2555,8 @@ defmodule Vaisto.TypeChecker do
   end
 
   defp check_builtin_filter_s(func_name, list_expr, ctx) do
-    with {:ok, func_type} <- lookup_function(func_name, ctx.env),
+    with {:ok, raw_type, ctx} <- lookup_function_s(func_name, ctx),
+         {func_type, ctx} = TcCtx.instantiate(ctx, raw_type),
          {:ok, list_type, typed_list, ctx} <- check_s(list_expr, ctx) do
       case {func_type, list_type} do
         {{:fn, [_arg_type], :bool}, {:list, elem_type}} ->
@@ -2573,7 +2600,8 @@ defmodule Vaisto.TypeChecker do
   end
 
   defp check_builtin_fold_s(func_name, init_expr, list_expr, ctx) do
-    with {:ok, func_type} <- lookup_function(func_name, ctx.env),
+    with {:ok, raw_type, ctx} <- lookup_function_s(func_name, ctx),
+         {func_type, ctx} = TcCtx.instantiate(ctx, raw_type),
          {:ok, init_type, typed_init, ctx} <- check_s(init_expr, ctx),
          {:ok, list_type, typed_list, ctx} <- check_s(list_expr, ctx) do
       case {func_type, list_type} do
@@ -2616,7 +2644,8 @@ defmodule Vaisto.TypeChecker do
 
 
   defp check_builtin_flat_map_s(func_name, list_expr, ctx) do
-    with {:ok, func_type} <- lookup_function(func_name, ctx.env),
+    with {:ok, raw_type, ctx} <- lookup_function_s(func_name, ctx),
+         {func_type, ctx} = TcCtx.instantiate(ctx, raw_type),
          {:ok, list_type, typed_list, ctx} <- check_s(list_expr, ctx) do
       case {func_type, list_type} do
         {{:fn, [_arg_type], {:list, b}}, {:list, _elem_type}} ->
@@ -2715,6 +2744,57 @@ defmodule Vaisto.TypeChecker do
       hint: "`#{op}` requires numeric operands, got `#{Vaisto.TypeFormatter.format(t1)}` and `#{Vaisto.TypeFormatter.format(t2)}`")}
   end
 
+  # --- Stateful _s variants: mark tvars as constrained, then delegate ---
+
+  defp expect_bool_s(type, ctx) do
+    ctx = TcCtx.mark_constrained(ctx, type)
+    case expect_bool(type) do
+      :ok -> {:ok, ctx}
+      err -> err
+    end
+  end
+
+  defp expect_bool_s(type, op, ctx) do
+    ctx = TcCtx.mark_constrained(ctx, type)
+    case expect_bool(type, op) do
+      :ok -> {:ok, ctx}
+      err -> err
+    end
+  end
+
+  defp expect_numeric_s(type, op, ctx) do
+    ctx = TcCtx.mark_constrained(ctx, type)
+    case expect_numeric(type, op) do
+      :ok -> {:ok, ctx}
+      err -> err
+    end
+  end
+
+  defp expect_int_s(type, op, ctx) do
+    ctx = TcCtx.mark_constrained(ctx, type)
+    case expect_int(type, op) do
+      :ok -> {:ok, ctx}
+      err -> err
+    end
+  end
+
+  defp expect_string_s(type, op, ctx) do
+    ctx = TcCtx.mark_constrained(ctx, type)
+    case expect_string(type, op) do
+      :ok -> {:ok, ctx}
+      err -> err
+    end
+  end
+
+  defp check_numeric_op_s(op, left_type, right_type, ctx) do
+    ctx = TcCtx.mark_constrained(ctx, left_type)
+    ctx = TcCtx.mark_constrained(ctx, right_type)
+    case check_numeric_op(op, left_type, right_type) do
+      {:ok, result_type} -> {:ok, result_type, ctx}
+      err -> err
+    end
+  end
+
   # Stateless compatibility check using real unification (no substitution threaded).
   defp types_unifiable?(t1, t2) do
     match?({:ok, _, _}, Vaisto.TypeSystem.Unify.unify(t1, t2))
@@ -2756,6 +2836,18 @@ defmodule Vaisto.TypeChecker do
 
   defp unify_call_s(:any, _actual_args, ctx, _original_args, _func_name) do
     {:ok, :any, ctx}
+  end
+
+  # Type variable used as a function — unify with {:fn, actual_args, fresh_ret}
+  # Mark as constrained since it's used in a function position
+  defp unify_call_s({:tvar, _} = tv, actual_args, ctx, _original_args, _func_name) do
+    ctx = TcCtx.mark_constrained(ctx, tv)
+    {ret_var, ctx} = TcCtx.fresh_var(ctx)
+    fn_type = {:fn, actual_args, ret_var}
+    case TcCtx.unify(ctx, tv, fn_type) do
+      {:ok, ctx} -> {:ok, TcCtx.apply_subst(ctx, ret_var), ctx}
+      {:error, _} = err -> err
+    end
   end
 
   defp unify_call_poly_s({:fn, expected_args, ret_type}, actual_args, ctx, original_args, func_name) do
@@ -3162,9 +3254,10 @@ defmodule Vaisto.TypeChecker do
 
   defp check_module_forms([form | rest], env, acc, errors) do
     case check(form, env) do
-      {:ok, _type, typed_form} ->
+      {:ok, type, typed_form} ->
         # Update env with more precise types after checking
-        new_env = update_env_from_typed_form(typed_form, env)
+        # Pass the returned type (may be {:forall, ...} scheme for defn)
+        new_env = update_env_from_typed_form(typed_form, type, env)
         check_module_forms(rest, new_env, [typed_form | acc], errors)
 
       {:error, err} ->
@@ -3225,8 +3318,13 @@ defmodule Vaisto.TypeChecker do
     {:error, Errors.derive_not_supported(class)}
   end
 
-  # Extract env updates from a typed form
+  # Extract env updates from a typed form (2-arg: uses type from AST)
   defp update_env_from_typed_form(typed_form, env) do
+    update_env_from_typed_form(typed_form, nil, env)
+  end
+
+  # Extract env updates from a typed form (3-arg: uses passed-in type for defn)
+  defp update_env_from_typed_form(typed_form, check_type, env) do
     case typed_form do
       {:process, name, _init, _handlers, process_type} ->
         Map.put(env, name, process_type)
@@ -3246,11 +3344,12 @@ defmodule Vaisto.TypeChecker do
           Map.put(acc_env, ctor_name, constructor_type)
         end)
 
-      {:defn, name, _params, _body, func_type} ->
-        Map.put(env, name, func_type)
+      {:defn, name, _params, _body, _func_type} ->
+        # Use check_type (may be {:forall, ...} scheme) if available
+        Map.put(env, name, check_type || elem(typed_form, 4))
 
-      {:defn, name, _params, _body, func_type, _guard} ->
-        Map.put(env, name, func_type)
+      {:defn, name, _params, _body, _func_type, _guard} ->
+        Map.put(env, name, check_type || elem(typed_form, 4))
 
       {:defn_multi, name, _arity, _clauses, func_type} ->
         Map.put(env, name, func_type)
@@ -3330,6 +3429,30 @@ defmodule Vaisto.TypeChecker do
   end
 
   # ============================================================================
+  # Conservative Polymorphic defn — Helpers
+  # ============================================================================
+
+  # Replace :any param types with fresh tvars for polymorphic inference
+  defp freshen_any_params(param_types, ctx) do
+    Enum.map_reduce(param_types, ctx, fn
+      :any, ctx ->
+        {tv, ctx} = TcCtx.fresh_var(ctx)
+        {tv, ctx}
+      type, ctx ->
+        {type, ctx}
+    end)
+  end
+
+  # Pin constrained tvars back to :any in a type (for typed AST)
+  defp pin_constrained_tvars(type, %TcCtx{constrained_tvars: constrained, subst: subst}) do
+    pin_subst = constrained
+      |> Enum.map(fn id -> {id, :any} end)
+      |> Map.new()
+    merged = Map.merge(subst, pin_subst)
+    Vaisto.TypeSystem.Core.apply_subst(merged, type)
+  end
+
+  # ============================================================================
   # Parametric Polymorphism — Fresh Instantiation
   # ============================================================================
 
@@ -3338,18 +3461,7 @@ defmodule Vaisto.TypeChecker do
     System.unique_integer([:positive, :monotonic]) + 10_000
   end
 
-  # Instantiate a constructor type with fresh tvars so each call site is independent
-  defp instantiate_constructor_type({:fn, params, ret}) do
-    tvar_ids = collect_tvar_ids(params ++ [ret])
-    if tvar_ids == [] do
-      {:fn, params, ret}
-    else
-      mapping = Map.new(tvar_ids, fn id -> {id, {:tvar, fresh_tvar_id()}} end)
-      {:fn,
-       Enum.map(params, &Vaisto.TypeSystem.Core.apply_subst(mapping, &1)),
-       Vaisto.TypeSystem.Core.apply_subst(mapping, ret)}
-    end
-  end
+
 
   # Instantiate a sum type with fresh tvars so each match clause is independent
   defp instantiate_sum_tvars({:sum, name, variants}) do

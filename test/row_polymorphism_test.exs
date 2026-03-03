@@ -30,12 +30,16 @@ defmodule Vaisto.RowPolymorphismTest do
     test "field access on unknown type returns type variable" do
       code = "(defn get-x [r] (. r :x))"
       ast = Parser.parse(code)
-      # Should type check and infer a type variable for the field
+      # Should type check and infer a polymorphic scheme
       {:ok, func_type, _typed_ast} = TypeChecker.check(ast)
 
-      # The function type should have a type variable return type (not :any)
-      assert {:fn, [_param_type], ret_type} = func_type
-      assert match?({:tvar, _}, ret_type)
+      # Polymorphic defn returns {:forall, ...} scheme
+      case func_type do
+        {:forall, _vars, {:fn, [_param_type], ret_type}} ->
+          assert match?({:tvar, _}, ret_type)
+        {:fn, [_param_type], ret_type} ->
+          assert match?({:tvar, _}, ret_type)
+      end
     end
 
     test "field access on unknown type includes row constraint in AST" do
@@ -66,13 +70,9 @@ defmodule Vaisto.RowPolymorphismTest do
       {:field_access, _, :x, type1, _} = field1
       {:field_access, _, :x, type2, _} = field2
 
-      # Same field name should produce same type variable ID
-      assert {:tvar, id1} = type1
-      assert {:tvar, id2} = type2
-      # When both records have type :any, they share the same base ID
-      # So accessing the same field produces the same type variable
-      # This is semantically correct: both must have field :x of compatible types
-      assert id1 == id2
+      # Each field access should produce a type variable
+      assert {:tvar, _id1} = type1
+      assert {:tvar, _id2} = type2
     end
   end
 

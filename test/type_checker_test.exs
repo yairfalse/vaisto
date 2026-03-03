@@ -425,4 +425,75 @@ defmodule Vaisto.TypeCheckerTest do
       assert error.hint =~ "`+`"
     end
   end
+
+  describe "conservative polymorphic defn" do
+    test "identity function is generalized to forall" do
+      code = "(defn id [x] x)"
+      ast = Vaisto.Parser.parse(code)
+      {:ok, type, _typed_ast} = TypeChecker.check(ast)
+      assert {:forall, [var], {:fn, [{:tvar, var}], {:tvar, var}}} = type
+    end
+
+    test "arithmetic-constrained function stays monomorphic" do
+      code = "(defn double [x] (* x 2))"
+      ast = Vaisto.Parser.parse(code)
+      {:ok, type, _typed_ast} = TypeChecker.check(ast)
+      assert {:fn, [:any], :num} = type
+    end
+
+    test "boolean-constrained function stays monomorphic" do
+      code = "(defn neg [x] (not x))"
+      ast = Vaisto.Parser.parse(code)
+      {:ok, type, _typed_ast} = TypeChecker.check(ast)
+      assert {:fn, [:any], :bool} = type
+    end
+
+    test "string-constrained function stays monomorphic" do
+      code = "(defn greet [x] (++ \"hi \" x))"
+      ast = Vaisto.Parser.parse(code)
+      {:ok, type, _typed_ast} = TypeChecker.check(ast)
+      assert {:fn, [:any], :string} = type
+    end
+
+    test "mixed params: free param generalized, constrained stays :any" do
+      code = "(defn pick [x y] (+ x 1))"
+      ast = Vaisto.Parser.parse(code)
+      {:ok, type, _typed_ast} = TypeChecker.check(ast)
+      # y is free → quantified, x is constrained → :any
+      assert {:forall, [var], {:fn, [:any, {:tvar, var}], :num}} = type
+    end
+
+    test "annotated function not affected by freshening" do
+      code = "(defn add [x :int] :int (+ x 1))"
+      ast = Vaisto.Parser.parse(code)
+      {:ok, type, _typed_ast} = TypeChecker.check(ast)
+      assert {:fn, [:int], :int} = type
+    end
+
+    test "polymorphic defn used at different types in module" do
+      code = """
+      (defn id [x] x)
+      (defn test [] (list (id 42) (id "hello")))
+      """
+      ast = Vaisto.Parser.parse(code)
+      {:ok, :module, _typed_ast} = TypeChecker.check(ast)
+    end
+
+    test "polymorphic defn passed to map" do
+      code = """
+      (defn id [x] x)
+      (map id (list 1 2 3))
+      """
+      ast = Vaisto.Parser.parse(code)
+      {:ok, :module, _typed_ast} = TypeChecker.check(ast)
+    end
+
+    test "two-param identity is fully generalized" do
+      code = "(defn pair [x y] (list x y))"
+      ast = Vaisto.Parser.parse(code)
+      {:ok, type, _typed_ast} = TypeChecker.check(ast)
+      assert {:forall, vars, {:fn, [{:tvar, _}, {:tvar, _}], {:list, :any}}} = type
+      assert length(vars) == 2
+    end
+  end
 end
