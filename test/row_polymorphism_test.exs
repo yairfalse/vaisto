@@ -201,17 +201,17 @@ defmodule Vaisto.RowPolymorphismTest do
       assert length(field_tvars) > 0, "Expected field tvar IDs >= 100_000_000"
     end
 
-    test "different fields on same record produce distinct tvars" do
+    test "different fields used in + are unified (Num a => a -> a -> a)" do
       code = "(defn sum-fields [r] (+ (. r :x) (. r :y)))"
       ast = Vaisto.Parser.parse(code)
       {:ok, _type, typed_ast} = TypeChecker.check(ast)
 
-      # Extract the two field accesses from the + call body
+      # With Num a => a -> a -> a semantics, + unifies both field types
       {:defn, :"sum-fields", [:r], body, _} = typed_ast
       {:call, :+, [field1, field2], _} = body
       {:field_access, _, :x, {:tvar, id1}, _} = field1
       {:field_access, _, :y, {:tvar, id2}, _} = field2
-      assert id1 != id2, "Different fields should have different tvar IDs"
+      assert id1 == id2, "Fields used in + should have same type (Num a => a -> a -> a)"
     end
   end
 

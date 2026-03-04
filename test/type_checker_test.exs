@@ -434,33 +434,36 @@ defmodule Vaisto.TypeCheckerTest do
       assert {:forall, [var], {:fn, [{:tvar, var}], {:tvar, var}}} = type
     end
 
-    test "arithmetic-constrained function stays monomorphic" do
+    test "arithmetic-constrained function gets Num constraint" do
       code = "(defn double [x] (* x 2))"
       ast = Vaisto.Parser.parse(code)
       {:ok, type, _typed_ast} = TypeChecker.check(ast)
-      assert {:fn, [:any], :num} = type
+      # x is constrained by Num, return type is :int (from literal 2)
+      assert {:forall, [v], {:constrained, [{:Num, {:tvar, v}}], {:fn, [{:tvar, v}], :int}}} = type
     end
 
-    test "boolean-constrained function stays monomorphic" do
+    test "boolean-constrained function unifies with :bool" do
       code = "(defn neg [x] (not x))"
       ast = Vaisto.Parser.parse(code)
       {:ok, type, _typed_ast} = TypeChecker.check(ast)
-      assert {:fn, [:any], :bool} = type
+      # Bool operators unify tvars with :bool → concrete type
+      assert {:fn, [:bool], :bool} = type
     end
 
-    test "string-constrained function stays monomorphic" do
+    test "string-constrained function unifies with :string" do
       code = "(defn greet [x] (++ \"hi \" x))"
       ast = Vaisto.Parser.parse(code)
       {:ok, type, _typed_ast} = TypeChecker.check(ast)
-      assert {:fn, [:any], :string} = type
+      # String operators unify tvars with :string → concrete type
+      assert {:fn, [:string], :string} = type
     end
 
-    test "mixed params: free param generalized, constrained stays :any" do
+    test "mixed params: free param generalized, Num-constrained gets class" do
       code = "(defn pick [x y] (+ x 1))"
       ast = Vaisto.Parser.parse(code)
       {:ok, type, _typed_ast} = TypeChecker.check(ast)
-      # y is free → quantified, x is constrained → :any
-      assert {:forall, [var], {:fn, [:any, {:tvar, var}], :num}} = type
+      # x is constrained by Num, y is free → both quantified
+      assert {:forall, [x_var, y_var], {:constrained, [{:Num, {:tvar, x_var}}], {:fn, [{:tvar, x_var}, {:tvar, y_var}], :int}}} = type
     end
 
     test "annotated function not affected by freshening" do
@@ -494,6 +497,83 @@ defmodule Vaisto.TypeCheckerTest do
       {:ok, type, _typed_ast} = TypeChecker.check(ast)
       assert {:forall, vars, {:fn, [{:tvar, _}, {:tvar, _}], {:list, :any}}} = type
       assert length(vars) == 2
+    end
+
+    test "Num-constrained function called with int succeeds" do
+      code = """
+      (defn double [x] (* x 2))
+      (double 3)
+      """
+      ast = Vaisto.Parser.parse(code)
+      assert {:ok, :module, _typed_ast} = TypeChecker.check(ast)
+    end
+
+    test "Num-constrained function called with string fails" do
+      code = """
+      (defn double [x] (* x 2))
+      (double "hi")
+      """
+      ast = Vaisto.Parser.parse(code)
+      assert {:error, _} = TypeChecker.check(ast)
+    end
+
+    test "Ord constraint from comparison operators" do
+      code = "(defn bigger [x y] (> x y))"
+      ast = Vaisto.Parser.parse(code)
+      {:ok, type, _typed_ast} = TypeChecker.check(ast)
+      # Both params constrained by Ord
+      assert {:forall, [v1, v2], {:constrained, constraints, {:fn, [{:tvar, v1}, {:tvar, v2}], :bool}}} = type
+      assert Enum.any?(constraints, fn {:Ord, _} -> true; _ -> false end)
+    end
+
+    test "div/rem unifies with :int" do
+      code = "(defn half [x] (div x 2))"
+      ast = Vaisto.Parser.parse(code)
+      {:ok, type, _typed_ast} = TypeChecker.check(ast)
+      # div unifies tvar with :int → concrete type
+      assert {:fn, [:int], :int} = type
+    end
+  end
+
+  describe "multi-clause polymorphic defn" do
+    test "multi-clause catch-all is generalized" do
+      code = "(defn wrap [x (list x)])"
+      ast = Vaisto.Parser.parse(code)
+      {:ok, type, _typed_ast} = TypeChecker.check(ast)
+      assert {:forall, [var], {:fn, [{:tvar, var}], {:list, _}}} = type
+    end
+
+    test "multi-clause len function type checks" do
+      code = """
+      (defn len
+        [[] 0]
+        [[h | t] (+ 1 (len t))])
+      """
+      ast = Vaisto.Parser.parse(code)
+      {:ok, type, _typed_ast} = TypeChecker.check(ast)
+      # Pattern bindings are :any, recursive call unifies tvar with :any
+      assert {:fn, [:any], _} = type
+    end
+
+    test "polymorphic multi-clause used at multiple types" do
+      code = """
+      (defn wrap [x (list x)])
+      (defn test [] (list (wrap 42) (wrap "hi")))
+      """
+      ast = Vaisto.Parser.parse(code)
+      assert {:ok, :module, _typed_ast} = TypeChecker.check(ast)
+    end
+
+    test "multi-clause with guard uses constrained context" do
+      code = """
+      (defn abs
+        [x :when (>= x 0) x]
+        [x (- 0 x)])
+      """
+      ast = Vaisto.Parser.parse(code)
+      {:ok, type, _typed_ast} = TypeChecker.check(ast)
+      # Param is quantified (generalized from freshened :any)
+      assert {:forall, [_v], {:fn, [{:tvar, _}], _ret}} = type
     end
   end
 end
