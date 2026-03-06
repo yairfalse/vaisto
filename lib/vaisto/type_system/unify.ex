@@ -7,6 +7,7 @@ defmodule Vaisto.TypeSystem.Unify do
   """
 
   import Vaisto.TypeSystem.Core
+  alias Vaisto.Errors
 
   @doc """
   Attempts to unify two types, returning an updated substitution.
@@ -52,7 +53,7 @@ defmodule Vaisto.TypeSystem.Unify do
         {:fn, args2, ret2} = t2
 
         if length(args1) != length(args2) do
-          {:error, "function arity mismatch: #{length(args1)} vs #{length(args2)}"}
+          {:error, Errors.function_arity_mismatch_unify(length(args1), length(args2))}
         else
           case unify_lists(args1, args2, subst, row_counter) do
             {:ok, subst, row_counter} -> unify(ret1, ret2, subst, row_counter)
@@ -66,7 +67,7 @@ defmodule Vaisto.TypeSystem.Unify do
         {:record, name2, fields2} = t2
 
         if name1 != name2 do
-          {:error, "cannot unify records #{name1} and #{name2}"}
+          {:error, Errors.record_name_mismatch(name1, name2)}
         else
           unify_fields(fields1, fields2, subst, row_counter)
         end
@@ -77,7 +78,7 @@ defmodule Vaisto.TypeSystem.Unify do
         {:sum, name2, variants2} = t2
 
         if name1 != name2 do
-          {:error, "cannot unify #{name1} with #{name2}"}
+          {:error, Errors.sum_name_mismatch(name1, name2)}
         else
           unify_variant_fields(variants1, variants2, subst, row_counter)
         end
@@ -88,7 +89,7 @@ defmodule Vaisto.TypeSystem.Unify do
         {:tuple, elems2} = t2
 
         if length(elems1) != length(elems2) do
-          {:error, "tuple size mismatch: #{length(elems1)} vs #{length(elems2)}"}
+          {:error, Errors.tuple_size_mismatch(length(elems1), length(elems2))}
         else
           unify_lists(elems1, elems2, subst, row_counter)
         end
@@ -144,7 +145,7 @@ defmodule Vaisto.TypeSystem.Unify do
         if n1 == n2 do
           {:ok, subst, row_counter}
         else
-          {:error, "cannot unify #{format_type(t1)} with #{format_type(t2)}"}
+          {:error, Errors.unification_error(t1, t2)}
         end
 
       # Process types — unify state types
@@ -155,7 +156,7 @@ defmodule Vaisto.TypeSystem.Unify do
 
       # No match - types are incompatible
       true ->
-        {:error, "cannot unify #{format_type(t1)} with #{format_type(t2)}"}
+        {:error, Errors.unification_error(t1, t2)}
     end
   end
 
@@ -167,7 +168,7 @@ defmodule Vaisto.TypeSystem.Unify do
   def bind_var({:tvar, id}, type, subst) do
     # Occurs check: ensure we're not creating an infinite type
     if occurs?(id, type) do
-      {:error, "infinite type: t#{id} occurs in #{format_type(type)}"}
+      {:error, Errors.occurs_check_error(id, type)}
     else
       {:ok, Map.put(subst, id, type)}
     end
@@ -219,7 +220,7 @@ defmodule Vaisto.TypeSystem.Unify do
 
     # All keys must match
     if Map.keys(map1) |> Enum.sort() != Map.keys(map2) |> Enum.sort() do
-      {:error, "record field mismatch"}
+      {:error, Errors.record_field_mismatch()}
     else
       Enum.reduce_while(map1, {:ok, subst, row_counter}, fn {key, type1}, {:ok, acc_subst, acc_counter} ->
         type2 = Map.fetch!(map2, key)
@@ -248,10 +249,10 @@ defmodule Vaisto.TypeSystem.Unify do
     end
   end
   defp unify_variant_fields_sorted([{n1, _} | _], [{n2, _} | _], _subst, _rc) do
-    {:error, "variant mismatch: #{n1} vs #{n2}"}
+    {:error, Errors.variant_mismatch(n1, n2)}
   end
   defp unify_variant_fields_sorted(_, _, _subst, _rc) do
-    {:error, "variant count mismatch"}
+    {:error, Errors.variant_count_mismatch()}
   end
 
   # ============================================================================
@@ -264,7 +265,7 @@ defmodule Vaisto.TypeSystem.Unify do
   def bind_row_var({:rvar, id}, type, subst) do
     # Occurs check for row variables
     if row_occurs?(id, type) do
-      {:error, "infinite row type: r#{id} occurs in #{format_type(type)}"}
+      {:error, Errors.row_occurs_check_error(id, type)}
     else
       {:ok, Map.put(subst, {:row, id}, type)}
     end
@@ -325,7 +326,7 @@ defmodule Vaisto.TypeSystem.Unify do
         if map_size(only_in_1) == 0 and map_size(only_in_2) == 0 do
           {:ok, subst, row_counter}
         else
-          {:error, "row field mismatch: closed rows have different fields"}
+          {:error, Errors.row_field_mismatch("closed rows have different fields")}
         end
 
       # tail1 is open - absorb only_in_2 fields
@@ -337,7 +338,7 @@ defmodule Vaisto.TypeSystem.Unify do
             error -> error
           end
         else
-          {:error, "row field mismatch: extra fields #{inspect(Map.keys(only_in_1))} not in closed row"}
+          {:error, Errors.row_field_mismatch("extra fields #{inspect(Map.keys(only_in_1))} not in closed row")}
         end
 
       # tail2 is open - absorb only_in_1 fields
@@ -348,7 +349,7 @@ defmodule Vaisto.TypeSystem.Unify do
             error -> error
           end
         else
-          {:error, "row field mismatch: extra fields #{inspect(Map.keys(only_in_2))} not in closed row"}
+          {:error, Errors.row_field_mismatch("extra fields #{inspect(Map.keys(only_in_2))} not in closed row")}
         end
 
       # Both open - use the counter for fresh row variable
@@ -363,7 +364,7 @@ defmodule Vaisto.TypeSystem.Unify do
             true ->
               # Extras on either side is a contradiction: the same tail
               # can't simultaneously contain different extra fields
-              {:error, "cannot unify rows: same row variable but incompatible extra fields #{inspect(Map.keys(only_in_1))} vs #{inspect(Map.keys(only_in_2))}"}
+              {:error, Errors.row_field_mismatch("same row variable but incompatible extra fields #{inspect(Map.keys(only_in_1))} vs #{inspect(Map.keys(only_in_2))}")}
           end
         else
           # Different rvars — generate fresh tail and cross-bind
@@ -379,7 +380,7 @@ defmodule Vaisto.TypeSystem.Unify do
         end
 
       true ->
-        {:error, "cannot unify row tails"}
+        {:error, Errors.row_field_mismatch("cannot unify row tails")}
     end
   end
 
@@ -394,7 +395,7 @@ defmodule Vaisto.TypeSystem.Unify do
     # All row fields must exist in record
     missing_in_record = Map.keys(row_map) -- Map.keys(record_map)
     unless missing_in_record == [] do
-      {:error, "row requires fields #{inspect(missing_in_record)} not in record"}
+      {:error, Errors.row_field_mismatch("row requires fields #{inspect(missing_in_record)} not in record")}
     else
       # Unify common fields
       with {:ok, subst, row_counter} <- unify_common_fields(MapSet.new(Map.keys(row_map)), row_map, record_map, subst, row_counter) do
@@ -406,7 +407,7 @@ defmodule Vaisto.TypeSystem.Unify do
             if map_size(extra_in_record) == 0 do
               {:ok, subst, row_counter}
             else
-              {:error, "closed row doesn't accept extra fields #{inspect(Map.keys(extra_in_record))}"}
+              {:error, Errors.row_field_mismatch("closed row doesn't accept extra fields #{inspect(Map.keys(extra_in_record))}")}
             end
 
           {:rvar, _} ->

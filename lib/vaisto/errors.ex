@@ -108,6 +108,107 @@ defmodule Vaisto.Errors do
   end
 
   # ============================================================================
+  # Unification Errors
+  # ============================================================================
+
+  @doc "Generic unification failure between two incompatible types"
+  def unification_error(type1, type2, opts \\ []) do
+    Error.new("cannot unify types",
+      Keyword.merge(opts, [expected: type1, actual: type2])
+    )
+  end
+
+  @doc "Function arity mismatch during unification"
+  def function_arity_mismatch_unify(arity1, arity2, opts \\ []) do
+    Error.new("function arity mismatch",
+      Keyword.merge(opts, [
+        note: "expected #{arity1} argument(s), got #{arity2}"
+      ])
+    )
+  end
+
+  @doc "Record name mismatch during unification"
+  def record_name_mismatch(name1, name2, opts \\ []) do
+    Error.new("cannot unify records",
+      Keyword.merge(opts, [
+        expected: {:record, name1, []},
+        actual: {:record, name2, []},
+        note: "record `#{name1}` is not compatible with `#{name2}`"
+      ])
+    )
+  end
+
+  @doc "Sum type name mismatch during unification"
+  def sum_name_mismatch(name1, name2, opts \\ []) do
+    Error.new("cannot unify sum types",
+      Keyword.merge(opts, [
+        expected: {:sum, name1, []},
+        actual: {:sum, name2, []},
+        note: "`#{name1}` is not compatible with `#{name2}`"
+      ])
+    )
+  end
+
+  @doc "Tuple size mismatch during unification"
+  def tuple_size_mismatch(size1, size2, opts \\ []) do
+    Error.new("tuple size mismatch",
+      Keyword.merge(opts, [
+        note: "expected #{size1}-element tuple, got #{size2}-element tuple"
+      ])
+    )
+  end
+
+  @doc "Occurs check failure (infinite type)"
+  def occurs_check_error(id, type, opts \\ []) do
+    type_str = Vaisto.TypeSystem.Core.format_type(type)
+    Error.new("infinite type",
+      Keyword.merge(opts, [
+        note: "type variable t#{id} occurs in #{type_str}"
+      ])
+    )
+  end
+
+  @doc "Row occurs check failure (infinite row type)"
+  def row_occurs_check_error(id, type, opts \\ []) do
+    type_str = Vaisto.TypeSystem.Core.format_type(type)
+    Error.new("infinite row type",
+      Keyword.merge(opts, [
+        note: "row variable r#{id} occurs in #{type_str}"
+      ])
+    )
+  end
+
+  @doc "Record field mismatch during unification"
+  def record_field_mismatch(opts \\ []) do
+    Error.new("record field mismatch",
+      Keyword.merge(opts, [
+        note: "records have different fields"
+      ])
+    )
+  end
+
+  @doc "Variant constructor mismatch during unification"
+  def variant_mismatch(name1, name2, opts \\ []) do
+    Error.new("variant mismatch",
+      Keyword.merge(opts, [
+        note: "variant `#{name1}` vs `#{name2}`"
+      ])
+    )
+  end
+
+  @doc "Variant count mismatch during unification"
+  def variant_count_mismatch(opts \\ []) do
+    Error.new("variant count mismatch", opts)
+  end
+
+  @doc "Row field mismatch during row unification"
+  def row_field_mismatch(detail, opts \\ []) do
+    Error.new("row field mismatch",
+      Keyword.merge(opts, [note: detail])
+    )
+  end
+
+  # ============================================================================
   # Name Resolution Errors
   # ============================================================================
 
