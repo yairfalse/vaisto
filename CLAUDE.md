@@ -15,7 +15,7 @@ The key insight: BEAM's process isolation makes Rust-style ownership unnecessary
 
 ```bash
 mix deps.get              # Install dependencies
-mix test                  # Run all tests (1183 tests)
+mix test                  # Run all tests (1211 tests)
 mix test test/parser_test.exs       # Run a single test file
 mix test test/parser_test.exs:12    # Run a specific test by line number
 mix escript.build         # Build the CLI compiler (escript)
@@ -47,7 +47,7 @@ Orchestrated by `Vaisto.Compilation.compile/3`. The `Vaisto.Backend` behaviour d
 |--------|---------|
 | `Vaisto.Parser` | S-expression parser. AST nodes are tuples with `%Loc{}` as final element. **Raises** on syntax errors (not `{:error, ...}`). |
 | `Vaisto.TypeChecker` | HM-style bidirectional type inference. Two-pass: collect signatures, then check bodies via `check_s`/`check_impl_s` (ctx-threaded). Returns `{:ok, type, typed_ast}`. |
-| `Vaisto.TypeChecker.TcCtx` | Type checking context. Threads substitution, tvar counter, constraints, constrained_tvars through inference. |
+| `Vaisto.TypeChecker.TcCtx` | Type checking context. Threads substitution, tvar counter, constraints, constrained_tvars, field_tvars through inference. |
 | `Vaisto.TypeSystem.Infer` | Algorithm W for anonymous functions. **Separate** from main TypeChecker—used as fallback for `{:fn, ...}` nodes. Has its own context (`TypeSystem.Context`). |
 | `Vaisto.TypeSystem.Core` | Type primitives: `{:tvar, id}`, `{:rvar, id}`, substitutions, `apply_subst/2` |
 | `Vaisto.TypeSystem.Unify` | Unification with occurs check. Handles row polymorphism. `:any` unifies with everything. |
@@ -66,6 +66,12 @@ The codebase has two separate type inference engines:
 
 They use different context structs (`TcCtx` vs `TypeSystem.Context`). Both now return structured `%Error{}` values via `Vaisto.Errors` constructors. When `Infer` is invoked from inside `TypeChecker.check_impl_s`, the `TcCtx` context is **not** propagated through the inference.
 
+### Lambda Fallback Mechanism
+
+When the TypeChecker encounters `{:fn, params, body}`, it first tries Infer (Algorithm W). If Infer fails, the error is classified by `infer_should_fallback?/1`:
+- **Fallback errors** (`unknown expression`, `unknown function`, `undefined variable`, `cannot call non-function`) → re-check with `:any`-typed params via `fallback_lambda/3`. These indicate Infer's limitations (limited env, unsupported forms).
+- **Genuine errors** (type mismatch, arity mismatch, predicate not bool, etc.) → propagated as-is. The code is actually wrong.
+
 ### ctx-threaded vs legacy check
 
 The TypeChecker has two calling conventions:
@@ -81,6 +87,7 @@ Functions with `_s` suffix thread `TcCtx`. The `check_module_forms` pipeline use
 {:tvar, id}                    # Type variable (inference)
 {:rvar, id}                    # Row variable (row polymorphism)
 {:fn, [arg_types], ret_type}   # Function type
+{:tuple, [elem_types]}         # Typed tuple
 {:list, elem_type}             # Homogeneous list
 {:record, name, [{field, type}]}  # Product type
 {:sum, name, [{ctor, [field_types]}]}  # ADT
@@ -178,7 +185,7 @@ Files in `std/` contain standard library modules with `.vsi` interface files for
 
 ### Type System
 - `:any` unifies with everything — acts as escape hatch that bypasses type safety
-- Extern argument types are declared but **not checked** at call sites
+- Extern argument types are best-effort checked (fall back to declared ret_type on mismatch)
 - Unknown qualified calls silently return `:any` instead of erroring
 - Multi-clause functions (`defn_multi`) hardcode arity=1
 - No try/catch/after, no receive-with-timeout, no binary/bitstring syntax
@@ -198,12 +205,12 @@ Errors follow Rust's style: short, exact, with source context and actionable hin
 
 ## Testing
 
-~1,200 tests across 44 files. Key test files:
-- `typeclass_test.exs` — typeclasses, constraints, deriving, both backends
-- `type_system/infer_test.exs` — Algorithm W
-- `core_backend_parity_test.exs` — runs same code through both backends, compares results
-- `emitter_test.exs` — Elixir backend end-to-end
-- `type_checker_test.exs` — type checking, error messages, HM inference
+1211 tests across 42 files. Key test files:
+- `typeclass_test.exs` (120+) — typeclasses, constraints, deriving, both backends
+- `type_system/infer_test.exs` (122) — Algorithm W
+- `core_backend_parity_test.exs` (81) — runs same code through both backends, compares results
+- `emitter_test.exs` (64) — Elixir backend end-to-end
+- `type_checker_test.exs` (66) — type checking, error messages, HM inference, lambda fallback
 - `tuple_types_test.exs` — `(Tuple ...)` annotations and inference
 
 Test helpers in `test/support/test_helpers.ex`: `parse!`, `check_type`, `assert_type`, `compile_and_run!`, `eval!`.
