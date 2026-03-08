@@ -443,7 +443,7 @@ defmodule Vaisto.LSP.Handler do
           {Protocol.response(id, workspace_edit), state}
 
         {:error, reason} ->
-          {Protocol.error_response(id, -32602, reason), state}
+          {Protocol.error_response(id, -32602, Vaisto.Error.message(reason)), state}
       end
     else
       {Protocol.error_response(id, -32602, "Document not found"), state}

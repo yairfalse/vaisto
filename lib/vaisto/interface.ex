@@ -55,8 +55,10 @@ defmodule Vaisto.Interface do
 
   Returns {:ok, interface_map} or {:error, reason}.
   """
-  @spec load(atom(), [String.t()]) :: {:ok, map()} | {:error, String.t()}
+  @spec load(atom(), [String.t()]) :: {:ok, map()} | {:error, Vaisto.Error.t()}
   def load(module_name, search_paths) do
+    alias Vaisto.Errors
+
     case find_interface(module_name, search_paths) do
       {:ok, path} ->
         case File.read(path) do
@@ -65,15 +67,15 @@ defmodule Vaisto.Interface do
               interface = :erlang.binary_to_term(binary)
               validate_interface(interface)
             rescue
-              _ -> {:error, "Corrupt interface file: #{path}"}
+              _ -> {:error, Errors.corrupt_interface(path)}
             end
 
           {:error, reason} ->
-            {:error, "Cannot read #{path}: #{reason}"}
+            {:error, Errors.interface_read_error(path, reason)}
         end
 
       :not_found ->
-        {:error, "Interface not found for #{module_name}"}
+        {:error, Errors.interface_not_found(module_name)}
     end
   end
 
@@ -172,11 +174,11 @@ defmodule Vaisto.Interface do
   end
 
   defp validate_interface(%{version: v}) do
-    {:error, "Incompatible interface version: #{v} (expected #{@version})"}
+    {:error, Vaisto.Errors.interface_version_mismatch(v, @version)}
   end
 
   defp validate_interface(_) do
-    {:error, "Invalid interface format"}
+    {:error, Vaisto.Errors.interface_invalid_format()}
   end
 
   defp extract_exports(type_env) do

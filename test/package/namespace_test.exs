@@ -51,9 +51,9 @@ defmodule Vaisto.Package.NamespaceTest do
     end
 
     test "rejects wrong namespace" do
-      assert {:error, msg} = Namespace.validate_module("Foo.Bar", "json")
-      assert msg =~ "Foo.Bar"
-      assert msg =~ "Json"
+      assert {:error, error} = Namespace.validate_module("Foo.Bar", "json")
+      assert to_string(error) =~ "Foo.Bar"
+      assert to_string(error) =~ "Json"
     end
 
     test "rejects partial prefix match" do

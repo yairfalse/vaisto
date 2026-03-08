@@ -79,11 +79,11 @@ defmodule Vaisto.LSP.References do
 
           {:ok, workspace_edit}
         else
-          {:error, "Invalid identifier: #{new_name}"}
+          {:error, Vaisto.Errors.invalid_rename_target(new_name)}
         end
 
       :not_found ->
-        {:error, "No symbol at position"}
+        {:error, Vaisto.Errors.no_symbol_at_position()}
     end
   end
 

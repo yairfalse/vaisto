@@ -285,7 +285,7 @@ defmodule Vaisto.REPL do
           e ->
             :code.purge(module_name)
             :code.delete(module_name)
-            {:error, "runtime error: #{Exception.message(e)}"}
+            {:error, Vaisto.Errors.runtime_error(Exception.message(e))}
         end
 
       case result do
@@ -297,7 +297,7 @@ defmodule Vaisto.REPL do
       end
     else
       {:error, msg} -> {:error, format_error(msg)}
-      other -> {:error, "Unexpected: #{inspect(other)}"}
+      other -> {:error, Vaisto.Errors.unexpected_result(other)}
     end
   end
 

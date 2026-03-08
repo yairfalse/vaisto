@@ -118,7 +118,7 @@ defmodule Vaisto.Build.Compiler do
   defp read_source(path) do
     case File.read(path) do
       {:ok, source} -> {:ok, source}
-      {:error, reason} -> {:error, "Cannot read #{path}: #{reason}"}
+      {:error, reason} -> {:error, Vaisto.Errors.source_read_error(path, reason)}
     end
   end
 
@@ -163,7 +163,7 @@ defmodule Vaisto.Build.Compiler do
   defp emit(typed_ast, module_name, backend) do
     case Compilation.emit(typed_ast, module_name, backend, load: false) do
       {:ok, _mod, bytecode} -> {:ok, bytecode}
-      {:error, reason} -> {:error, "Compilation error: #{inspect(reason)}"}
+      {:error, reason} -> {:error, Vaisto.Errors.compilation_error(inspect(reason))}
     end
   end
 

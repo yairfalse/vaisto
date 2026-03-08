@@ -94,7 +94,7 @@ defmodule Vaisto.Package.Namespace do
     if clean == expected or String.starts_with?(clean, expected <> ".") do
       :ok
     else
-      {:error, "module `#{clean}` must start with `#{expected}` (package: #{package_name})"}
+      {:error, Vaisto.Errors.namespace_violation(clean, expected, package_name)}
     end
   end
 

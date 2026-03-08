@@ -81,14 +81,14 @@ defmodule Vaisto.Package.Manifest do
             parse(toml, dir)
 
           {:error, reason} ->
-            {:error, "invalid vaisto.toml: #{inspect(reason)}"}
+            {:error, Vaisto.Errors.manifest_parse_error(reason)}
         end
 
       {:error, :enoent} ->
         :none
 
       {:error, reason} ->
-        {:error, "cannot read vaisto.toml: #{reason}"}
+        {:error, Vaisto.Errors.manifest_read_error(reason)}
     end
   end
 
@@ -154,9 +154,9 @@ defmodule Vaisto.Package.Manifest do
 
   defp extract_name(toml) do
     case get_in(toml, ["package", "name"]) do
-      nil -> {:error, "vaisto.toml: missing [package] name"}
+      nil -> {:error, Vaisto.Errors.manifest_missing_name()}
       name when is_binary(name) -> {:ok, name}
-      _ -> {:error, "vaisto.toml: name must be a string"}
+      _ -> {:error, Vaisto.Errors.manifest_name_not_string()}
     end
   end
 
@@ -181,15 +181,15 @@ defmodule Vaisto.Package.Manifest do
   Validate that a package name is lowercase kebab-case.
   """
   @spec validate_name(String.t() | nil) :: :ok | {:error, String.t()}
-  def validate_name(nil), do: {:error, "package name is required"}
+  def validate_name(nil), do: {:error, Vaisto.Errors.manifest_name_required()}
 
   def validate_name(name) do
     cond do
       not Regex.match?(~r/^[a-z][a-z0-9]*(-[a-z0-9]+)*$/, name) ->
-        {:error, "package name `#{name}` must be lowercase kebab-case (e.g. \"my-package\")"}
+        {:error, Vaisto.Errors.manifest_name_format(name)}
 
       String.length(name) > 64 ->
-        {:error, "package name `#{name}` is too long (max 64 characters)"}
+        {:error, Vaisto.Errors.manifest_name_too_long(name)}
 
       true ->
         :ok
@@ -200,7 +200,7 @@ defmodule Vaisto.Package.Manifest do
     if Regex.match?(~r/^\d+\.\d+\.\d+(-[a-zA-Z0-9.]+)?(\+[a-zA-Z0-9.]+)?$/, version) do
       :ok
     else
-      {:error, "version `#{version}` must follow semver (e.g. \"1.0.0\")"}
+      {:error, Vaisto.Errors.manifest_version_format(version)}
     end
   end
 
@@ -212,8 +212,7 @@ defmodule Vaisto.Package.Manifest do
 
     case missing do
       [] -> :ok
-      [dir] -> {:error, "source directory `#{dir}` does not exist"}
-      dirs -> {:error, "source directories do not exist: #{Enum.join(dirs, ", ")}"}
+      dirs -> {:error, Vaisto.Errors.manifest_missing_source_dir(dirs)}
     end
   end
 
@@ -226,7 +225,7 @@ defmodule Vaisto.Package.Manifest do
         {:cont, :ok}
 
       {name, spec}, :ok ->
-        {:halt, {:error, "invalid dependency spec for `#{name}`: #{inspect(spec)}"}}
+        {:halt, {:error, Vaisto.Errors.manifest_invalid_dep_spec(name, spec)}}
     end)
   end
 end

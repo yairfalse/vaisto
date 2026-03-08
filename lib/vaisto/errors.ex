@@ -535,6 +535,127 @@ defmodule Vaisto.Errors do
   end
 
   # ============================================================================
+  # Manifest Errors
+  # ============================================================================
+
+  @doc "Invalid TOML in vaisto.toml"
+  def manifest_parse_error(reason) do
+    Error.new("invalid vaisto.toml", note: "#{inspect(reason)}")
+  end
+
+  @doc "Cannot read vaisto.toml"
+  def manifest_read_error(reason) do
+    Error.new("cannot read vaisto.toml", note: "#{reason}")
+  end
+
+  @doc "Missing package name in manifest"
+  def manifest_missing_name do
+    Error.new("missing package name",
+      note: "vaisto.toml: missing [package] name"
+    )
+  end
+
+  @doc "Package name must be a string"
+  def manifest_name_not_string do
+    Error.new("package name must be a string",
+      note: "vaisto.toml: name must be a string"
+    )
+  end
+
+  @doc "Package name is required"
+  def manifest_name_required do
+    Error.new("package name is required")
+  end
+
+  @doc "Invalid package name format"
+  def manifest_name_format(name) do
+    Error.new("invalid package name",
+      note: "package name `#{name}` must be lowercase kebab-case (e.g. \"my-package\")"
+    )
+  end
+
+  @doc "Package name too long"
+  def manifest_name_too_long(name) do
+    Error.new("package name too long",
+      note: "package name `#{name}` is too long (max 64 characters)"
+    )
+  end
+
+  @doc "Invalid version format"
+  def manifest_version_format(version) do
+    Error.new("invalid version",
+      note: "version `#{version}` must follow semver (e.g. \"1.0.0\")"
+    )
+  end
+
+  @doc "Source directory not found"
+  def manifest_missing_source_dir(dirs) when is_list(dirs) do
+    detail = case dirs do
+      [dir] -> "source directory `#{dir}` does not exist"
+      dirs -> "source directories do not exist: #{Enum.join(dirs, ", ")}"
+    end
+    Error.new("source directory not found", note: detail)
+  end
+
+  @doc "Invalid dependency spec"
+  def manifest_invalid_dep_spec(name, spec) do
+    Error.new("invalid dependency spec",
+      note: "invalid dependency spec for `#{name}`: #{inspect(spec)}"
+    )
+  end
+
+  # ============================================================================
+  # Interface Errors
+  # ============================================================================
+
+  @doc "Corrupt interface file"
+  def corrupt_interface(path) do
+    Error.new("corrupt interface file", note: path)
+  end
+
+  @doc "Cannot read interface file"
+  def interface_read_error(path, reason) do
+    Error.new("cannot read interface file",
+      note: "Cannot read #{path}: #{reason}"
+    )
+  end
+
+  @doc "Interface not found for module"
+  def interface_not_found(module_name) do
+    Error.new("interface not found",
+      note: "Interface not found for #{module_name}"
+    )
+  end
+
+  @doc "Incompatible interface version"
+  def interface_version_mismatch(found, expected) do
+    Error.new("incompatible interface version",
+      note: "found version #{found}, expected #{expected}"
+    )
+  end
+
+  @doc "Invalid interface format"
+  def interface_invalid_format do
+    Error.new("invalid interface format")
+  end
+
+  # ============================================================================
+  # LSP Errors
+  # ============================================================================
+
+  @doc "Invalid identifier for rename"
+  def invalid_rename_target(name) do
+    Error.new("invalid identifier",
+      note: "Invalid identifier: #{name}"
+    )
+  end
+
+  @doc "No symbol at cursor position"
+  def no_symbol_at_position do
+    Error.new("no symbol at position")
+  end
+
+  # ============================================================================
   # CLI Errors
   # ============================================================================
 
@@ -550,6 +671,23 @@ defmodule Vaisto.Errors do
   @doc "Compilation error (wraps exception messages)"
   def compilation_error(note, opts \\ []) do
     Error.new("compilation error", Keyword.merge(opts, [note: note]))
+  end
+
+  @doc "Cannot read source file"
+  def source_read_error(path, reason) do
+    Error.new("cannot read source file",
+      note: "Cannot read #{path}: #{reason}"
+    )
+  end
+
+  @doc "Runtime error during evaluation"
+  def runtime_error(exception_msg) do
+    Error.new("runtime error", note: exception_msg)
+  end
+
+  @doc "Unexpected result from compilation"
+  def unexpected_result(value) do
+    Error.new("unexpected result", note: inspect(value))
   end
 
   @doc "BEAM compilation failed"
@@ -579,6 +717,13 @@ defmodule Vaisto.Errors do
   @doc "Dependency resolution error"
   def dependency_error(name, reason, opts \\ []) do
     Error.new("dependency `#{name}`: #{reason}", opts)
+  end
+
+  @doc "Module namespace violation"
+  def namespace_violation(module, prefix, package) do
+    Error.new("namespace violation",
+      note: "module `#{module}` must start with `#{prefix}` (package: #{package})"
+    )
   end
 
   @doc "No source files found"

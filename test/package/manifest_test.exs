@@ -88,9 +88,9 @@ defmodule Vaisto.Package.ManifestTest do
       version = "1.0.0"
       """)
 
-      assert {:error, msg} = Manifest.load(dir)
-      assert msg =~ "missing"
-      assert msg =~ "name"
+      assert {:error, error} = Manifest.load(dir)
+      assert to_string(error) =~ "missing"
+      assert to_string(error) =~ "name"
     end
 
     test "rejects invalid package name", %{dir: dir} do
@@ -99,8 +99,8 @@ defmodule Vaisto.Package.ManifestTest do
       name = "MyApp"
       """)
 
-      assert {:error, msg} = Manifest.load(dir)
-      assert msg =~ "kebab-case"
+      assert {:error, error} = Manifest.load(dir)
+      assert to_string(error) =~ "kebab-case"
     end
 
     test "rejects invalid version", %{dir: dir} do
@@ -112,8 +112,8 @@ defmodule Vaisto.Package.ManifestTest do
 
       File.mkdir_p!(Path.join(dir, "src"))
 
-      assert {:error, msg} = Manifest.load(dir)
-      assert msg =~ "semver"
+      assert {:error, error} = Manifest.load(dir)
+      assert to_string(error) =~ "semver"
     end
 
     test "rejects missing source directory", %{dir: dir} do
@@ -125,15 +125,15 @@ defmodule Vaisto.Package.ManifestTest do
       source-dirs = ["nonexistent"]
       """)
 
-      assert {:error, msg} = Manifest.load(dir)
-      assert msg =~ "nonexistent"
-      assert msg =~ "does not exist"
+      assert {:error, error} = Manifest.load(dir)
+      assert to_string(error) =~ "nonexistent"
+      assert to_string(error) =~ "does not exist"
     end
 
     test "reports invalid TOML", %{dir: dir} do
       write_manifest(dir, "not valid toml {{{")
-      assert {:error, msg} = Manifest.load(dir)
-      assert msg =~ "invalid vaisto.toml"
+      assert {:error, error} = Manifest.load(dir)
+      assert to_string(error) =~ "invalid vaisto.toml"
     end
   end
 
