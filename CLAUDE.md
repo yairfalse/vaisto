@@ -15,7 +15,7 @@ The key insight: BEAM's process isolation makes Rust-style ownership unnecessary
 
 ```bash
 mix deps.get              # Install dependencies
-mix test                  # Run all tests (1211 tests)
+mix test                  # Run all tests (~1240 tests)
 mix test test/parser_test.exs       # Run a single test file
 mix test test/parser_test.exs:12    # Run a specific test by line number
 mix escript.build         # Build the CLI compiler (escript)
@@ -53,10 +53,14 @@ Orchestrated by `Vaisto.Compilation.compile/3`. The `Vaisto.Backend` behaviour d
 | `Vaisto.TypeSystem.Unify` | Unification with occurs check. Handles row polymorphism. `:any` unifies with everything. |
 | `Vaisto.CoreEmitter` | Typed AST → Core Erlang via `:cerl` module → BEAM via `:compile.forms/2` |
 | `Vaisto.Emitter` | Typed AST → Elixir quoted AST → compiled via `Code.compile_quoted/1` |
+| `Vaisto.Error` | Structured error struct with spans, expected/actual types, hints, notes. All errors flow through this. |
+| `Vaisto.Errors` | ~55 structured error constructors with Jaro-distance "did you mean?" hints |
+| `Vaisto.ErrorFormatter` | Rust-style error rendering with source context and ANSI colors |
+| `Vaisto.Compilation` | Pipeline orchestration. `compile/3` for full pipeline, `run/2` for eval (compile+execute+cleanup). `parse/2` wraps Parser raises into `{:error, Error}`. |
+| `Vaisto.Runner` | Bridge to Elixir: `compile_and_load/3`, `run/2`, `call/3`, `spawn_process/2`. Used in e2e tests via `Runner.run(code, backend: :core)`. |
 | `Vaisto.Build` | Multi-file builds: dependency graph, topological sort, `.vsi` interface files |
 | `Vaisto.Interface` | Module interface serialization (Erlang `term_to_binary`) for separate compilation |
-| `Vaisto.Errors` | Structured error constructors with Jaro-distance "did you mean?" hints |
-| `Vaisto.ErrorFormatter` | Rust-style error rendering with source context and ANSI colors |
+| `Vaisto.TypeFormatter` | Formats types for display: `format(:int)` → `"Int"`. Used by errors, LSP hover, diagnostics. |
 
 ### Two Type Checkers — Important
 
@@ -64,7 +68,7 @@ The codebase has two separate type inference engines:
 1. **`Vaisto.TypeChecker`** — main bidirectional checker, uses `TcCtx` for context threading
 2. **`Vaisto.TypeSystem.Infer`** — Algorithm W, used as fallback for anonymous functions (`{:fn, params, body}`)
 
-They use different context structs (`TcCtx` vs `TypeSystem.Context`). Both now return structured `%Error{}` values via `Vaisto.Errors` constructors. When `Infer` is invoked from inside `TypeChecker.check_impl_s`, the `TcCtx` context is **not** propagated through the inference.
+They use different context structs (`TcCtx` vs `TypeSystem.Context`) but both return structured `%Error{}`. When `Infer` is invoked from inside `TypeChecker.check_impl_s`, the `TcCtx` context is **not** propagated through the inference.
 
 ### Lambda Fallback Mechanism
 
@@ -79,6 +83,24 @@ The TypeChecker has two calling conventions:
 - `check_s(form, ctx)` — ctx-threaded, returns `{:ok, type, ast, new_ctx}`
 
 Functions with `_s` suffix thread `TcCtx`. The `check_module_forms` pipeline uses `check_s` to thread ctx between top-level forms, resetting substitutions between forms while preserving the tvar counter.
+
+### Structured Error System
+
+All errors use `%Vaisto.Error{}`:
+```elixir
+%Error{
+  message: "type mismatch",           # Required
+  primary_span: %{line: 3, col: 8, length: 7, label: "expected `Int`"},
+  expected: :int,                      # For type errors
+  actual: :string,                     # For type errors
+  hint: "use (string:to_int ...)",     # Actionable suggestion
+  note: "additional context"           # Extra info
+}
+```
+
+Error constructors live in `Vaisto.Errors` (e.g., `Errors.type_mismatch/3`, `Errors.undefined_variable/2`). `ErrorFormatter.format/3` renders them with source context, pointer lines, and ANSI colors.
+
+Pattern for returning errors: `{:error, Errors.some_error(args)}`. Pattern for matching in tests: `assert {:error, %Error{message: "type mismatch"}} = ...` or match on the message string.
 
 ### Type Representations
 
@@ -105,6 +127,7 @@ Parser output always includes location as final tuple element:
 {:call, func, args, %Loc{}}
 {:if, cond, then, else, %Loc{}}
 {:defn, name, params, body, ret_type, %Loc{}}
+{:try, body, catch_clauses, after_body, %Loc{}}
 ```
 
 Typed AST annotates with types (no location):
@@ -113,6 +136,7 @@ Typed AST annotates with types (no location):
 {:var, name, type}             # Typed variable
 {:call, func, typed_args, ret_type}  # Typed call
 {:class_call, class, method, instance_key, args, ret_type}  # Typeclass dispatch
+{:try, typed_body, [{class, var, handler, handler_type}], typed_after, result_type}  # Try/catch
 ```
 
 ### Typeclass System
@@ -169,6 +193,11 @@ Files in `std/` contain standard library modules with `.vsi` interface files for
 ; Supervision
 (supervise :one_for_one (counter 0))
 
+; Error handling
+(try (/ 1 0) [catch [:error e (Err e)]])
+(try (risky) [catch [:error e (Err e)]] [after (cleanup)])
+(try (risky) [after (cleanup)])  ; after-only, exception propagates
+
 ; Erlang interop
 (extern erlang:hd [(List :any)] :any)
 ```
@@ -188,7 +217,7 @@ Files in `std/` contain standard library modules with `.vsi` interface files for
 - Extern argument types are best-effort checked (fall back to declared ret_type on mismatch)
 - Unknown qualified calls silently return `:any` instead of erroring
 - Multi-clause functions (`defn_multi`) hardcode arity=1
-- No try/catch/after, no receive-with-timeout, no binary/bitstring syntax
+- No receive-with-timeout, no binary/bitstring syntax
 
 ### Error Handling
 - Parser **raises** on syntax errors (wrap with `Compilation.parse/2` for `{:error, ...}`)
@@ -201,16 +230,31 @@ Files in `std/` contain standard library modules with `.vsi` interface files for
 
 ## Error Messages
 
-Errors follow Rust's style: short, exact, with source context and actionable hints. Structured errors use `Vaisto.Error` with spans for rich formatting via `Vaisto.ErrorFormatter`. There is also a legacy `Vaisto.Diagnostic` struct that overlaps with `Error` and should eventually be unified.
+Errors follow Rust's style: short, exact, with source context and actionable hints. Structured errors use `Vaisto.Error` with spans for rich formatting via `Vaisto.ErrorFormatter`.
 
 ## Testing
 
-1211 tests across 42 files. Key test files:
+~1240 tests across ~42 files. Key test files:
 - `typeclass_test.exs` (120+) — typeclasses, constraints, deriving, both backends
 - `type_system/infer_test.exs` (122) — Algorithm W
-- `core_backend_parity_test.exs` (81) — runs same code through both backends, compares results
+- `core_backend_parity_test.exs` (81+) — runs same code through both backends, compares results
 - `emitter_test.exs` (64) — Elixir backend end-to-end
 - `type_checker_test.exs` (66) — type checking, error messages, HM inference, lambda fallback
 - `tuple_types_test.exs` — `(Tuple ...)` annotations and inference
+- `try_catch_test.exs` — parser, type checker, and e2e tests for try/catch/after (both backends)
 
-Test helpers in `test/support/test_helpers.ex`: `parse!`, `check_type`, `assert_type`, `compile_and_run!`, `eval!`.
+### Test Helpers
+
+`import Vaisto.TestHelpers` in tests. Key functions:
+
+| Helper | Returns | Purpose |
+|--------|---------|---------|
+| `parse!(code)` | AST | Parse source, raises on failure |
+| `parse_clean(code)` | AST (no locs) | Parse and strip `%Loc{}` for structural comparison |
+| `check_type(code)` | `{:ok, type}` or `{:error, reason}` | Parse + type check, return inferred type |
+| `assert_type(code, type)` | `true` | Assert code type-checks to expected type |
+| `assert_type_error(code, pattern)` | `true` | Assert type error matches string or regex |
+| `compile_and_run!(code)` | result | Compile via Core Erlang, load, call `main/0` |
+| `eval!(expr)` | result | Wrap expr in `(defn main [] :any ...)`, compile and run |
+
+For e2e tests that need backend selection, use `Runner.run(code, backend: :core)` or `Runner.run(code)` (defaults to `:elixir`).
