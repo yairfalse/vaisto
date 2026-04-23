@@ -43,20 +43,20 @@ Orchestrated by `Vaisto.Compilation.compile/3`. The `Vaisto.Backend` behaviour d
 
 ### Key Modules
 
-| Module | Lines | Purpose |
-|--------|-------|---------|
-| `Vaisto.Parser` | 1,205 | S-expression parser. AST nodes are tuples with `%Loc{}` as final element. **Raises** on syntax errors (not `{:error, ...}`). |
-| `Vaisto.TypeChecker` | 3,728 | HM-style bidirectional type inference. Two-pass: collect signatures, then check bodies via `check_s`/`check_impl_s` (ctx-threaded). Returns `{:ok, type, typed_ast}`. |
-| `Vaisto.TypeChecker.TcCtx` | 166 | Type checking context. Threads substitution, tvar counter, constraints, constrained_tvars through inference. |
-| `Vaisto.TypeSystem.Infer` | 1,049 | Algorithm W for anonymous functions. **Separate** from main TypeChecker—used as fallback for `{:fn, ...}` nodes. Has its own context (`TypeSystem.Context`). |
-| `Vaisto.TypeSystem.Core` | 317 | Type primitives: `{:tvar, id}`, `{:rvar, id}`, substitutions, `apply_subst/2` |
-| `Vaisto.TypeSystem.Unify` | 416 | Unification with occurs check. Handles row polymorphism. `:any` unifies with everything. |
-| `Vaisto.CoreEmitter` | 1,700 | Typed AST → Core Erlang via `:cerl` module → BEAM via `:compile.forms/2` |
-| `Vaisto.Emitter` | 1,177 | Typed AST → Elixir quoted AST → compiled via `Code.compile_quoted/1` |
-| `Vaisto.Build` | 311 | Multi-file builds: dependency graph, topological sort, `.vsi` interface files |
-| `Vaisto.Interface` | 211 | Module interface serialization (Erlang `term_to_binary`) for separate compilation |
-| `Vaisto.Errors` | 440 | 33 structured error constructors with Jaro-distance "did you mean?" hints |
-| `Vaisto.ErrorFormatter` | 356 | Rust-style error rendering with source context and ANSI colors |
+| Module | Purpose |
+|--------|---------|
+| `Vaisto.Parser` | S-expression parser. AST nodes are tuples with `%Loc{}` as final element. **Raises** on syntax errors (not `{:error, ...}`). |
+| `Vaisto.TypeChecker` | HM-style bidirectional type inference. Two-pass: collect signatures, then check bodies via `check_s`/`check_impl_s` (ctx-threaded). Returns `{:ok, type, typed_ast}`. |
+| `Vaisto.TypeChecker.TcCtx` | Type checking context. Threads substitution, tvar counter, constraints, constrained_tvars through inference. |
+| `Vaisto.TypeSystem.Infer` | Algorithm W for anonymous functions. **Separate** from main TypeChecker—used as fallback for `{:fn, ...}` nodes. Has its own context (`TypeSystem.Context`). |
+| `Vaisto.TypeSystem.Core` | Type primitives: `{:tvar, id}`, `{:rvar, id}`, substitutions, `apply_subst/2` |
+| `Vaisto.TypeSystem.Unify` | Unification with occurs check. Handles row polymorphism. `:any` unifies with everything. |
+| `Vaisto.CoreEmitter` | Typed AST → Core Erlang via `:cerl` module → BEAM via `:compile.forms/2` |
+| `Vaisto.Emitter` | Typed AST → Elixir quoted AST → compiled via `Code.compile_quoted/1` |
+| `Vaisto.Build` | Multi-file builds: dependency graph, topological sort, `.vsi` interface files |
+| `Vaisto.Interface` | Module interface serialization (Erlang `term_to_binary`) for separate compilation |
+| `Vaisto.Errors` | Structured error constructors with Jaro-distance "did you mean?" hints |
+| `Vaisto.ErrorFormatter` | Rust-style error rendering with source context and ANSI colors |
 
 ### Two Type Checkers — Important
 
@@ -64,7 +64,7 @@ The codebase has two separate type inference engines:
 1. **`Vaisto.TypeChecker`** — main bidirectional checker, uses `TcCtx` for context threading
 2. **`Vaisto.TypeSystem.Infer`** — Algorithm W, used as fallback for anonymous functions (`{:fn, params, body}`)
 
-They use different context structs (`TcCtx` vs `TypeSystem.Context`) and produce different error formats (structured `%Error{}` vs bare strings). When `Infer` is invoked from inside `TypeChecker.check_impl_s`, the `TcCtx` context is **not** propagated through the inference.
+They use different context structs (`TcCtx` vs `TypeSystem.Context`). Both now return structured `%Error{}` values via `Vaisto.Errors` constructors. When `Infer` is invoked from inside `TypeChecker.check_impl_s`, the `TcCtx` context is **not** propagated through the inference.
 
 ### ctx-threaded vs legacy check
 
@@ -178,7 +178,6 @@ Files in `std/` contain standard library modules with `.vsi` interface files for
 
 ### Type System
 - `:any` unifies with everything — acts as escape hatch that bypasses type safety
-- Tuples are always typed `:any` (no `{:tuple, types}`)
 - Extern argument types are declared but **not checked** at call sites
 - Unknown qualified calls silently return `:any` instead of erroring
 - Multi-clause functions (`defn_multi`) hardcode arity=1
@@ -186,7 +185,6 @@ Files in `std/` contain standard library modules with `.vsi` interface files for
 
 ### Error Handling
 - Parser **raises** on syntax errors (wrap with `Compilation.parse/2` for `{:error, ...}`)
-- `Unify` and `Infer` modules return bare string errors, not structured `%Error{}`
 - `CoreEmitter` wraps all exceptions in broad `rescue` — emitter bugs produce generic messages
 
 ### Infrastructure
@@ -200,11 +198,12 @@ Errors follow Rust's style: short, exact, with source context and actionable hin
 
 ## Testing
 
-1183 tests across 44 files. Key test files:
-- `typeclass_test.exs` (120 tests) — typeclasses, constraints, deriving, both backends
-- `type_system/infer_test.exs` (122) — Algorithm W
-- `core_backend_parity_test.exs` (80) — runs same code through both backends, compares results
-- `emitter_test.exs` (64) — Elixir backend end-to-end
-- `type_checker_test.exs` (62) — type checking, error messages, HM inference
+~1,200 tests across 44 files. Key test files:
+- `typeclass_test.exs` — typeclasses, constraints, deriving, both backends
+- `type_system/infer_test.exs` — Algorithm W
+- `core_backend_parity_test.exs` — runs same code through both backends, compares results
+- `emitter_test.exs` — Elixir backend end-to-end
+- `type_checker_test.exs` — type checking, error messages, HM inference
+- `tuple_types_test.exs` — `(Tuple ...)` annotations and inference
 
 Test helpers in `test/support/test_helpers.ex`: `parse!`, `check_type`, `assert_type`, `compile_and_run!`, `eval!`.
