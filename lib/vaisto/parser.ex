@@ -57,7 +57,7 @@ defmodule Vaisto.Parser do
 
   # Tokenizer state machine
   # Args: chars, line, col, file, accumulated_tokens, current_token_state
-  # current_token_state: nil | {chars_acc, start_line, start_col} | {:string, chars_acc, start_line, start_col}
+  # current_token_state: nil | {chars_acc, start_line, start_col} | {:string, chars_acc, start_line, start_col} | {:triple_string, chars_acc, start_line, start_col}
 
   # End of input
   defp tokenize_chars([], _line, _col, _file, tokens, nil), do: Enum.reverse(tokens)
@@ -68,6 +68,23 @@ defmodule Vaisto.Parser do
   end
   defp tokenize_chars([], _line, _col, _file, _tokens, {:string, _acc, start_line, start_col}) do
     raise "Unterminated string starting at line #{start_line}, column #{start_col}"
+  end
+  defp tokenize_chars([], _line, _col, _file, _tokens, {:triple_string, _acc, start_line, start_col}) do
+    raise "Unterminated string starting at line #{start_line}, column #{start_col}"
+  end
+
+  # Inside a triple-quoted string literal
+  defp tokenize_chars(["\"", "\"", "\"" | rest], line, col, file, tokens, {:triple_string, acc, sl, sc}) do
+    str_content = acc |> Enum.reverse() |> Enum.join()
+    token = "\"\"\"" <> str_content <> "\"\"\""
+    length = String.length(token)
+    tokenize_chars(rest, line, col + 3, file, [{token, Loc.new(sl, sc, length, file)} | tokens], nil)
+  end
+  defp tokenize_chars(["\n" | rest], line, _col, file, tokens, {:triple_string, acc, sl, sc}) do
+    tokenize_chars(rest, line + 1, 1, file, tokens, {:triple_string, ["\n" | acc], sl, sc})
+  end
+  defp tokenize_chars([c | rest], line, col, file, tokens, {:triple_string, acc, sl, sc}) do
+    tokenize_chars(rest, line, col + 1, file, tokens, {:triple_string, [c | acc], sl, sc})
   end
 
   # Inside a string literal
@@ -86,6 +103,17 @@ defmodule Vaisto.Parser do
   end
   defp tokenize_chars([c | rest], line, col, file, tokens, {:string, acc, sl, sc}) do
     tokenize_chars(rest, line, col + 1, file, tokens, {:string, [c | acc], sl, sc})
+  end
+
+  # Start of triple-quoted string
+  defp tokenize_chars(["\"", "\"", "\"" | rest], line, col, file, tokens, nil) do
+    tokenize_chars(rest, line, col + 3, file, tokens, {:triple_string, [], line, col})
+  end
+  defp tokenize_chars(["\"", "\"", "\"" | rest], line, col, file, tokens, {acc, sl, sc}) do
+    token = acc |> Enum.reverse() |> Enum.join()
+    length = String.length(token)
+    new_tokens = [{token, Loc.new(sl, sc, length, file)} | tokens]
+    tokenize_chars(rest, line, col + 3, file, new_tokens, {:triple_string, [], line, col})
   end
 
   # Start of string
@@ -719,7 +747,17 @@ defmodule Vaisto.Parser do
   defp parse_defprompt([name, {:atom, :input}, input_type, {:atom, :output}, output_type], loc) do
     with {:ok, parsed_input} <- parse_type_ref(input_type),
          {:ok, parsed_output} <- parse_type_ref(output_type) do
-      {:defprompt, name, parsed_input, parsed_output, loc}
+      {:defprompt, name, parsed_input, parsed_output, nil, loc}
+    else
+      {:error, msg} ->
+        {:error, Errors.parse_error("defprompt #{msg}", span: Error.span_from_loc(loc)), loc}
+    end
+  end
+
+  defp parse_defprompt([name, {:atom, :input}, input_type, {:atom, :output}, output_type, {:atom, :template}, {:string, template}], loc) do
+    with {:ok, parsed_input} <- parse_type_ref(input_type),
+         {:ok, parsed_output} <- parse_type_ref(output_type) do
+      {:defprompt, name, parsed_input, parsed_output, template, loc}
     else
       {:error, msg} ->
         {:error, Errors.parse_error("defprompt #{msg}", span: Error.span_from_loc(loc)), loc}
@@ -727,7 +765,7 @@ defmodule Vaisto.Parser do
   end
 
   defp parse_defprompt(_args, loc) do
-    {:error, Errors.parse_error("defprompt requires syntax: (defprompt NAME :input TYPE :output TYPE)", span: Error.span_from_loc(loc)), loc}
+    {:error, Errors.parse_error("defprompt requires syntax: (defprompt NAME :input TYPE :output TYPE [:template STRING])", span: Error.span_from_loc(loc)), loc}
   end
 
   defp parse_pipeline([name, {:atom, :input}, input_type, {:atom, :output}, output_type | ops], loc) when ops != [] do
@@ -1121,6 +1159,9 @@ defmodule Vaisto.Parser do
   # Location is available for future use in error messages
   defp parse_token(token, loc) do
     cond do
+      String.starts_with?(token, "\"\"\"") ->
+        raw = token |> String.trim_leading("\"\"\"") |> String.trim_trailing("\"\"\"")
+        {:string, raw}
       # String literal: "hello" → {:string, "hello"}
       # With interpolation: "hello #{name}" → {:call, :str, [{:string, "hello "}, name], loc}
       String.starts_with?(token, "\"") ->

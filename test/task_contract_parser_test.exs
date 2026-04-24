@@ -7,13 +7,51 @@ defmodule Vaisto.TaskContractParserTest do
     test "parses a top-level defprompt" do
       ast = Parser.parse("(defprompt summarize :input Document :output Summary)")
 
-      assert {:defprompt, :summarize, :Document, :Summary, %Vaisto.Parser.Loc{line: 1, col: 1}} = ast
+      assert {:defprompt, :summarize, :Document, :Summary, nil, %Vaisto.Parser.Loc{line: 1, col: 1}} = ast
     end
 
     test "rejects malformed defprompt syntax" do
       ast = Parser.parse("(defprompt summarize :input Document)")
 
-      assert {:error, %Vaisto.Error{message: "defprompt requires syntax: (defprompt NAME :input TYPE :output TYPE)"}, _loc} = ast
+      assert {:error, %Vaisto.Error{message: "defprompt requires syntax: (defprompt NAME :input TYPE :output TYPE [:template STRING])"}, _loc} = ast
+    end
+
+    test "parses defprompt with multi-line template" do
+      code = """
+      (defprompt summarize
+        :input Question
+        :output Answer
+        :template \"\"\"
+      Summarize the following text.
+
+      Text:
+      {text}
+      \"\"\")
+      """
+
+      ast = Parser.parse(code)
+
+      assert {:defprompt, :summarize, :Question, :Answer, template, %Vaisto.Parser.Loc{line: 1, col: 1}} = ast
+      assert template == "\nSummarize the following text.\n\nText:\n{text}\n"
+    end
+
+    test "preserves template content verbatim including newlines and braces" do
+      code = """
+      (defprompt summarize
+        :input Question
+        :output Answer
+        :template \"\"\"
+      Keep braces: {text}
+      Keep blank lines.
+
+      Done.
+      \"\"\")
+      """
+
+      ast = Parser.parse(code)
+
+      assert {:defprompt, :summarize, :Question, :Answer, template, %Vaisto.Parser.Loc{}} = ast
+      assert template == "\nKeep braces: {text}\nKeep blank lines.\n\nDone.\n"
     end
   end
 

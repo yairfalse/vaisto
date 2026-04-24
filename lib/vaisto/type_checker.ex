@@ -76,7 +76,7 @@ defmodule Vaisto.TypeChecker do
           | {:defn_multi, atom(), non_neg_integer(), [typed_clause()], vaisto_type()}
           | {:defval, atom(), typed_ast(), vaisto_type()}
           | {:deftype, atom(), {:product | :sum, term()}, vaisto_type()}
-          | {:defprompt, atom(), vaisto_type(), vaisto_type(), vaisto_type()}
+          | {:defprompt, atom(), vaisto_type(), vaisto_type(), String.t() | nil, vaisto_type()}
           | {:pipeline, atom(), vaisto_type(), vaisto_type(), [typed_ast()], vaisto_type()}
           | {:generate, atom(), vaisto_type(), vaisto_type()}
           # Process/concurrency
@@ -891,11 +891,11 @@ defmodule Vaisto.TypeChecker do
     check_s({:deftype, name, {:product, fields}}, ctx)
   end
 
-  defp check_impl_s({:defprompt, name, raw_input_type, raw_output_type}, ctx) do
+  defp check_impl_s({:defprompt, name, raw_input_type, raw_output_type, template}, ctx) do
     input_type = resolve_type_ref(raw_input_type, ctx.env)
     output_type = resolve_type_ref(raw_output_type, ctx.env)
 
-    {:ok, :unit, {:defprompt, name, input_type, output_type, :unit}, ctx}
+    {:ok, :unit, {:defprompt, name, input_type, output_type, template, :unit}, ctx}
   end
 
   defp check_impl_s({:pipeline, name, raw_input_type, raw_output_type, ops}, ctx) do
@@ -1820,7 +1820,7 @@ defmodule Vaisto.TypeChecker do
   defp typed_ast_type({:defn, _, _, _, type}), do: type
   defp typed_ast_type({:defn_multi, _, _, _, type}), do: type
   defp typed_ast_type({:deftype, _, _, _}), do: :unit
-  defp typed_ast_type({:defprompt, _, _, _, type}), do: type
+  defp typed_ast_type({:defprompt, _, _, _, _, type}), do: type
   defp typed_ast_type({:pipeline, _, _, _, _, type}), do: type
   defp typed_ast_type({:generate, _, _, type}), do: type
   defp typed_ast_type({:process, _, _, _, type}), do: type
@@ -1889,7 +1889,7 @@ defmodule Vaisto.TypeChecker do
   defp apply_subst_to_ast(subst, {:defval, name, value, type}),
     do: {:defval, name, apply_subst_to_ast(subst, value), C.apply_subst(subst, type)}
   defp apply_subst_to_ast(_subst, {:deftype, _, _, _} = node), do: node
-  defp apply_subst_to_ast(_subst, {:defprompt, _, _, _, _} = node), do: node
+  defp apply_subst_to_ast(_subst, {:defprompt, _, _, _, _, _} = node), do: node
   defp apply_subst_to_ast(subst, {:pipeline, name, input_type, output_type, ops, type}),
     do: {:pipeline, name, C.apply_subst(subst, input_type), C.apply_subst(subst, output_type), apply_subst_to_asts(subst, ops), C.apply_subst(subst, type)}
   defp apply_subst_to_ast(subst, {:generate, prompt_name, extract_type, type}),
@@ -3377,10 +3377,10 @@ defmodule Vaisto.TypeChecker do
         {:deftype, name, fields} ->
           collect_deftype_signature(name, fields, acc_env)
 
-        {:defprompt, name, input_type, output_type, %Vaisto.Parser.Loc{}} ->
+        {:defprompt, name, input_type, output_type, _template, %Vaisto.Parser.Loc{}} ->
           collect_defprompt_signature(name, input_type, output_type, acc_env)
 
-        {:defprompt, name, input_type, output_type} ->
+        {:defprompt, name, input_type, output_type, _template} ->
           collect_defprompt_signature(name, input_type, output_type, acc_env)
 
         {:process, name, initial_state, handlers, %Vaisto.Parser.Loc{}} ->
@@ -3783,7 +3783,7 @@ defmodule Vaisto.TypeChecker do
           Map.put(acc_env, ctor_name, constructor_type)
         end)
 
-      {:defprompt, name, input_type, output_type, :unit} ->
+      {:defprompt, name, input_type, output_type, _template, :unit} ->
         prompts = Map.get(env, :__prompts__, %{})
         Map.put(env, :__prompts__, Map.put(prompts, name, {input_type, output_type}))
 

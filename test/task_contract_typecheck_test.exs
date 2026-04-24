@@ -24,6 +24,7 @@ defmodule Vaisto.TaskContractTypecheckTest do
                {:defprompt, :summarize,
                 {:record, :Question, [{:text, :string}]},
                 {:record, :Answer, [{:text, :string}]},
+                nil,
                 :unit},
                {:pipeline, :"answer-question",
                 {:record, :Question, [{:text, :string}]},
@@ -31,6 +32,34 @@ defmodule Vaisto.TaskContractTypecheckTest do
                 [
                   {:generate, :summarize, {:record, :Answer, [{:text, :string}]}, {:record, :Answer, [{:text, :string}]}}
                 ],
+                :unit}
+             ]}} = TypeChecker.check(ast)
+  end
+
+  test "defprompt with template type-checks and carries template into typed AST" do
+    code = """
+    (deftype Question [text :string])
+    (deftype Answer [text :string])
+    (defprompt summarize
+      :input Question
+      :output Answer
+      :template \"\"\"
+    Summarize:
+    {text}
+    \"\"\")
+    """
+
+    ast = Parser.parse(code)
+
+    assert {:ok, :module,
+            {:module,
+             [
+               {:deftype, :Question, {:product, [{:text, :string}]}, {:record, :Question, [{:text, :string}]}},
+               {:deftype, :Answer, {:product, [{:text, :string}]}, {:record, :Answer, [{:text, :string}]}},
+               {:defprompt, :summarize,
+                {:record, :Question, [{:text, :string}]},
+                {:record, :Answer, [{:text, :string}]},
+                "\nSummarize:\n{text}\n",
                 :unit}
              ]}} = TypeChecker.check(ast)
   end
