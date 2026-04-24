@@ -911,9 +911,14 @@ defmodule Vaisto.TypeChecker do
   defp check_impl_s({:generate, prompt_name, raw_extract_type}, ctx) do
     extract_type = resolve_type_ref(raw_extract_type, ctx.env)
 
-    with {:ok, {_prompt_input_type, prompt_output_type}} <- lookup_prompt(prompt_name, ctx.env),
-         {:ok, ctx} <- TcCtx.unify(ctx, prompt_output_type, extract_type) do
-      {:ok, extract_type, {:generate, prompt_name, extract_type, extract_type}, ctx}
+    with {:ok, {_prompt_input_type, prompt_output_type}} <- lookup_prompt(prompt_name, ctx.env) do
+      case unify_prompt_extract_s(prompt_name, prompt_output_type, extract_type, ctx) do
+        {:ok, ctx} ->
+          {:ok, extract_type, {:generate, prompt_name, extract_type, extract_type}, ctx}
+
+        {:error, _} = err ->
+          err
+      end
     end
   end
 
@@ -1474,7 +1479,7 @@ defmodule Vaisto.TypeChecker do
     prompts = Map.get(env, :__prompts__, %{})
 
     case Map.get(prompts, name) do
-      nil -> {:error, Errors.unknown_expression({:prompt, name})}
+      nil -> {:error, Errors.undefined_prompt(name, Map.keys(prompts))}
       prompt_type -> {:ok, prompt_type}
     end
   end
@@ -1482,6 +1487,30 @@ defmodule Vaisto.TypeChecker do
   # Strip location from fn AST nodes
   defp strip_fn_loc({:fn, params, body, %Vaisto.Parser.Loc{}}), do: {:fn, params, body}
   defp strip_fn_loc(other), do: other
+
+  defp unify_prompt_extract_s(prompt_name, prompt_output_type, {:record, _, fields} = extract_type, ctx) do
+    row_target = {:row, fields, {:rvar, ctx.row_counter}}
+
+    case Vaisto.TypeSystem.Unify.unify(row_target, prompt_output_type, ctx.subst, ctx.row_counter + 1) do
+      {:ok, new_subst, new_rc} ->
+        {:ok, %{ctx | subst: new_subst, row_counter: new_rc}}
+
+      {:error, _reason} ->
+        details = describe_prompt_extract_mismatch(prompt_output_type, extract_type)
+        {:error, Errors.prompt_output_mismatch(prompt_name, prompt_output_type, extract_type, details)}
+    end
+  end
+
+  defp unify_prompt_extract_s(prompt_name, prompt_output_type, extract_type, ctx) do
+    case TcCtx.unify(ctx, prompt_output_type, extract_type) do
+      {:ok, ctx} ->
+        {:ok, ctx}
+
+      {:error, _reason} ->
+        details = describe_prompt_extract_mismatch(prompt_output_type, extract_type)
+        {:error, Errors.prompt_output_mismatch(prompt_name, prompt_output_type, extract_type, details)}
+    end
+  end
 
   defp check_pipeline_ops_s([], payload_type, ctx), do: {:ok, [], payload_type, ctx}
   defp check_pipeline_ops_s([op | rest], _payload_type, ctx) do
@@ -1491,6 +1520,26 @@ defmodule Vaisto.TypeChecker do
       {:ok, [typed_op | typed_rest], final_payload_type, ctx}
     end
   end
+
+  defp describe_prompt_extract_mismatch({:record, _prompt_name, prompt_fields}, {:record, _extract_name, extract_fields}) do
+    prompt_map = Map.new(prompt_fields)
+
+    extract_fields
+    |> Enum.reduce([], fn {field, expected_type}, acc ->
+      case Map.get(prompt_map, field) do
+        nil ->
+          acc ++ [{:missing, field, expected_type}]
+
+        actual_type ->
+          case Vaisto.TypeSystem.Unify.unify(actual_type, expected_type) do
+            {:ok, _, _} -> acc
+            {:error, _} -> acc ++ [{:mistyped, field, expected_type, actual_type}]
+          end
+      end
+    end)
+  end
+
+  defp describe_prompt_extract_mismatch(_prompt_output_type, _extract_type), do: []
 
   # Add location to error messages — enhance errors with line/column
 

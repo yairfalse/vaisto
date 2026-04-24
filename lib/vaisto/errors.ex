@@ -251,6 +251,54 @@ defmodule Vaisto.Errors do
     )
   end
 
+  @doc "Prompt output does not satisfy the extract target"
+  def prompt_output_mismatch(prompt_name, prompt_output_type, extract_target, missing_or_mistyped_fields, opts \\ []) do
+    detail_lines =
+      missing_or_mistyped_fields
+      |> Enum.map(fn
+        {:missing, field, expected_type} ->
+          "missing field: #{field} : #{Vaisto.TypeSystem.Core.format_type(expected_type)}"
+
+        {:mistyped, field, expected_type, actual_type} ->
+          "field `#{field}` has type #{Vaisto.TypeSystem.Core.format_type(actual_type)}, expected #{Vaisto.TypeSystem.Core.format_type(expected_type)}"
+      end)
+
+    note =
+      [
+        "prompt `#{prompt_name}` output #{Vaisto.TypeSystem.Core.format_type(prompt_output_type)} does not satisfy extract target #{Vaisto.TypeSystem.Core.format_type(extract_target)}"
+        | detail_lines
+      ]
+      |> Enum.join("\n  note: ")
+
+    Error.new("prompt output type mismatch",
+      Keyword.merge(opts, [
+        expected: extract_target,
+        actual: prompt_output_type,
+        note: note
+      ])
+    )
+  end
+
+  @doc "Prompt not defined in scope"
+  def undefined_prompt(name, known_names_or_opts \\ [])
+
+  def undefined_prompt(name, known_names) when is_list(known_names) and known_names != [] and is_atom(hd(known_names)) do
+    hint = suggest_name(name, known_names)
+
+    Error.new("undefined prompt",
+      note: "prompt `#{name}` is not defined",
+      hint: hint
+    )
+  end
+
+  def undefined_prompt(name, opts) do
+    Error.new("undefined prompt",
+      Keyword.merge(opts, [
+        note: "prompt `#{name}` is not defined"
+      ])
+    )
+  end
+
   @doc "Function not found"
   def unknown_function(name, known_names_or_opts \\ [])
 
