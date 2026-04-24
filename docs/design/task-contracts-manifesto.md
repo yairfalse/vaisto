@@ -71,46 +71,44 @@ Hot code reload deserves separate mention. Production LLM systems must swap mode
 
 ## What a compile error looks like
 
-A prompt template declares an output schema:
+A prompt declares its response schema, and a pipeline binds against it:
 
 ```
+(deftype Question [text :String])
+(deftype CitedAnswer [text :String evidence (List DocId)])
+(deftype Answer [text :String evidence (List DocId)])
+
 (defprompt answer-with-citations
-  :input  {:question :String :docs [Doc]}
-  :output {:answer :String :evidence [DocId]})
+  :input  Question
+  :output CitedAnswer)
+
+(pipeline legal-qa
+  :input  Question
+  :output Answer
+  (generate :prompt answer-with-citations :extract Answer))
 ```
 
-A pipeline binds it:
-
-```
-(generate :prompt answer-with-citations :extract Answered)
-```
-
-The compiler unifies the prompt's declared output with the pipeline's expected `Answered` type. Today they match.
+The compiler unifies the prompt's declared output (`CitedAnswer`) with the pipeline's expected `Answer` type. Today they match.
 
 Someone "improves" the prompt to drop citations:
 
 ```
-(defprompt answer-with-citations
-  :input  {:question :String :docs [Doc]}
-  :output {:answer :String})       ; ← evidence field removed
+(deftype CitedAnswer [text :String])    ; ← evidence field removed
 ```
 
-A contract somewhere else in the codebase imports this prompt. Three days later, in code review, the compiler catches the field drop before the PR merges. Today, this class of change fails at 3am when the `evidence` field is `None` and the downstream citation formatter throws:
+A pipeline somewhere else in the codebase imports this prompt. Three days later, in code review, the compiler catches the field drop before the PR merges. Today, this class of change fails at 3am when the `evidence` field is `None` and the downstream citation formatter throws:
 
 ```
-error[E0418]: prompt output type mismatch
-  ┌─ pipelines/legal_qa:14:13
-14 │   (generate :prompt answer-with-citations :extract Answered)
-   │             ^^^^^^^ prompt produces {:answer :String}
-   │                     but pipeline expects Answered =
-   │                       {:question :String :answer :String
-   │                        :evidence [DocId]}
-   │
-   │   missing field: evidence : [DocId]
-   │   = note: introduced by pipeline answer-legal-question at line 8
+error: prompt output type mismatch
+  at line 6
+      (generate :prompt answer-with-citations :extract Answer)
+      ^ expected `Answer`, found `CitedAnswer`
+  note: prompt `answer-with-citations` output CitedAnswer
+        does not satisfy extract target Answer
+  note: missing field: evidence : (List DocId)
 ```
 
-This is the moment that justifies the language. The cost is real — prompts must declare output schemas, which is authoring burden today's prompts don't carry. The benefit is that a class of failure that reaches production silently today becomes a compile error.
+This is the moment that justifies the language. The cost is real — prompts must declare output schemas, which is authoring burden today's prompts don't carry. The benefit is that a class of failure that reaches production silently today becomes a compile error. (The error format above is what the implementation produces today; richer rendering — numbered error codes, multi-line type display, "introduced by pipeline X at line Y" cross-references — is on the roadmap. The load-bearing claim is structural: drift becomes a compile error with a field-level message.)
 
 The type system catches pipeline-consumer mismatches against the declared schema, not mismatches between the schema and what the prompt actually elicits from the model — that second class is caught at runtime by the supervisor's `:malformed-extract` clause. Two layers, compile time for composition and runtime for stochastic reality, with structured-output modes (JSON mode, grammar-constrained decoding) thinning the runtime layer as they mature.
 
