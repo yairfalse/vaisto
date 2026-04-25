@@ -168,6 +168,8 @@ Task contracts (`defprompt`, `pipeline`, `generate`) are typed surfaces over LLM
 
 Compilation is asymmetric across backends: `defprompt` is metadata-only, and `pipeline` / `generate` emit runtime calls into `Vaisto.LLM.call/4` via **`Vaisto.Emitter` only**. `Vaisto.CoreEmitter` does not handle these forms — pipelines containing `generate` cannot target `:core` today. The provider is selected at runtime via `Application.put_env(:vaisto, :llm, Vaisto.LLM.OpenAI)` (default: `Vaisto.LLM.Mock`).
 
+**Implementation status.** Only `defprompt`, `pipeline`, and `generate` are wired through parser → type checker → emitter today. The full design — 11 operators (`retrieve`, `rerank`, `extract`, `verify`, `tool`, `branch`, `map`, `parallel`, `fold`, `escalate`) and a `Ctx a` primitive with `payload`/`trace`/`budget`/`prov` fields — is specified in `docs/design/task-contracts-spec.md` but not yet bound in code. The manifesto (`docs/design/task-contracts-manifesto.md`) is the "why."
+
 Typed AST shapes:
 ```elixir
 {:defprompt, name, input_type, output_type, template, :unit}
