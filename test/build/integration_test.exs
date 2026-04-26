@@ -111,8 +111,7 @@ defmodule Vaisto.Build.IntegrationTest do
         Path.join(src_dir, "C.va")
       ]
 
-      graph = build_dependency_graph(files)
-
+      assert {:ok, graph} = DependencyResolver.build_graph(files)
       assert {:ok, order} = DependencyResolver.topological_sort(graph)
       modules = Enum.map(order, & &1.module)
 
@@ -187,45 +186,4 @@ defmodule Vaisto.Build.IntegrationTest do
     end
   end
 
-  # Helper to build a dependency graph from source files
-  defp build_dependency_graph(files) do
-    Enum.reduce(files, %{}, fn file, acc ->
-      source = File.read!(file)
-      ast = Vaisto.Parser.parse(source, file: file)
-
-      {module_name, imports} = extract_module_info(ast, file)
-
-      Map.put(acc, module_name, %{
-        file: file,
-        imports: Enum.map(imports, &{&1, nil})
-      })
-    end)
-  end
-
-  defp extract_module_info(ast, file) when is_list(ast) do
-    ns = Enum.find_value(ast, fn
-      {:ns, name, _loc} -> name
-      {:ns, name} -> name
-      _ -> nil
-    end)
-
-    module_name = if ns do
-      :"Elixir.#{ns}"
-    else
-      basename = Path.basename(file, ".va")
-      :"Elixir.#{basename}"
-    end
-
-    imports = Enum.flat_map(ast, fn
-      {:import, mod, _loc} -> [:"Elixir.#{mod}"]
-      {:import, mod} -> [:"Elixir.#{mod}"]
-      _ -> []
-    end)
-
-    {module_name, imports}
-  end
-
-  defp extract_module_info(ast, file) do
-    extract_module_info([ast], file)
-  end
 end
