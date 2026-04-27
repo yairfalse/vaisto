@@ -1257,12 +1257,23 @@ defmodule Vaisto.CoreEmitter do
     end
   end
 
-  # Apply: calling a function stored in a variable
-  # The type checker emits {:apply, {:var, name, type}, args, ret_type} for local fn vars
+  # Apply: calling a function stored in a variable, OR a top-level user fn
+  # the type checker misclassified as a local var (e.g., when prelude is loaded
+  # and __local_vars__ leaks across top-level forms). Mirror the :call clause's
+  # user_fns lookup so the cerl tree references c_fname instead of an unbound c_var.
   defp to_core_expr({:apply, {:var, func_name, _func_type}, args, _type}, user_fns, local_vars) do
+    arity = length(args)
     arg_cores = Enum.map(args, &to_core_expr(&1, user_fns, local_vars))
-    # Use c_apply with the variable - this invokes the function value stored in the variable
-    :cerl.c_apply(:cerl.c_var(func_name), arg_cores)
+    cond do
+      MapSet.member?(local_vars, func_name) ->
+        :cerl.c_apply(:cerl.c_var(func_name), arg_cores)
+
+      MapSet.member?(user_fns, {func_name, arity}) ->
+        :cerl.c_apply(:cerl.c_fname(func_name, arity), arg_cores)
+
+      true ->
+        :cerl.c_apply(:cerl.c_var(func_name), arg_cores)
+    end
   end
 
   # User-defined function call → local apply

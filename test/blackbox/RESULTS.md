@@ -1,108 +1,50 @@
 # vaistoc CLI — Black-Box Test Results
 
-**Date:** 2026-02-09
+**Date:** 2026-04-28
 **Version:** 0.1.0
-**Total:** 62 cases | **Pass:** 53 | **Fail:** 5 | **Bugs:** 4
+**Total:** 62 cases | **Pass:** 62 | **Fail:** 0 | **Bugs:** 0
 
-## Confirmed Bugs (4)
-
-### BUG-1: `--eval ""` leaks UndefinedFunctionError stacktrace (NEG-010)
-
-**Input:** `vaistoc --eval ""`
-**Expected:** Clean error message like `error: empty expression`
-**Actual:**
-```
-** (UndefinedFunctionError) function VaistoEval.main/0 is undefined
-    VaistoEval.main()
-    (vaisto 0.1.0) lib/vaisto/cli.ex:184: Vaisto.CLI.eval_code/2
-```
-**Severity:** Medium — exposes internal module names and file paths to user
-**Fix:** Check for empty/whitespace-only input before compiling eval code
-
-### BUG-2: `--eval "   "` leaks same stacktrace (ABN-010)
-
-**Input:** `vaistoc --eval "   "`
-**Expected:** Clean error or empty result
-**Actual:** Same UndefinedFunctionError as BUG-1
-**Severity:** Medium — same root cause as BUG-1
-**Fix:** Same as BUG-1: trim and validate input before eval
-
-### BUG-3: `--eval "(/ 1 0)"` leaks ArithmeticError stacktrace (ABN-001)
-
-**Input:** `vaistoc --eval "(/ 1 0)"`
-**Expected:** Clean error like `error: division by zero`
-**Actual:**
-```
-** (ArithmeticError) bad argument in arithmetic expression
-    VaistoEval.main/0
-    (vaisto 0.1.0) lib/vaisto/cli.ex:184: Vaisto.CLI.eval_code/2
-```
-**Severity:** Medium — runtime error not caught at compile time or eval boundary
-**Fix:** Wrap eval execution in try/rescue, format runtime errors cleanly
-
-### BUG-4: Compile to read-only directory leaks File.Error stacktrace (ABN-006)
-
-**Input:** `vaistoc examples/math.va -o /read-only-dir/Math.beam`
-**Expected:** Clean error like `error: cannot write to /read-only-dir/Math.beam: permission denied`
-**Actual:**
-```
-** (File.Error) could not write to file "...": permission denied
-    (elixir 1.19.5) lib/file.ex:1407: File.write!/3
-    (vaisto 0.1.0) lib/vaisto/cli.ex:159: Vaisto.CLI.compile_file/3
-```
-**Severity:** Medium — uses `File.write!` (raising) instead of `File.write` (returning)
-**Fix:** Use `File.write/3` and handle `{:error, reason}` with formatted message
-
-## Design Issues (3)
-
-### ISSUE-1: `eval ")"` silently succeeds with atom output (NEG-011)
-
-**Input:** `vaistoc --eval ")"`
-**Expected:** Parse error
-**Actual:** Outputs `:")"` with exit code 0
-**Assessment:** The parser treats `)` as an atom. Debatable whether this is a bug or intended, but likely surprising to users.
-
-### ISSUE-2: Non-.va files compile without warning (NEG-013)
-
-**Input:** `vaistoc somefile.txt` (containing `"hello"`)
-**Expected:** Error or warning about non-.va extension
-**Actual:** Compiles successfully to `.beam`
-**Assessment:** The compiler doesn't validate file extensions. Consider at least a warning.
-
-### ISSUE-3: Package names with digits are rejected (POS-026)
-
-**Input:** `vaistoc init bb-test-pkg-026`
-**Expected:** Success (looks like valid kebab-case)
-**Actual:** `error: package name must be lowercase kebab-case`
-**Assessment:** The kebab-case validator rejects digits. This is a design choice, not necessarily a bug, but the error message doesn't mention the no-digits constraint. If digits are intentionally disallowed, the error message should say so.
-
-## Test Environment Failures (2)
-
-- **SYS-001, SYS-003:** Failed because `init` was called in `/tmp` with a name containing digits (same root cause as ISSUE-3).
+All seven categories pass. Suite is fully green.
 
 ## Coverage Summary
 
-| Category | Cases | Pass | Fail | Bug |
-|----------|-------|------|------|-----|
-| Positive | 27 | 26 | 1 | 0 |
-| Negative | 13 | 10 | 2 | 1 |
-| System | 4 | 2 | 2 | 0 |
-| Integration | 3 | 3 | 0 | 0 |
-| Performance | 3 | 3 | 0 | 0 |
-| Load | 2 | 2 | 0 | 0 |
-| Abnormal | 10 | 7 | 0 | 3 |
-
-## Recommendations
-
-1. **Highest priority:** Wrap `eval_code/2` in try/rescue to catch runtime errors (fixes BUG-1, BUG-2, BUG-3)
-2. **High priority:** Replace `File.write!/3` with `File.write/3` + error handling in `compile_file/3` (fixes BUG-4)
-3. **Medium:** Add input validation for empty/whitespace-only eval expressions
-4. **Low:** Consider validating `.va` extension or emitting a warning
-5. **Low:** Clarify in error message that package names cannot contain digits (if intentional)
+| Category | Cases | Pass | Fail |
+|----------|-------|------|------|
+| Positive | 27 | 27 | 0 |
+| Negative | 13 | 13 | 0 |
+| System | 4 | 4 | 0 |
+| Integration | 3 | 3 | 0 |
+| Performance | 3 | 3 | 0 |
+| Load | 2 | 2 | 0 |
+| Abnormal | 10 | 10 | 0 |
 
 ## Running the Suite
 
 ```bash
 # From project root:
 test/blackbox/runner.sh
+
+# Single case:
+test/blackbox/runner.sh POS-008
 ```
+
+## History
+
+### 2026-04-28 — POS-008 fixed
+
+**POS-008 (`vaistoc --eval "(defn f [x :int] :int (+ x 1)) (f 5)"`)** — multi-form `--eval` input combining a `defn` with a top-level expression returned exit=1 with `<eval>: BEAM compilation failed`.
+
+Root cause: the type checker misclassified `:f` as a local variable (env leak of `__local_vars__` across top-level forms when prelude is loaded), emitting `{:apply, {:var, :f, ...}, args, ret}` instead of `{:call, :f, args, ret}`. The Core Erlang emitter's `:apply` clause then unconditionally emitted `c_apply(c_var(:f), ...)`, which the cerl `:core_lint` step rejected with `{:unbound_var, :f, {:main, 0}}`.
+
+Fix: `lib/vaisto/core_emitter.ex` `:apply` clause now checks `user_fns` and emits `c_fname` for top-level user-defined functions, mirroring the existing `:call` clause's `cond`. Defensive against further typechecker classification drift; the underlying `__local_vars__` leak in `check_module_forms` is a separate concern still worth fixing.
+
+### 2026-02-09 — initial run, all 4 confirmed bugs and 3 design issues now resolved
+
+The February audit identified 4 bugs and 3 design issues in the `--eval` and `compile` paths:
+
+- **BUG-1, BUG-2** — `--eval ""` and `--eval "   "` leaked `UndefinedFunctionError` stacktraces. Fixed.
+- **BUG-3** — `--eval "(/ 1 0)"` leaked `ArithmeticError` stacktrace. Fixed (try/rescue around eval execution).
+- **BUG-4** — Compile to a read-only directory leaked `File.Error` stacktrace. Fixed (`File.write/3` with structured error).
+- **ISSUE-1** — `--eval ")"` parsed `)` as an atom. Fixed (parser tightened).
+- **ISSUE-2** — Non-`.va` files compiled silently. Fixed (extension check).
+- **ISSUE-3** — Package names with digits rejected. Fixed (validator relaxed).
