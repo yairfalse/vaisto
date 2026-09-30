@@ -254,10 +254,29 @@ Implemented today:
 - LSP server and VS Code extension
 - Mock LLM provider for deterministic tests
 - OpenAI provider via `:httpc` with structured outputs
-- Multi-file builds and `.vsi` interface files
+- Multi-file builds; `.vsi` interface files are written but not yet used to
+  type-check imports (see below)
+
+Known gaps, each reproduced against the current code (details and
+reproductions in the [Liquid Vaisto RFC](docs/design/liquid-vaisto-rfc.md),
+§1.12):
+
+- Cross-module calls are not type-checked yet: imported calls are typed `Any`.
+- The type checker accepts some ill-typed programs, for example a `let`
+  binding that leaks out of its scope, or a function declared `:int` that
+  returns a float.
+- The two backends disagree on a few constructs (`and`/`or` evaluation,
+  guarded `defn`, record field access, `let` scoping), and row-polymorphic
+  field access on a record crashes at runtime.
+- Record and sum-type annotations on function parameters do not resolve at
+  call sites.
 
 Design direction:
 
+- **Liquid Vaisto**: a small semantic core with refinement types, algebraic
+  effects and evidence origin, a reference evaluator as the executable
+  specification, and BEAM as its production implementation. See
+  [docs/design/liquid-vaisto-rfc.md](docs/design/liquid-vaisto-rfc.md).
 - first-class `defcontract`
 - `pipeline :satisfies contract`
 - prompt placeholder lint
@@ -269,11 +288,12 @@ Design direction:
 - model/tool catalog
 - `:model auto` binding
 - runtime agreement records
-- optional constraint solving for logical contract checks
+- refinement types for logical contract checks, discharged with Z3
 
 For the full design argument, see
-[docs/design/task-contracts-manifesto.md](docs/design/task-contracts-manifesto.md)
-and [docs/design/task-contracts-spec.md](docs/design/task-contracts-spec.md).
+[docs/design/task-contracts-manifesto.md](docs/design/task-contracts-manifesto.md),
+[docs/design/task-contracts-spec.md](docs/design/task-contracts-spec.md),
+and [docs/design/liquid-vaisto-rfc.md](docs/design/liquid-vaisto-rfc.md).
 
 ## Quickstart
 
@@ -339,8 +359,9 @@ If `vaistoc` is not in your PATH, add this to VS Code settings:
   closure, structural accountability, and runtime supervision.
 - **LangChain / LlamaIndex** — composition by framework convention. Vaisto
   moves composition checks into the language.
-- **Z3** — SMT solver from Microsoft Research. A possible future backend for
-  logical contract consistency, not a substitute for runtime LLM evaluation.
+- **Z3** — SMT solver from Microsoft Research. The solver the Liquid Vaisto
+  RFC proposes for refinement checks; not a substitute for runtime LLM
+  evaluation.
 - **Gleam** — typed BEAM language and close architectural cousin.
 - **LFE** — Lisp on BEAM, untyped.
 
