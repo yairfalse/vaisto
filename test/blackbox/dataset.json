@@ -1,7 +1,14 @@
 {
   "system": "vaistoc CLI",
   "version": "0.1.0",
-  "contract_source": "vaistoc --help output, CLAUDE.md, examples/",
+  "contract_sources": {
+    "vaistoc_help": "Output of `vaistoc --help` (visible user-facing contract)",
+    "README": "README.md (project root)",
+    "CLAUDE": "CLAUDE.md (architecture reference)",
+    "prelude": "std/prelude.va (auto-loaded by --eval and compile)",
+    "LSP_3_17": "https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/"
+  },
+  "annotation_notes": "Every case carries a spec_source field naming the contract anchor it derives from. Cases without a clear source carry spec_source: null and a needs_triage note — those should either get a spec written or be deleted as code-derived.",
   "cases": [
     {
       "id": "POS-001",
@@ -9,7 +16,8 @@
       "description": "Eval simple arithmetic addition",
       "command": ["--eval", "(+ 1 2)"],
       "expect_exit": 0,
-      "expect_stdout_contains": "3"
+      "expect_stdout_contains": "3",
+      "spec_source": "README.md#Usage (`Vaisto.Parser.parse(\"(+ 1 2)\")`) + vaistoc_help#--eval"
     },
     {
       "id": "POS-002",
@@ -17,7 +25,8 @@
       "description": "Eval multiplication",
       "command": ["--eval", "(* 6 7)"],
       "expect_exit": 0,
-      "expect_stdout_contains": "42"
+      "expect_stdout_contains": "42",
+      "spec_source": "CLAUDE.md#Language-Features (arithmetic shown as `(+ x y)` in defn body) + vaistoc_help#--eval"
     },
     {
       "id": "POS-003",
@@ -25,7 +34,8 @@
       "description": "Eval nested arithmetic",
       "command": ["--eval", "(* (+ 1 2) (- 10 3))"],
       "expect_exit": 0,
-      "expect_stdout_contains": "21"
+      "expect_stdout_contains": "21",
+      "spec_source": "README.md#Usage (s-expr nesting `(+ 1 (* 2 3))` shown) + vaistoc_help#--eval"
     },
     {
       "id": "POS-004",
@@ -33,7 +43,8 @@
       "description": "Eval if-then-else true branch",
       "command": ["--eval", "(if true 1 0)"],
       "expect_exit": 0,
-      "expect_stdout_contains": "1"
+      "expect_stdout_contains": "1",
+      "spec_source": "CLAUDE.md#AST-Conventions (`{:if, cond, then, else, %Loc{}}` is a parser AST node)"
     },
     {
       "id": "POS-005",
@@ -41,7 +52,8 @@
       "description": "Eval if-then-else false branch",
       "command": ["--eval", "(if false 1 0)"],
       "expect_exit": 0,
-      "expect_stdout_contains": "0"
+      "expect_stdout_contains": "0",
+      "spec_source": "CLAUDE.md#AST-Conventions (`{:if, cond, then, else, %Loc{}}` is a parser AST node)"
     },
     {
       "id": "POS-006",
@@ -49,7 +61,8 @@
       "description": "Eval let binding",
       "command": ["--eval", "(let [x 10] (+ x 5))"],
       "expect_exit": 0,
-      "expect_stdout_contains": "15"
+      "expect_stdout_contains": "15",
+      "spec_source": "README.md#Editor-support (`(let [x 42] (add x 1))` example)"
     },
     {
       "id": "POS-007",
@@ -57,7 +70,8 @@
       "description": "Eval string concatenation",
       "command": ["--eval", "(str \"hello\" \" \" \"world\")"],
       "expect_exit": 0,
-      "expect_stdout_contains": "hello world"
+      "expect_stdout_contains": "hello world",
+      "spec_source": "CLAUDE.md#Typeclass-System (`(str \"Just(\" (show v) \")\")` shown in instance example)"
     },
     {
       "id": "POS-008",
@@ -65,7 +79,8 @@
       "description": "Eval function definition and call",
       "command": ["--eval", "(defn f [x :int] :int (+ x 1)) (f 5)"],
       "expect_exit": 0,
-      "expect_stdout_contains": "6"
+      "expect_stdout_contains": "6",
+      "spec_source": "CLAUDE.md#Language-Features (`(defn add [x :int y :int] :int (+ x y))`) + vaistoc_help#--eval (multi-form input)"
     },
     {
       "id": "POS-009",
@@ -73,7 +88,9 @@
       "description": "Eval do block returns last expression",
       "command": ["--eval", "(do (+ 1 2) (* 3 4))"],
       "expect_exit": 0,
-      "expect_stdout_contains": "12"
+      "expect_stdout_contains": "12",
+      "spec_source": null,
+      "needs_triage": "do-block return semantics not documented in README/CLAUDE.md/AGENTS.md"
     },
     {
       "id": "POS-010",
@@ -81,7 +98,8 @@
       "description": "Eval boolean literal true",
       "command": ["--eval", "true"],
       "expect_exit": 0,
-      "expect_stdout_contains": "true"
+      "expect_stdout_contains": "true",
+      "spec_source": "CLAUDE.md#Type-Representations (`:bool` is a primitive type)"
     },
     {
       "id": "POS-011",
@@ -89,7 +107,8 @@
       "description": "Eval boolean literal false",
       "command": ["--eval", "false"],
       "expect_exit": 0,
-      "expect_stdout_contains": "false"
+      "expect_stdout_contains": "false",
+      "spec_source": "CLAUDE.md#Type-Representations (`:bool` is a primitive type)"
     },
     {
       "id": "POS-012",
@@ -97,7 +116,8 @@
       "description": "Eval string literal",
       "command": ["--eval", "\"hello\""],
       "expect_exit": 0,
-      "expect_stdout_contains": "hello"
+      "expect_stdout_contains": "hello",
+      "spec_source": "CLAUDE.md#Type-Representations (`:string` is a primitive type)"
     },
     {
       "id": "POS-013",
@@ -105,7 +125,8 @@
       "description": "Eval integer literal",
       "command": ["--eval", "42"],
       "expect_exit": 0,
-      "expect_stdout_contains": "42"
+      "expect_stdout_contains": "42",
+      "spec_source": "CLAUDE.md#Type-Representations (`:int` is a primitive type)"
     },
     {
       "id": "POS-014",
@@ -113,7 +134,9 @@
       "description": "Eval list literal",
       "command": ["--eval", "[1 2 3]"],
       "expect_exit": 0,
-      "expect_stdout_contains": "[1, 2, 3]"
+      "expect_stdout_contains": "[1, 2, 3]",
+      "spec_source": null,
+      "needs_triage": "list literal syntax `[1 2 3]` and inspect format `[1, 2, 3]` not documented; CLAUDE.md mentions `{:list, elem_type}` typed AST but not surface syntax or output format"
     },
     {
       "id": "POS-015",
@@ -121,7 +144,8 @@
       "description": "Eval deftype and match exhaustive",
       "command": ["--eval", "(deftype Color (Red) (Green) (Blue)) (match (Red) [(Red) 1] [(Green) 2] [(Blue) 3])"],
       "expect_exit": 0,
-      "expect_stdout_contains": "1"
+      "expect_stdout_contains": "1",
+      "spec_source": "CLAUDE.md#Language-Features (`(deftype Color (Red) (Green) deriving [Eq Show])` and `(match result [(Ok v) v] [(Err e) default])`)"
     },
     {
       "id": "POS-016",
@@ -129,7 +153,8 @@
       "description": "Eval ADT with data and pattern match",
       "command": ["--eval", "(deftype Maybe (Just v) (Nothing)) (match (Just 42) [(Just v) v] [(Nothing) 0])"],
       "expect_exit": 0,
-      "expect_stdout_contains": "42"
+      "expect_stdout_contains": "42",
+      "spec_source": "CLAUDE.md#Language-Features (`(deftype Result (Ok v) (Err e))` and `(match result [(Ok v) v] [(Err e) default])`)"
     },
     {
       "id": "POS-017",
@@ -137,7 +162,8 @@
       "description": "Eval subtraction",
       "command": ["--eval", "(- 100 58)"],
       "expect_exit": 0,
-      "expect_stdout_contains": "42"
+      "expect_stdout_contains": "42",
+      "spec_source": "CLAUDE.md#Language-Features (arithmetic operators implied by `(+ x y)` examples)"
     },
     {
       "id": "POS-018",
@@ -145,7 +171,8 @@
       "description": "Eval integer division",
       "command": ["--eval", "(/ 10 2)"],
       "expect_exit": 0,
-      "expect_stdout_contains": "5"
+      "expect_stdout_contains": "5",
+      "spec_source": "CLAUDE.md#Language-Features (`(try (/ 1 0) [catch ...])` shows `/` is a language operator)"
     },
     {
       "id": "POS-019",
@@ -153,7 +180,9 @@
       "description": "Eval comparison operators",
       "command": ["--eval", "(> 5 3)"],
       "expect_exit": 0,
-      "expect_stdout_contains": "true"
+      "expect_stdout_contains": "true",
+      "spec_source": null,
+      "needs_triage": "comparison operators (`<`, `>`, `<=`, `>=`) not enumerated in README/CLAUDE.md"
     },
     {
       "id": "POS-020",
@@ -161,7 +190,8 @@
       "description": "Eval equality",
       "command": ["--eval", "(== 5 5)"],
       "expect_exit": 0,
-      "expect_stdout_contains": "true"
+      "expect_stdout_contains": "true",
+      "spec_source": "CLAUDE.md#Language-Features (`(instance Eq :int (eq [x y] (== x y)))` — `==` is the equality operator)"
     },
     {
       "id": "POS-021",
@@ -170,7 +200,8 @@
       "command": ["examples/math.va"],
       "expect_exit": 0,
       "expect_stdout_contains": "Compiled",
-      "cleanup": ["examples/Elixir.Math.beam"]
+      "cleanup": ["examples/Elixir.Math.beam"],
+      "spec_source": "vaistoc_help#single-file (`vaistoc <file.va>` Compile a single file)"
     },
     {
       "id": "POS-022",
@@ -180,7 +211,8 @@
       "expect_exit": 0,
       "expect_stdout_contains": "Compiled",
       "setup_dirs": ["/tmp/bb_vaisto"],
-      "cleanup": ["/tmp/bb_vaisto/Math.beam"]
+      "cleanup": ["/tmp/bb_vaisto/Math.beam"],
+      "spec_source": "vaistoc_help#-o (`vaistoc <file.va> -o <output>` Compile to specific output)"
     },
     {
       "id": "POS-023",
@@ -189,7 +221,8 @@
       "command": ["examples/maybe.va"],
       "expect_exit": 0,
       "expect_stdout_contains": "Compiled",
-      "cleanup": ["examples/Elixir.Maybe.beam"]
+      "cleanup": ["examples/Elixir.Maybe.beam"],
+      "spec_source": "vaistoc_help#single-file + CLAUDE.md#Language-Features (ADT compilation contract)"
     },
     {
       "id": "POS-024",
@@ -197,7 +230,8 @@
       "description": "Help flag shows usage",
       "command": ["--help"],
       "expect_exit": 0,
-      "expect_stdout_contains": "Usage:"
+      "expect_stdout_contains": "Usage:",
+      "spec_source": "vaistoc_help#--help (`vaistoc --help` Show this help)"
     },
     {
       "id": "POS-025",
@@ -205,7 +239,9 @@
       "description": "No args shows help",
       "command": [],
       "expect_exit": 0,
-      "expect_stdout_contains": "Usage:"
+      "expect_stdout_contains": "Usage:",
+      "spec_source": null,
+      "needs_triage": "behavior of bare `vaistoc` (no args) not pinned in --help output"
     },
     {
       "id": "POS-026",
@@ -214,7 +250,8 @@
       "command": ["init", "bb-test-pkg"],
       "expect_exit": 0,
       "expect_stdout_contains": "Created",
-      "cleanup_dirs": ["bb-test-pkg"]
+      "cleanup_dirs": ["bb-test-pkg"],
+      "spec_source": "vaistoc_help#Packages (`vaistoc init my-lib    Creates my-lib/ with vaisto.toml + src/`)"
     },
     {
       "id": "POS-027",
@@ -222,7 +259,8 @@
       "description": "Eval negative number",
       "command": ["--eval", "(- 0 5)"],
       "expect_exit": 0,
-      "expect_stdout_contains": "-5"
+      "expect_stdout_contains": "-5",
+      "spec_source": "CLAUDE.md#Language-Features (arithmetic operators implied)"
     },
     {
       "id": "POS-028",
@@ -230,7 +268,8 @@
       "description": "Eval lambda and apply",
       "command": ["--eval", "(let [f (fn [x] (+ x 1))] (f 10))"],
       "expect_exit": 0,
-      "expect_stdout_contains": "11"
+      "expect_stdout_contains": "11",
+      "spec_source": "CLAUDE.md#Lambda-Fallback-Mechanism (`{:fn, params, body}` anonymous functions are first-class)"
     },
 
     {
@@ -240,7 +279,8 @@
       "command": ["--eval", "((("],
       "expect_exit": 1,
       "expect_stderr_contains": "parse error",
-      "expect_no_stacktrace": true
+      "expect_no_stacktrace": true,
+      "spec_source": "CLAUDE.md#Error-Messages (`Errors follow Rust's style: short, exact, with source context`) + CLAUDE.md#Error-Handling (`Parser raises on syntax errors`)"
     },
     {
       "id": "NEG-002",
@@ -249,7 +289,8 @@
       "command": ["--eval", "(+ 1 \"hello\")"],
       "expect_exit": 1,
       "expect_stderr_contains": "type mismatch",
-      "expect_no_stacktrace": true
+      "expect_no_stacktrace": true,
+      "spec_source": "CLAUDE.md#Structured-Error-System (`%Error{message: \"type mismatch\", expected: ..., actual: ..., hint: ...}`)"
     },
     {
       "id": "NEG-003",
@@ -258,7 +299,8 @@
       "command": ["--eval", "(unknown-func 1 2)"],
       "expect_exit": 1,
       "expect_stderr_contains": "unknown function",
-      "expect_no_stacktrace": true
+      "expect_no_stacktrace": true,
+      "spec_source": "AGENTS.md#Conventions (`\"Did you mean?\" hints use Jaro distance — see Vaisto.Errors.undefined_variable for the pattern`)"
     },
     {
       "id": "NEG-004",
@@ -267,7 +309,8 @@
       "command": ["nonexistent.va"],
       "expect_exit": 1,
       "expect_stderr_contains": "cannot read",
-      "expect_no_stacktrace": true
+      "expect_no_stacktrace": true,
+      "spec_source": "CLAUDE.md#Error-Messages (`short, exact, with source context and actionable hints`)"
     },
     {
       "id": "NEG-005",
@@ -276,7 +319,8 @@
       "command": ["build", "/nonexistent/dir"],
       "expect_exit": 1,
       "expect_stderr_contains": "No .va files",
-      "expect_no_stacktrace": true
+      "expect_no_stacktrace": true,
+      "spec_source": "vaistoc_help#build + CLAUDE.md#Error-Messages"
     },
     {
       "id": "NEG-006",
@@ -285,7 +329,8 @@
       "command": ["--bogus-flag"],
       "expect_exit": 1,
       "expect_stderr_contains": "unknown option",
-      "expect_no_stacktrace": true
+      "expect_no_stacktrace": true,
+      "spec_source": "vaistoc_help (any flag not in the help output is unknown)"
     },
     {
       "id": "NEG-007",
@@ -294,7 +339,8 @@
       "command": ["--eval", "(deftype Color (Red) (Green) (Blue)) (match (Red) [(Red) 1] [(Green) 2])"],
       "expect_exit": 1,
       "expect_stderr_contains": "non-exhaustive",
-      "expect_no_stacktrace": true
+      "expect_no_stacktrace": true,
+      "spec_source": "CLAUDE.md#Design-Decisions (`Exhaustiveness checking — match on sum types and booleans must cover all variants`)"
     },
     {
       "id": "NEG-008",
@@ -303,7 +349,8 @@
       "command": ["init", "My Package"],
       "expect_exit": 1,
       "expect_stderr_contains": "kebab-case",
-      "expect_no_stacktrace": true
+      "expect_no_stacktrace": true,
+      "spec_source": "vaistoc_help#Packages (`Package names are kebab-case`)"
     },
     {
       "id": "NEG-009",
@@ -312,7 +359,8 @@
       "command": ["init", "UPPER"],
       "expect_exit": 1,
       "expect_stderr_contains": "kebab-case",
-      "expect_no_stacktrace": true
+      "expect_no_stacktrace": true,
+      "spec_source": "vaistoc_help#Packages (`Package names are kebab-case`)"
     },
     {
       "id": "NEG-010",
@@ -321,7 +369,8 @@
       "command": ["--eval", ""],
       "expect_exit": 1,
       "expect_no_stacktrace": true,
-      "notes": "BUG FOUND: Currently leaks UndefinedFunctionError stacktrace"
+      "spec_source": "CLAUDE.md#Error-Messages (`short, exact, with source context`) — empty input must produce a clean error, not a stacktrace",
+      "history": "Was a confirmed BUG-1 in 2026-02-09 baseline (leaked UndefinedFunctionError); fixed by 2026-04-27 run."
     },
     {
       "id": "NEG-011",
@@ -329,7 +378,9 @@
       "description": "Eval closing paren only",
       "command": ["--eval", ")"],
       "expect_exit": 1,
-      "expect_no_stacktrace": true
+      "expect_no_stacktrace": true,
+      "spec_source": "CLAUDE.md#Error-Handling (`Parser raises on syntax errors`) — bare `)` is a parse error, not a valid atom",
+      "history": "Was ISSUE-1 in 2026-02-09 baseline (`)` parsed as atom); fixed by 2026-04-27 run."
     },
     {
       "id": "NEG-012",
@@ -337,7 +388,8 @@
       "description": "Eval unclosed string literal",
       "command": ["--eval", "\"hello"],
       "expect_exit": 1,
-      "expect_no_stacktrace": true
+      "expect_no_stacktrace": true,
+      "spec_source": "CLAUDE.md#Error-Handling (`Parser raises on syntax errors`)"
     },
     {
       "id": "NEG-013",
@@ -347,7 +399,9 @@
       "expect_exit": 1,
       "setup_files": {"/tmp/bb_vaisto_notva.txt": "hello"},
       "expect_no_stacktrace": true,
-      "notes": "Should reject or warn about non-.va files"
+      "notes": "Should reject or warn about non-.va files",
+      "spec_source": null,
+      "needs_triage": "extension validation behavior was added between Feb and Apr 2026 but not documented in --help or CLAUDE.md"
     },
 
     {
@@ -358,7 +412,8 @@
         {"command": ["init", "bb-sys-pkg"], "expect_exit": 0},
         {"command": ["build"], "cwd_suffix": "bb-sys-pkg", "expect_exit": 0, "expect_stdout_contains": "Built"}
       ],
-      "cleanup_dirs": ["bb-sys-pkg"]
+      "cleanup_dirs": ["bb-sys-pkg"],
+      "spec_source": "vaistoc_help#Build-Modes (`With vaisto.toml: vaistoc build  Reads manifest, resolves deps`)"
     },
     {
       "id": "SYS-002",
@@ -369,7 +424,8 @@
         {"verify_beam": "/tmp/bb_vaisto_sys/Elixir.Math.beam"}
       ],
       "setup_dirs": ["/tmp/bb_vaisto_sys"],
-      "cleanup_dirs": ["/tmp/bb_vaisto_sys"]
+      "cleanup_dirs": ["/tmp/bb_vaisto_sys"],
+      "spec_source": "README.md#Compilation-Pipeline (`Vaisto source → AST → Type checker → Typed AST → Core Erlang → BEAM bytecode`)"
     },
     {
       "id": "SYS-003",
@@ -379,7 +435,8 @@
       "expect_exit": 0,
       "expect_file_exists": "/tmp/bb_vaisto_place/Math.beam",
       "setup_dirs": ["/tmp/bb_vaisto_place"],
-      "cleanup_dirs": ["/tmp/bb_vaisto_place"]
+      "cleanup_dirs": ["/tmp/bb_vaisto_place"],
+      "spec_source": "vaistoc_help#-o (`vaistoc <file.va> -o <output>` Compile to specific output)"
     },
     {
       "id": "SYS-004",
@@ -389,7 +446,8 @@
       "expect_exit": 0,
       "expect_file_exists": "bb-sys-init/vaisto.toml",
       "expect_dir_exists": "bb-sys-init/src",
-      "cleanup_dirs": ["bb-sys-init"]
+      "cleanup_dirs": ["bb-sys-init"],
+      "spec_source": "vaistoc_help#Packages (`Creates my-lib/ with vaisto.toml + src/`)"
     },
     {
       "id": "SYS-005",
@@ -400,7 +458,9 @@
         {"command": ["examples/math.va", "-o", "/tmp/bb_vaisto_idem/Math.beam"], "expect_exit": 0}
       ],
       "setup_dirs": ["/tmp/bb_vaisto_idem"],
-      "cleanup_dirs": ["/tmp/bb_vaisto_idem"]
+      "cleanup_dirs": ["/tmp/bb_vaisto_idem"],
+      "spec_source": null,
+      "needs_triage": "compile idempotency is a reasonable expectation but not documented; consider promoting to spec or deleting"
     },
 
     {
@@ -412,7 +472,8 @@
         {"beam_load": "/tmp/bb_vaisto_int/Elixir.Maybe.beam", "expect_module": "Elixir.Maybe"}
       ],
       "setup_dirs": ["/tmp/bb_vaisto_int"],
-      "cleanup_dirs": ["/tmp/bb_vaisto_int"]
+      "cleanup_dirs": ["/tmp/bb_vaisto_int"],
+      "spec_source": "README.md#What-is-this (`BEAM runtime, OTP patterns`) + CLAUDE.md#Compilation-Pipeline (output is BEAM bytecode loadable by the VM)"
     },
     {
       "id": "INT-002",
@@ -421,7 +482,8 @@
       "command": ["--eval", "(+ 2147483647 1)"],
       "expect_exit": 0,
       "expect_stdout_contains": "2147483648",
-      "notes": "BEAM handles arbitrary precision integers"
+      "notes": "BEAM handles arbitrary precision integers",
+      "spec_source": "CLAUDE.md#Type-Representations (`:int` is a primitive — BEAM bigints are inherited from the runtime; CLAUDE.md doesn't pin overflow semantics specifically)"
     },
     {
       "id": "INT-003",
@@ -429,7 +491,8 @@
       "description": "Eval string operations use BEAM binary correctly",
       "command": ["--eval", "(str \"abc\" \"def\" \"ghi\")"],
       "expect_exit": 0,
-      "expect_stdout_contains": "abcdefghi"
+      "expect_stdout_contains": "abcdefghi",
+      "spec_source": "CLAUDE.md#Typeclass-System (`(str ...)` shown in instance example)"
     },
 
     {
@@ -445,7 +508,8 @@
       "expect_exit": 0,
       "setup_dirs": ["/tmp/bb_vaisto_load", "/tmp/bb_vaisto_load_out"],
       "cleanup_dirs": ["/tmp/bb_vaisto_load", "/tmp/bb_vaisto_load_out"],
-      "max_duration_ms": 30000
+      "max_duration_ms": 30000,
+      "spec_source": "vaistoc_help#build (`vaistoc build [dir]  Build all .va files in directory`) — multi-file capacity"
     },
     {
       "id": "LOAD-002",
@@ -454,7 +518,9 @@
       "command": ["--eval", "(do (+ 1 1) (+ 2 2) (+ 3 3) (+ 4 4) (+ 5 5) (+ 6 6) (+ 7 7) (+ 8 8) (+ 9 9) (+ 10 10))"],
       "expect_exit": 0,
       "expect_stdout_contains": "20",
-      "max_duration_ms": 10000
+      "max_duration_ms": 10000,
+      "spec_source": null,
+      "needs_triage": "10 expressions, not 50 (description is stale); also no documented capacity contract for `do`-block size"
     },
 
     {
@@ -463,7 +529,9 @@
       "description": "Eval simple expression completes in under 5 seconds",
       "command": ["--eval", "(+ 1 2)"],
       "expect_exit": 0,
-      "max_duration_ms": 5000
+      "max_duration_ms": 5000,
+      "spec_source": null,
+      "needs_triage": "5s budget for `--eval (+ 1 2)` is a reasonable smoke threshold but not pinned in any spec"
     },
     {
       "id": "PERF-002",
@@ -473,7 +541,9 @@
       "expect_exit": 0,
       "max_duration_ms": 10000,
       "setup_dirs": ["/tmp/bb_vaisto_perf"],
-      "cleanup_dirs": ["/tmp/bb_vaisto_perf"]
+      "cleanup_dirs": ["/tmp/bb_vaisto_perf"],
+      "spec_source": null,
+      "needs_triage": "10s compile budget for examples/math.va not pinned in any spec"
     },
     {
       "id": "PERF-003",
@@ -481,7 +551,9 @@
       "description": "Help flag responds in under 2 seconds",
       "command": ["--help"],
       "expect_exit": 0,
-      "max_duration_ms": 2000
+      "max_duration_ms": 2000,
+      "spec_source": null,
+      "needs_triage": "2s budget for --help is a reasonable smoke threshold but not pinned"
     },
 
     {
@@ -491,7 +563,8 @@
       "command": ["--eval", "(/ 1 0)"],
       "expect_exit": 1,
       "expect_no_stacktrace": true,
-      "notes": "BUG FOUND: Currently leaks ArithmeticError stacktrace"
+      "spec_source": "CLAUDE.md#Error-Messages (`short, exact, with source context and actionable hints`) — runtime errors must not leak Elixir/Erlang stacktraces",
+      "history": "Was confirmed BUG-3 in 2026-02-09 baseline (leaked ArithmeticError); fixed by 2026-04-27 run."
     },
     {
       "id": "ABN-002",
@@ -499,7 +572,8 @@
       "description": "Eval with null byte in input",
       "command": ["--eval", "(+ 1\u0000 2)"],
       "expect_exit_nonzero_or_success": true,
-      "expect_no_stacktrace": true
+      "expect_no_stacktrace": true,
+      "spec_source": "CLAUDE.md#Error-Messages (no stacktrace leakage on adversarial input)"
     },
     {
       "id": "ABN-003",
@@ -508,7 +582,8 @@
       "command_template": "--eval (LONG_ID 1 2)",
       "long_id_length": 10000,
       "expect_no_stacktrace": true,
-      "expect_no_crash": true
+      "expect_no_crash": true,
+      "spec_source": "CLAUDE.md#Error-Messages (graceful handling on adversarial input)"
     },
     {
       "id": "ABN-004",
@@ -516,14 +591,17 @@
       "description": "Deeply nested expressions (200 levels)",
       "command_generate": "deep_nest_200",
       "expect_exit_nonzero_or_success": true,
-      "expect_no_stacktrace": true
+      "expect_no_stacktrace": true,
+      "spec_source": "CLAUDE.md#Error-Messages (graceful handling on adversarial input)"
     },
     {
       "id": "ABN-005",
       "category": "abnormal",
       "description": "Eval with unicode in identifiers",
       "command": ["--eval", "(let [über 42] über)"],
-      "expect_no_stacktrace": true
+      "expect_no_stacktrace": true,
+      "spec_source": null,
+      "needs_triage": "unicode identifier policy is not documented; behavior may be intentional (BEAM-friendly atom) or accidental"
     },
     {
       "id": "ABN-006",
@@ -533,7 +611,8 @@
       "command": ["/tmp/bb_vaisto_noperm.va"],
       "expect_exit": 1,
       "expect_no_stacktrace": true,
-      "cleanup": ["/tmp/bb_vaisto_noperm.va"]
+      "cleanup": ["/tmp/bb_vaisto_noperm.va"],
+      "spec_source": "CLAUDE.md#Error-Messages (no stacktrace leakage on filesystem errors)"
     },
     {
       "id": "ABN-007",
@@ -543,7 +622,9 @@
       "setup_readonly_dir": "/tmp/bb_vaisto_readonly",
       "expect_exit": 1,
       "expect_no_stacktrace": true,
-      "cleanup_dirs": ["/tmp/bb_vaisto_readonly"]
+      "cleanup_dirs": ["/tmp/bb_vaisto_readonly"],
+      "spec_source": "CLAUDE.md#Error-Messages (no stacktrace leakage on filesystem errors)",
+      "history": "Was confirmed BUG-4 in 2026-02-09 baseline (leaked File.Error); fixed by 2026-04-27 run."
     },
     {
       "id": "ABN-008",
@@ -553,7 +634,8 @@
       "setup_binary_file": "/tmp/bb_vaisto_binary.va",
       "expect_no_crash": true,
       "expect_no_stacktrace": true,
-      "cleanup": ["/tmp/bb_vaisto_binary.va"]
+      "cleanup": ["/tmp/bb_vaisto_binary.va"],
+      "spec_source": "CLAUDE.md#Error-Messages (graceful handling on adversarial input)"
     },
     {
       "id": "ABN-009",
@@ -561,7 +643,8 @@
       "description": "Eval with emoji in string",
       "command": ["--eval", "(str \"hello \" \"🌍\")"],
       "expect_exit": 0,
-      "expect_no_stacktrace": true
+      "expect_no_stacktrace": true,
+      "spec_source": "CLAUDE.md#Type-Representations (`:string` — UTF-8 by BEAM convention)"
     },
     {
       "id": "ABN-010",
@@ -571,7 +654,8 @@
         {"command": ["init", "bb-abn-dup"], "expect_exit": 0},
         {"command": ["init", "bb-abn-dup"], "expect_exit": 1, "expect_no_stacktrace": true}
       ],
-      "cleanup_dirs": ["bb-abn-dup"]
+      "cleanup_dirs": ["bb-abn-dup"],
+      "spec_source": "vaistoc_help#init (`vaistoc init [name]  Create a new package`) — re-init must not silently overwrite"
     }
   ]
 }
