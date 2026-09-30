@@ -1,8 +1,8 @@
 # RFC: Liquid Vaisto
 
-- **Status:** Draft 3 for discussion. Design only; nothing in this document is implemented.
+- **Status:** Draft 4 for discussion. Design only; nothing in this document is implemented.
 - **Date:** 2026-10-01
-- **Supersedes:** draft 2 (2026-09-30), after an adversarial review whose findings and fixes are listed in Appendix C. Draft 2 superseded draft 1, written earlier the same day. Draft 1 layered refinements on top of today's compiler and treated BEAM behaviour as the definition of the primitives. Review of that draft produced the central idea of this one: **Vaisto has a semantics; BEAM implements it.** Appendix B lists every change.
+- **Supersedes:** draft 3 (merged in PR #6), after a second adversarial review. Appendix C lists the findings of both reviews and their fixes. Draft 3 superseded draft 2 (2026-09-30). Draft 2 superseded draft 1, written earlier the same day. Draft 1 layered refinements on top of today's compiler and treated BEAM behaviour as the definition of the primitives. Review of that draft produced the central idea of this one: **Vaisto has a semantics; BEAM implements it.** Appendix B lists every change.
 - **Baseline:** `origin/main` at `0ec7a82`. Test baseline: 1268 passing, 1 excluded, 1 intermittent failure (D10).
 - **Scope:** the fourteen items of the brief's "Immediate assignment", and the parts of the brief that constrain them.
 - **Notation:** `{v:B | p}` is a refined type: base type `B`, predicate `p` over the value `v`. Snippets that use refinements use **provisional syntax** (§4.4); the surface syntax is an open question (Q1).
@@ -66,7 +66,7 @@ Everything else is **library**: authority, capabilities, budgets, workflow phase
 
 ### 0.4 Conditions
 
-1. **The core and its reference evaluator come before refinements.** They are the oracle. The 24 defects reproduced in §1.12 stop being a hand-maintained bug list and become the seed corpus of a differential harness. The harness finds most defect *classes* automatically: backend divergences and elaborator bugs. It does not find parser misreadings or interface bugs, which have their own tests (§6.3, §6.4).
+1. **The core and its reference evaluator come before refinements.** They are the oracle. The 24 defects in §1.12 (22 reproduced by execution, D13 and D14 confirmed by reading) stop being a hand-maintained bug list and become the seed corpus of a differential harness. The harness finds most defect *classes* automatically: backend divergences and elaborator bugs. It does not find parser misreadings or interface bugs, which have their own tests (§6.3, §6.4).
 2. **`:any` becomes `Dyn`**, a real dynamic type with no implicit conversion in either direction. Values cross into the typed world only through checked `decode` (§4.6). A silent top-and-bottom type makes any refinement soundness claim false.
 3. **Construction privacy (`opaque`) exists.** Workflow phases are named types, relations are refinements, and "only admission can construct `Accepted`" is constructor privacy. These are three different mechanisms, and the third is not refinement typing (§4.1, §16.3).
 4. **One backend.** A single lowering to the abstract format replaces the two emitters, once the harness shows it agrees with the evaluator (§7).
@@ -250,7 +250,7 @@ Typeclasses use dictionary passing.
 - **Emission:** Core uses the record's field order and `element/2` when the static type is a record, and `maps:get` otherwise (`core_emitter.ex:1180-1205`). The Elixir emitter has no field-access clause at all (D12).
 - **Rows and nominal types pull in opposite directions.** A parameter without an annotation is structural: any record with the field is accepted, and because of D21 so is anything else (§16.3, probe a).
 
-**What this means for refinements.** Field projection appears in predicates only on nominal records, as a datatype selector (§4.4, Phase 2). A field access whose record expression has a row, tvar or `:any` type is opaque. Workflow-phase typing (§16.3) needs nominal parameters, because rows would erase the distinction between phases.
+**What this means for refinements.** Field projection appears in predicates only on nominal records, as a datatype selector (§4.4, Phase 2). A field access on a row-typed value is an uninterpreted function of the value and the label (§4.4); on a tvar or `:any` value it is opaque. Workflow-phase typing (§16.3) needs nominal parameters, because rows would erase the distinction between phases.
 
 ### 1.8 Module interfaces (`.vsi`)
 
@@ -369,6 +369,7 @@ Each pass has a type, and each boundary carries an invariant:
 elaborate     : Surface         -> Result Error Core          HM inference; untrusted
 lint          : Core            -> Result Error Core          Core Lint; trusted; checks, never infers
 verify        : Core            -> Result Error VerifiedCore  refinement checker + solver
+materialize   : VerifiedCore    -> VerifiedCore               runtime checks made explicit code (§7.2)
 erase         : VerifiedCore    -> Core⁻                      drops refinements; total, syntactic
 lower_effects : Core⁻           -> LoweredCore                effect requests become direct handler calls
 emit          : LoweredCore     -> AbstractErlang             the only backend
@@ -379,15 +380,15 @@ compile       : AbstractErlang  -> BEAM                       OTP compile:forms/
 |---|---|---|
 | `lint` accepts | the Core term is well-typed, with no inference involved | Core Lint, a small checker (§9.2) |
 | `verify` accepts | every refinement obligation is valid | refinement checker plus Z3 `unsat` (§11) |
-| `erase` | `eval(e) = eval(erase(e))` for every verified pure term `e` | by construction; later a Lean theorem (§17.4) |
+| `materialize`, then `erase` | `eval(materialize(e)) = eval(erase(materialize(e)))` for every verified pure term `e` | by construction; later a Lean theorem (§17.4) |
 | `lower_effects` | the sequence of effect requests, and how their results are used, is unchanged | differential test now; theorem later |
 | `emit` + `compile` | BEAM agrees with the reference evaluator | differential harness (§6.3); never assumed |
 
-The **reference evaluator** (§6) runs on Core, before or after erasure; the erasure invariant says the answer is the same. The LSP and the REPL stop after `lint` or `verify`; hover types come from Core types, not from HM's internal terms.
+The **reference evaluator** (§6) runs on Core, before or after erasure; the erasure invariant (after materialization) says the answer is the same. The LSP and the REPL stop after `lint` or `verify`; hover types come from Core types, not from HM's internal terms.
 
 ### 3.2 One pipeline instead of five compile paths
 
-§1.1 lists five independent paths from source to BEAM: `Compilation.compile/3`, `Build.Compiler`, the REPL, `Vaisto.compile_string/2`, and LSP hover. All of them are replaced by calls into a single pipeline module. A path that skips `verify` for a module containing refinements cannot reach `emit`. `erase` refuses Core that still carries refinements unless it is marked verified, so a skipped pass fails loudly.
+§1.1 lists five independent paths from source to BEAM: `Compilation.compile/3`, `Build.Compiler`, the REPL, `Vaisto.compile_string/2`, and LSP hover. All of them are replaced by calls into a single pipeline module. A path that skips `verify` for a module with obligations (§4.4) cannot reach `emit`. `erase` refuses Core that still carries refinements unless it is marked verified, so a skipped pass fails loudly.
 
 ### 3.3 Staging with the existing compiler
 
@@ -458,7 +459,7 @@ Opacity is static; BEAM tuples are transparent. A **sealed** type is an opaque t
 
 **Invariants and abstract measures of opaque types.** An opaque type may declare a **type invariant**, a predicate over its hidden representation, plus **abstract measures**: functions of the type exported to the logic as uninterpreted symbols, such as `(before t)` and `(after t)` for a transition.
 - Inside the module, every constructor and every function returning the type must establish the invariant (checked, or carrying a law status, §16.1).
-- Outside, clients may assume the invariant of every value of the type, stated in terms of the abstract measures, and can write refinements over those measures without seeing the representation.
+- Outside, clients may assume the invariant of every value of the type, stated in terms of the abstract measures, and can write refinements over those measures without seeing the representation. A value that arrives in a message has been decoded against the invariant (§4.6), so the assumption also holds for values that came from outside.
 
 This is the one piece of new refinement theory that the library of §16 needs, and §4.8 says so.
 
@@ -494,8 +495,8 @@ g ::= a guard: a guard-safe expression (below)
 - **Typeclasses, and `:num`, are elaborated away.** A class is a record of functions and an instance is a value of that record; a constrained function takes the dictionary as an argument. Row evidence and dictionaries are one mechanism: hidden arguments inserted at `inst`. `:num` becomes the `Num` class with instances for `Int` and `Float`. **A class may declare laws, and only a lawful instance's operations enter the logic.** `Num Int` satisfies the commutative-ring laws. `Num Float` satisfies none (IEEE arithmetic is not associative) and never appears in a refinement. The same rule covers `Eq`: derived `Eq` is structural equality and lawful by construction; a hand-written `Eq` instance is not usable in the logic.
 - **Evaluation order is defined by Core.** Core evaluates left to right, call-by-value. The elaborator names every sub-expression that may perform an effect, `crash` included, with a `let` (A-normal form). It does so **within that sub-expression's own evaluation context**: a sub-expression of an `if` branch is named inside that branch, never hoisted above the `if`. The order of effects and crashes therefore never depends on the order the Erlang compiler uses for call arguments, and short-circuiting is never undone by hoisting.
 - **Crashes are an effect** (§4.5). A failed match, a division by zero or `head` of an empty list *performs* `crash`. `try` elaborates to `handle-crash`, and `after` to sequencing on both paths. A function that performs no effect at all, not even `crash`, is total. Refinements are how `crash` is proved unreachable (§4.4).
-- **Crash reasons are normalized** to a small closed set: `badarith`, `badmatch`, `case_clause`, `function_clause`, `bad_decode`, `user`, and `raised` for foreign exceptions. The evaluator and the backend then agree on reasons whichever BEAM construct the lowering chose. Resource exhaustion (`system_limit`, out-of-memory) is outside the semantics.
-- **Guards** (`:when` on definitions, and guards in `match` and `receive` clauses) are restricted to guard-safe expressions: comparisons, arithmetic, type tests and selectors, as BEAM guards are. They may not call user functions. **A crash inside a guard makes the guard false**, which is Erlang's rule, so the lowering can always emit a real BEAM guard.
+- **Crash reasons are normalized** to a small closed set: `badarith`; `badarg` (what `hd`, `tl` and `element` raise); `no_match` for any failed match, whichever BEAM construct reports it (`case_clause`, `function_clause` or `badmatch`); `bad_decode`; `user`; and `raised` for foreign exceptions. Merging the match failures is what lets the evaluator and the backend agree on reasons whichever construct the lowering chose. Resource exhaustion (`system_limit`, out-of-memory) is outside the semantics.
+- **Guards** (`:when` on definitions, and guards in `match` and `receive` clauses) are restricted to guard-safe expressions: comparisons, arithmetic, type tests and selectors, as BEAM guards are. They may not call user functions. **A crash inside a guard makes the guard false**, which is Erlang's rule, so the lowering can always emit a real BEAM guard. In the logic a guard `g` therefore means **`def(g) ∧ g`**, where `def(g)` collects what `g` needs in order not to crash: non-zero divisors, the testers under its selectors, and its type tests. That is the meaning used both when a guard adds a fact and when a failed guard is negated (§10.3).
 - **`Float` and `String` are values but not logic sorts** (§4.4).
 
 ### 4.3 Primitive semantics (normative)
@@ -512,7 +513,7 @@ Every primitive has a Vaisto definition. **The reference evaluator implements it
 | `+. -. *.` and comparisons on `Float` | never | IEEE-754 binary64; no laws claimed; not in the logic |
 | `++` on `String` | never | concatenation (a free monoid); not in the logic until strings are admitted |
 | `< > <= >=` on `Int` | never | `v ⇔ x < y` etc. |
-| `== !=` on two values of the same type | never | structural equality |
+| `== !=` on two values of the same type | never | exact term equality (`=:=`); on `Float`, `0.0` and `-0.0` are different (verified on OTP 29, where `0.0 == -0.0` but not `0.0 =:= -0.0`) |
 | `not` | never | `v ⇔ ¬x` |
 | `and`, `or` | never | **short-circuit**: `b` is evaluated only when `a` does not decide the result |
 | `length xs` | never | `v = len(xs)` |
@@ -546,7 +547,7 @@ Truncating `div` happens to match Erlang, so the lowering is direct. Short-circu
 
 ### 4.4 Refinements
 
-**Sorts.** The logic reasons about `Int` (exact), `Bool`, `List` (an uninterpreted sort with the built-in measure `len`), and, from the second step of Phase 2, nominal records, sums and enums (SMT datatypes with selectors and testers) and atoms (distinct constants). Branded records are datatypes whose single constructor carries the brand. A field of a *row-typed* value is an uninterpreted function of the value and the label (`(field x r)`), consistent everywhere it occurs, so facts about `(. r :x)` survive without knowing `r`'s full row. `Float`, `String`, `Dyn`, functions, pids and maps are **not** logic sorts: values of those types can be passed around in refined code, but no fact about them exists and no obligation mentioning them can be discharged. Finite authority domains are best modelled as nullary-constructor sums (`(deftype Scope (RepoRead) (RepoWrite))`), because HM unifies distinct singleton atoms (`unify.ex:136-139`, §1.5).
+**Sorts.** The logic reasons about `Int` (exact), `Bool`, `List` (an uninterpreted sort with the built-in measure `len`), and, from the second step of Phase 2, nominal records, sums and enums (SMT datatypes with selectors and testers) and atoms (distinct constants). Branded records are datatypes whose single constructor carries the brand. A field of a *row-typed* value is an uninterpreted function of the value and the label (`(field x r)`), consistent everywhere it occurs, so facts about `(. r :x)` survive without knowing `r`'s full row. When a branded record reaches a refined row-polymorphic function, the instantiation adds `field_l(r) = sel_T_l(r)` for each label used, so the caller's selector facts and the callee's field facts talk about the same value. `Float`, `String`, `Dyn`, functions, pids and maps are **not** logic sorts: values of those types can be passed around in refined code, but no fact about them exists and no obligation mentioning them can be discharged. Finite authority domains are best modelled as nullary-constructor sums (`(deftype Scope (RepoRead) (RepoWrite))`), because HM unifies distinct singleton atoms (`unify.ex:136-139`, §1.5).
 
 **Refined types.** `(refine x τ p)` is the subset of `τ` whose values satisfy `p`. A refined function type names its parameters: `x1:{v:B1 | p1} → … → {v:B | q}`, where `pi` may mention earlier parameters and `q` may mention all of them. **The first step of Phase 2 allows refinements only at the top level of single-clause function parameters and results**, with or without a `:when` guard. Not yet: refinements nested inside type constructors, on record fields (data invariants), on multi-clause functions (their pattern variables are `:any` today, §15.5), on class methods, on lambdas, or on external results (§15.3).
 
@@ -595,7 +596,7 @@ Unrefined code keeps today's crash semantics, and its effect row includes `Crash
 | **`select`** on a row (§4.1) | none | `(field l r)`, an uninterpreted function of `r` |
 | **`handle-crash`** (`try`) | the handler is checked against the same expected type | no facts flow from the body into the handler, since the crash may have happened anywhere in it |
 | **`perform`** (§4.5) | the effect's own requirements, if any | its result is unrefined unless the effect is an observation (§4.7) |
-| **`decode τ x`** (§4.6) | none | on `Ok v`: `v : τ`, `τ`'s refinement, and `up v = d` (the projection law, §4.6) |
+| **`decode τ x`** (§4.6) | none | on `Ok v`: `v : τ` and `τ`'s refinement, justified by the projection law (§4.6) |
 | **`Dyn` value** | none: `Dyn` has no logic sort, and using it at another type is an ordinary type error from HM | none until `decode` |
 
 **Guarantee.**
@@ -614,7 +615,7 @@ Unrefined code keeps today's crash semantics, and its effect row includes `Crash
 
 This is partial correctness: nothing is claimed about termination, or about crashes other than those §4.3 lets refinements exclude. On BEAM, processes are meant to loop forever and are allowed to crash.
 
-**Totality through the effect algebra.** Because a crash is an effect (§4.5), crash-freedom is visible in types. When every `crash` site in a function (primitive preconditions, match failures) is discharged by the checker, and the function calls only total functions, its effect row excludes `Crash`. The checker reports it as **total**. Refinements *remove an effect*: that is the precise connection between the refinement and effect primitives.
+**Totality through the effect algebra.** Because a crash is an effect (§4.5), crash-freedom is visible in types. When every `crash` site in a function (primitive preconditions, match failures) is discharged by the checker, and the function calls only total functions, its effect row excludes `Crash`. If it is also proved to **terminate** (it is non-recursive, or structurally recursive in the discipline of §12), the checker reports it as **total**. Otherwise it is only *crash-free*: partial correctness says nothing about a function that never returns, and such a function never becomes a symbol in the logic (§16.1). Refinements *remove an effect*: that is the precise connection between the refinement and effect primitives.
 
 **Provisional syntax.** The brief leaves syntax open; this document uses one candidate:
 
@@ -640,7 +641,7 @@ This is partial correctness: nothing is claimed about termination, or about cras
 |  | `monitor` | `(Pid N) → Ref` |
 |  | `link`, `unlink` | `(Pid N) → Unit` |
 |  | `trap-exit` | `Bool → Bool` |
-|  | `exit` | `(Tuple (Pid N) Reason) → Unit` (send an exit signal) |
+|  | `exit` | `(Tuple (Pid N) Reason) → Unit` (send an exit signal; **privileged**, see below) |
 | `Time` | `now` | `Unit → Int` |
 | `Random` | `random` | `Unit → Int` |
 | `Unique` | `unique` | `Unit → Ref` |
@@ -653,7 +654,7 @@ Files, network and printing reach the world through `external`, wrapped by typed
 
 **Results can be exceptional.** Every operation may answer `Raised class reason` instead of its result, when a foreign function raises or an exit signal arrives. A process may also be **terminated** asynchronously, by a kill or a linked exit it does not trap; its trace then ends with `(terminated reason after n)`. Incoming exit signals and `DOWN` messages are *deliveries*, recorded like consumed messages. Termination is not a request the program made, so it is the one event that ends a fold from outside.
 
-**`external` is privileged.** Its `(module, function)` must be on an **allowlist** declared in the pinned build configuration, the same file that lists observers (Q14). Ordinary modules reach the world only through the typed library wrappers over allowlisted functions. Without the allowlist, `external` is a universal escape hatch: a worker could kill an observer and recreate its ETS table (§4.7), or load code past the Vaisto loader (§8.4).
+**`external` is privileged.** Its `(module, function)` must be on an **allowlist** declared in the pinned build configuration, the same file that lists observers (Q14). Ordinary modules reach the world only through the typed library wrappers over allowlisted functions. Without the allowlist, `external` is a universal escape hatch: a worker could kill an observer and recreate its ETS table (§4.7), or load code past the Vaisto loader (§8.4). **`exit` is privileged the same way**: a worker that holds an observer's or issuer's pid must not be able to kill it with an untrappable `kill`. `link` stays unprivileged, and privileged processes trap exits.
 
 **Allowlisted functions that use the mailbox.** A `gen_server:call` consumes a reply from the *calling* process's mailbox, behind the effect algebra's back. Such functions are marked `mailbox` in the allowlist. A recording run records the messages consumed during the call, and replay treats the call as one block whose mailbox effect comes from the trace.
 
@@ -661,7 +662,10 @@ Files, network and printing reach the world through `external`, wrapped by typed
 
 ```text
 Computation a ::= Pure a
-                | Perform op arg (result -> Computation a)
+                | Perform op arg (Outcome(op) -> Computation a)
+
+Outcome(op)   ::= Ok r            ; r of op's result type
+                | Raised class reason
 ```
 
 This is the free `Σ`-algebra over `a`: operations are uninterpreted, and nothing identifies two trees except syntax. The single equation is for `crash`, whose result type is empty: `crash r` followed by anything is `crash r`. That is the algebraic definition of an exception.
@@ -675,7 +679,7 @@ This is the free `Σ`-algebra over `a`: operations are uninterpreted, and nothin
 
 `try` is a *local* handler for `crash` alone.
 
-**Replay determinism is a corollary of freeness.** A trace `T = [(op₁, arg₁, res₁), …]` defines a partial algebra `h_T`: its `n`-th step answers the `n`-th request with `resₙ`, **provided** the request equals `(opₙ, argₙ)` and `resₙ` has the operation's result type; otherwise it fails with "trace does not fit". Suppose a live run `run_h(P, I)` returns `R` and records `T`. Then the tree `P I` has one path that `h` and `h_T` both follow, and because the fold is unique, `run_{h_T}(P, I) = R`. Nothing about BEAM enters this argument. It depends only on the evaluator being a fold and the pure part being deterministic.
+**Replay determinism is a corollary of freeness.** A trace `T = [(op₁, arg₁, res₁), …]` defines a partial algebra `h_T`: its `n`-th step answers the `n`-th request with `resₙ`, **provided** the request equals `(opₙ, argₙ)` and `resₙ` is an outcome of that operation (`Ok r` with `r` of its result type, or `Raised class reason`); otherwise it fails with "trace does not fit". Suppose a live run `run_h(P, I)` returns `R` and records `T`. Then the tree `P I` has one path that `h` and `h_T` both follow, and because the fold is unique, `run_{h_T}(P, I) = R`. Nothing about BEAM enters the replay argument itself: it depends only on the evaluator being a fold and the pure part being deterministic. Relating a replay on the evaluator to the BEAM run that produced the trace additionally needs A2 and A7. By default the elaboration re-raises a `Raised` outcome as `crash`, so an unhandled foreign exception is part of the `Crash` effect.
 
 **Effect rows and polymorphism.** A function type carries an effect row `ε`, and the empty row means pure. Because effect rows are rows (§4.1), effect polymorphism is row polymorphism: `map : (forall ((a Type) (b Type) (e Eff)) (-> ((-> (a) e b) (List a)) e (List b)))`. This resolves Q19. Effect rows are inferred, never annotated. Refinement predicates and measures must have the empty row.
 
@@ -689,7 +693,8 @@ This is the free `Σ`-algebra over `a`: operations are uninterpreted, and nothin
   - per-pair FIFO: messages from one sender to one receiver arrive in send order;
   - first match: each consumed message is the first matching one in arrival order at that point;
   - every delivery has exactly one producer, and signals, timers and port messages count as producers.
-- **The theorem is realizability.** A history recorded from a BEAM run is valid, and replaying every process from a valid history reproduces all of their traces.
+- **The theorem is realizability.** A history recorded from a BEAM run is valid, and replaying every process from a valid history reproduces all of their traces. The replay half is close to trivial once everything is recorded; the substance is in the validity rules and in recording faithfully.
+- **Recording.** A process sees what it *consumes*, not what *arrives*. Recording arrival order needs BEAM's tracing facility (`erlang:trace/3` with the `'receive'` flag), run by a privileged tracer process. The same tracer captures messages consumed inside `mailbox` externs, and gives messages from processes outside the recorded system a producer event `(external-sender pid)`.
 - **Withdrawn.** Draft 2's claim that *any* interleaving consistent with happens-before gives the same traces is false for live execution: concurrent matching sends race, and timeouts depend on absence. This is Phase 6.
 
 **OTP behaviours are foreign drivers.** A `gen_server` owns the `receive` and calls Vaisto callbacks with arbitrary terms, which inverts control. Its callbacks are entry points that decode their arguments (M20, A4). Nothing they do is recorded unless the driver is itself a Vaisto library over `Proc`. With the signal operations above, a Vaisto-native supervisor is ordinary library code; wrapping OTP's is a foreign-driver boundary.
@@ -722,14 +727,28 @@ The first law says decoding accepts every well-typed value. The second says deco
   - `(Pid Dyn)`;
   - refined types whose predicate is executable (the decoder checks the predicate too).
 - **Not decodable:** a type any component of which is a function, or a `(Pid M)` for a specific `M` (a pid's protocol cannot be observed at runtime).
-- **Opaque types decode only through their own module.** Only `T`'s defining module has a decoder for an opaque `T`; any other module that decodes a type containing a `T` calls that decoder. This keeps **abstraction**, because nobody else can see or build the representation, but it does not keep **integrity**: on BEAM, any process can build a tuple of the right shape and send it.
-- **Sealed types add authentication.** Witnesses (§4.7), `Authority` and `Accepted` (§16) are *sealed*: opaque, and every value carries an authenticator that the defining module's decoder verifies. The authenticator is either a lookup in the issuer's protected table or a signature. A forged tuple fails to decode.
+- **Opaque types decode only through their own module.** Only `T`'s defining module has a decoder for an opaque `T`; any other module that decodes a type containing a `T` calls that decoder. This keeps **abstraction**, because nobody else can see or build the representation, but it does not keep **integrity**: on BEAM, any process can build a tuple of the right shape and send it. So an opaque decoder **also checks the type invariant** (§4.1). A type whose invariant is not executable (a transition, whose steps must be *observed* valid) cannot be decoded as merely opaque; it must be sealed.
+- **Sealed types add authentication.** Witnesses (§4.7), `Authority` and `Accepted` (§16) are *sealed*: opaque, and every value carries an authenticator that the defining module's decoder verifies. A forged tuple fails to decode.
+
+  **Authenticators are deterministic.** They are MAC chains over the value's canonical content, in the style of macaroons (Birgisson et al., NDSS 2014):
+  - minting a root value needs the issuer's key, so it is an issuer-only effect;
+  - *attenuating* a value (adding a caveat) computes the next MAC from the previous one and the caveat, which anyone holding the value can do and nobody can undo;
+  - verification needs the key, so a sealed decoder asks the issuer, and decoding a sealed type is an effect.
+
+  Because attenuation is a deterministic function of its inputs, operations such as `meet` on authority remain pure functions that can be symbols in the logic, with congruence. The reference evaluator and the logic both define them on the canonical content; the MAC is carried alongside.
 
 So opaque and sealed values can cross process boundaries inside messages, while only the issuer can mint a sealed value. Abstraction and authentication are separate properties, and the type system names both.
 
-**Facts from decoding.** When `(decode τ d)` returns `Ok v`, the checker adds `v : τ`, `τ`'s refinement and `up v = d` as `Static` facts. Their justification is the projection law of a trusted, generated decoder.
+**Equality on opaque and sealed types.** Raw `==` on an opaque or sealed type is not available outside its module. The module exports a lawful `Eq` over the canonical content: for a sealed type, *ignoring* the authenticator. Otherwise clients could tell supposedly indistinguishable models apart, and a law such as `le a b ⇔ meet a b = a` would fail on differing MACs.
 
-**Typed messages without an extra assumption.** On BEAM anyone can send anything to any pid, so a mailbox is a queue of `Dyn`. A process with protocol `M` receives through `down_M`, fused into selective receive: each clause's pattern is compiled together with the guards that `down_M` implies (`is_integer`, tag checks, recursively). A message is consumed by a typed clause **only if it decodes**. A message that decodes to no clause is *stray*. Every process has a stray policy (log and drop, crash, or an explicit `Stray Dyn` clause), with the default an open question (Q26).
+**Facts from decoding.** When `(decode τ d)` returns `Ok v`, the checker adds `v : τ` and `τ`'s refinement as `Static` facts. Their justification is the projection law of a trusted, generated decoder. (The relation `up v = d` itself is not a logic fact, because `Dyn` is not a logic sort.)
+
+**Typed messages without an extra assumption.** On BEAM anyone can send anything to any pid, so a mailbox is a queue of `Dyn`. A process with protocol `M` receives through `down_M`, in two stages:
+
+1. **Selection** is a selective receive on the message **tag**, plus whatever `down_M` can check as BEAM guards (scalars, tuple shapes). The receive ends with a tag-level catch-all only for tags outside `M`, so it never eats a valid message meant for a later `receive`.
+2. **Decoding** happens after consumption, for what guards cannot express: lists, opaque components (decoded by their own module), sealed authenticators (which ask the issuer). A message that fails is *stray*.
+
+So "consumed only if it decodes" holds for everything guards can check and becomes "consumed, then rejected as stray" for the rest. A timed receive that rejects a stray re-enters with the remaining timeout. The evaluator models exactly this, and the first-match validity rule of §4.5 applies to the tag-level selection. Every process has a stray policy (log and drop, crash, or an explicit `Stray Dyn` clause), with the default an open question (Q26).
 
 - **Sending** is statically typed: `send` takes a `(Pid N)` and an `N`, so Vaisto code cannot send an ill-typed message.
 - **Receiving** never *assumes* the mailbox is well-typed. It projects.
@@ -813,7 +832,7 @@ Every semantic artifact is the same kind of tree: Core terms and types, interfac
 
 - **Leaves** are symbols, integers, floats or byte strings. **Nodes** are lists.
 - **Integers** are written in decimal, with no leading zeros and no `-0`. **Floats** are written as the 16 hex digits of their IEEE-754 bits, so `0.0` and `-0.0` differ and every value has exactly one encoding.
-- **Pids, references and funs** have no canonical encoding as values. In a trace they are recorded as **symbolic identities** assigned at recording time (`(pid 3)`, `(ref 17)`), consistent within the trace. A fun is recorded as `(fun Module name arity env-digest)` when it is Vaisto code, and a trace that carries a foreign fun is marked not replayable.
+- **Pids, references and funs** have no canonical encoding as values. In a trace they are recorded as **symbolic identities** assigned at recording time (`(pid 3)`, `(ref 17)`), consistent within the trace. A trace that carries a fun is marked **not replayable** from that point: a digest of a closure's environment cannot be inverted, and anonymous functions have no stable name. Protocols that must be replayable carry data, not closures.
 - **Canonical bytes** use Rivest's canonical S-expression form: length-prefixed leaves, no whitespace, with a display hint distinguishing integers and strings from symbols. In canonical form the hint is itself length-prefixed: `[1:i]2:42`, `[1:s]5:hello`, `3:add`.
 - **Maps** are encoded as lists of `(key value)` pairs, sorted by the canonical bytes of the key.
 - **Metadata** (source spans, documentation) lives in a `(meta ...)` child that is **excluded from digests**, so reformatting a file never changes a contract's identity.
@@ -830,12 +849,16 @@ Predicates are written as Vaisto expressions, checked by Core Lint as pure `Bool
 
 ```text
 sort ::= Int | Bool | List | (adt Name) | Atom
+       | (abstract Name)                    ; an opaque or sealed type, seen through its signature
+       | (tvar a)                           ; one uninterpreted sort per type variable (§4.4)
 term ::= (var name sort origin)            ; origin: param | let | anf(source) | binder
        | (int n) | (bool b) | (atom a)
        | (arith add|sub|mul|neg|tdiv|trem term ...)
        | (ite pred term term)
        | (select Adt Ctor index term) | (ctor Adt Ctor term ...)
        | (measure name term ...)            ; len, then user measures (§12)
+       | (field label term)                 ; a field of a row-typed value (§4.4)
+       | (apply name term ...)              ; an exported function lifted into the logic (§16.1)
 pred ::= true | false
        | (eq term term) | (lt term term) | (le term term)
        | (not pred) | (and pred ...) | (or pred ...) | (implies pred pred) | (iff pred pred)
@@ -901,7 +924,7 @@ A VC is a closed, quantifier-free formula `∀ vars. ∧hyps ⇒ goal`, decided 
   (event (process p2) (seq 4) (perform (receive ...)) (result ...) (after (p1 1))))
 ```
 
-A trace is valid for a program if, at every step, the program's request equals the recorded request, the recorded result has the operation's result type, and every consumed message is the first matching delivery in arrival order. A history is valid under the rules of §4.5: per-receiver arrival order, per-pair FIFO, first match, timeout counts, and a producer for every delivery, with signals, timers and ports counting as producers.
+A trace is valid for a program if, at every step, the program's request equals the recorded request, the recorded outcome is `Ok r` with `r` of the operation's result type, or `Raised class reason`, and every consumed message is the first matching delivery in arrival order. A history is valid under the rules of §4.5: per-receiver arrival order, per-pair FIFO, first match, timeout counts, and a producer for every delivery, with signals, timers and ports counting as producers.
 
 ---
 
@@ -1069,7 +1092,7 @@ The files admission depends on must be outside every worker's write access, and 
 
 ### 8.5 Distributed interface identity
 
-A service exports an interface digest. When two nodes connect, each states the digests of the interfaces it serves and expects, and a mismatch (`expected abc123, received f09de2`) is refused before any other message is exchanged. The exchange happens as the first application-level messages on a connection, because stock Erlang distribution has no hook for it. This prevents **version skew**, not attack: Erlang distribution gives every connected node full trust, so a hostile node is out of scope for this mechanism.
+A service exports an interface digest. When two nodes connect, each states the digests of the interfaces it serves and expects, and a mismatch (`expected abc123, received f09de2`) is refused before any other message is exchanged. The exchange happens as the first application-level messages on a connection, because stock Erlang distribution has no hook for it. Refusing other traffic until it completes is application discipline, not something distribution enforces. This prevents **version skew**, not attack: Erlang distribution gives every connected node full trust, so a hostile node is out of scope for this mechanism.
 
 ---
 
@@ -1092,7 +1115,8 @@ Core Lint checks elaborated Core and **infers nothing**: every binder is annotat
 - **pattern typing**: literal types, constructor arity, linearity;
 - **guard safety**: guards use only guard-safe operations (§4.2);
 - **opacity and sealing**: no construction, selection or matching on an opaque type outside its module (§4.1); no decoder for any type with a function or specific-pid component; opaque components decoded only through their own module (§4.6);
-- **privilege**: `observe`, `external` (allowlist), issuer-only functions and trusted result refinements appear only in modules the pinned configuration names;
+- **privilege**: `observe`, `external` and `exit` (allowlist), issuer-only functions and trusted result refinements appear only in modules the pinned configuration names; and **a function with a trusted result refinement has an empty effect row**, so an observation axiom cannot depend on mutable state (§4.7);
+- **liftability**: only functions with an empty effect row that are proved to terminate appear as symbols in the logic (§16.1);
 - **refinement well-formedness**: predicates are pure, `Bool`-typed, total by construction (§4.4), and use only admitted symbols;
 - **A-normal form**: effectful and crashing sub-expressions are named within their evaluation context (§4.2), which the lowering relies on before Phase 4 adds effect rows;
 - **effect rows** (from Phase 4);
@@ -1143,15 +1167,16 @@ Liquid Core defines `and` and `or` as short-circuiting (§4.3), so `(and a b)` c
 For scrutinee `s` and clauses `pat1 … patn` (first-match semantics):
 
 - Clause `i` gets `M(pat_i, s)`: the constructor test `is_Ctor(s)`, equations for literal patterns, bindings as selectors (`v = select(Ok, 0, s)`), and for list patterns `[] → len(s) = 0`, `[h | t] → len(s) ≥ 1 ∧ len(t) = len(s) − 1`.
-- Clause `i` also gets, for every earlier clause `j`, the negation of that clause's **test**, never of its binding equations. The test `T(pat_j, s)` is the constructor tests and literal equalities; the bindings are defined only when the test holds. For a guarded earlier clause the fact is `¬(T(pat_j, s) ∧ guard_j)`, with the guard rewritten over selectors of `s`.
+- Clause `i` also gets, for every earlier clause `j`, the negation of that clause's **test**, never of its binding equations. The test `T(pat_j, s)` is the constructor tests and literal equalities; the bindings are defined only when the test holds. For a guarded earlier clause the fact is `¬(T(pat_j, s) ∧ def(guard_j) ∧ guard_j)`, with the guard rewritten over selectors of `s`.
+- **Definedness matters.** A guard that crashes counts as false, so negating the bare guard would assume it was evaluated. With `[x :when (> (div 10 x) 1) …]`, `[x :when (< (div 10 x) 2) …]`, `[_ (safe-div 1 n)]`, the third clause without `def` would get contradictory hypotheses and discharge `n ≠ 0` vacuously. Yet at `n = 0` both guards crash and the third clause runs. With `def`, the obligation correctly fails (checked with Z3; C19).
 - **Polarity.** Negation reverses what "dropping a hypothesis" means. Dropping the unsupported part of `T(pat_j, s)` *before* negating would strengthen the negated fact: for `(Ok "foo")`, dropping the string test gives `¬is_Ok(s)`, which is false for `(Ok "bar")`. So an unsupported atom inside a test is replaced by a **fresh boolean variable**, never dropped: `¬(is_Ok(s) ∧ b₁)` is sound whatever `b₁` is. Only *whole top-level* hypotheses may be dropped (§11.2).
 - A guard that cannot be rewritten over selectors contributes nothing, and neither does the negation of its clause.
 - `defn_multi` clauses will use the same rule with the parameter as the scrutinee, once `defn_multi` is admitted (§4.4).
-- **Exhaustiveness stays with HM** (`check_exhaustiveness`). Refinements do not relax it in Phase 2; a clause that is unreachable under refinements gets a warning (§13.4), not removal.
+- **Exhaustiveness is checked by Core Lint** (§9.2); HM's check does not count, because HM is untrusted. Refinements do not relax it in Phase 2; a clause that is unreachable under refinements gets a warning (§13.4), not removal.
 
 ### 10.4 `:when` guards
 
-A guard on a single-clause `defn` adds its facts to the body's `Φ`: the body only runs when the guard is true, and otherwise BEAM raises `function_clause`. Guards are guard-safe expressions, and a crash inside a guard counts as false (§4.2), so the fact added is exactly the guard's truth. The vacuity check (§11.3) includes the guard: requirements plus guard must be satisfiable. Callers are **not** required to prove the guard: a guard is a runtime check, a refined parameter is a static requirement, and the two stay distinct. Two lints make the relationship visible: a guard that is provable at every call site ("this guard can never fail"), and a guard refuted at some call site ("this call always fails the guard"). Whether a guard should also imply a static precondition is Q9.
+A guard on a single-clause `defn` adds its facts to the body's `Φ`: the body only runs when the guard is true, and otherwise BEAM raises `function_clause`. Guards are guard-safe expressions, and a crash inside a guard counts as false (§4.2), so the fact added is `def(g) ∧ g` (§4.2). The vacuity check (§11.3) includes the guard: requirements plus guard must be satisfiable. Callers are **not** required to prove the guard: a guard is a runtime check, a refined parameter is a static requirement, and the two stay distinct. Two lints make the relationship visible: a guard that is provable at every call site ("this guard can never fail"), and a guard refuted at some call site ("this call always fails the guard"). Whether a guard should also imply a static precondition is Q9.
 
 ---
 
@@ -1177,7 +1202,7 @@ Implementations:
 
 The SMT-LIB lowering (`Refine.SMTLIB`) is a pure function from `%VC{}` to text. It uses deterministic naming (`x_1`, sorted declarations), so the same program yields byte-identical queries, which makes answers cacheable by `(query_digest, solver identity)`.
 
-**Language and dependency rules.** This is Elixir code that talks to an external executable over a port, like invoking `erlc`. It adds no Hex dependency and no NIF, and no Python/Go/Node. It does add an **external tool requirement** for programs that use refinements, which `AGENTS.md` ("Do not add dependencies") does not anticipate. That needs an explicit owner decision (Q2). Programs without refinements never start the solver.
+**Language and dependency rules.** This is Elixir code that talks to an external executable over a port, like invoking `erlc`. It adds no Hex dependency and no NIF, and no Python/Go/Node. It does add an **external tool requirement** for programs that use refinements, which `AGENTS.md` ("Do not add dependencies") does not anticipate. That needs an explicit owner decision (Q2). Modules with no obligations (§4.4) never start the solver.
 
 ### 11.2 Trust boundary
 
@@ -1189,13 +1214,13 @@ The SMT-LIB lowering (`Refine.SMTLIB`) is a pure function from `%VC{}` to text. 
 
 Rules:
 
-- **Soundness direction.** Every approximation in the lowering may **drop a hypothesis** (lose precision, stay sound) but must **never weaken a goal**. Unsupported constructs in hypotheses are dropped; unsupported constructs in goals make the VC unprovable. A code review checklist item and a unit test per lowering rule enforce this.
+- **Soundness direction.** Every approximation in the lowering may **drop a hypothesis** (lose precision, stay sound) but must **never weaken a goal**. Only **whole top-level** hypotheses may be dropped. An unsupported construct *inside* a hypothesis is replaced by a fresh boolean variable (§10.3), because dropping it under a negation or a disjunction would strengthen the hypothesis. Unsupported constructs in goals make the VC unprovable. A code review checklist item and a unit test per lowering rule enforce this.
 - **Trusted components for `valid`:** the VC generator, the primitive specification table, the SMT-LIB lowering, and Z3's `unsat` answers. §19 lists each one.
 - **Pinned solver.** The solver identity is recorded in the module interface (§8.1). A different version is allowed but visible.
 - **Decidability is scoped.** Linear integer arithmetic with uninterpreted functions and datatypes is decidable. A product of two variables, or division by a variable, puts a VC in nonlinear arithmetic, where Z3 is a semi-decision procedure. Nonlinear VCs are allowed but may answer `unknown`, and the "decidable" claims in §12 and §16 apply to the linear fragment only.
 - **Provenance is syntactic.** The provenance of a derived fact is the union of the provenance of *every* hypothesis in its VC. That is an over-approximation, but it is stable. Unsat cores would be more precise, but they are neither unique nor stable across solver versions, so they are not used.
 - **Counterexamples are advisory.** With uninterpreted measures a model can be spurious, so messages say "for example" and tests never assert on model values. They assert on the deterministic parts: the failing conjunct, the known facts, the location.
-- **No solver, no pass.** If `z3` is missing and the module contains refinements: "refinement checking needs the `z3` solver, which was not found on PATH". Never skip.
+- **No solver, no pass.** If `z3` is missing and the module has obligations: "refinement checking needs the `z3` solver, which was not found on PATH". Never skip.
 - **Optional second opinion.** A paranoid mode that requires a second solver (cvc5) to agree on `unsat` is possible later (Q13), and is not needed for Phase 2.
 - **Caching.** A cache of `valid` answers keyed by query digest and solver identity is an optimization only. Whether CI may run without a solver, using a cache, is Q7. A cache is a trusted component.
 
@@ -1205,7 +1230,8 @@ A proof under an impossible hypothesis proves nothing, so the pass also asks sat
 
 - **Vacuous requirements (error).** For each refined `defn`, check that `p1 ∧ … ∧ pn` is satisfiable. If not: "the requirements of `f` can never be met". A contract whose precondition is `false` must look suspicious, not verified.
 - **Unreachable branches (warning).** For each `if` branch and `match` clause, check that `⟦Γ;Φ⟧` is satisfiable. If not: "this branch can never run, given the requirements on `x`".
-- **Contradictory facts at a call (warning).** If the hypotheses at an obligation are unsatisfiable while the function's requirements are satisfiable, the obligation is only vacuously valid: that call site is dead code. It is reported as a warning.
+- **Contradictory facts at an obligation (error).** If the hypotheses at an obligation are unsatisfiable while the function's requirements are satisfiable, the obligation is only vacuously valid. It is an **error unless the branch is marked `(unreachable)`**, a form that is itself the obligation `false` under the same hypotheses. Contradictions are exactly how a wrong axiom or a mistreated guard would otherwise turn into accepted code (C19, C20), so they must be deliberate, never accidental.
+- **Vacuous guarantees (error).** For each refined function, check that its result refinement is satisfiable under its requirements. A guarantee that can never hold, such as `{v | v > 0 ∧ v < 0}`, verifies only because the function never returns; it is reported.
 
 ---
 
@@ -1288,7 +1314,7 @@ error: requirement not met
   at line 12
     (at xs (length xs))
            ^ `at` requires (< (length xs) (len xs)) for its argument `i`
-  note: the other requirement, (>= k 0), holds
+  note: the other requirement, (>= (length xs) 0), holds
 ```
 
 Undecoded dynamic value:
@@ -1323,7 +1349,7 @@ error: the requirements of `never` can never be met
 Unknown answer:
 
 ```text
-error: could not verify this requirement in 2s
+error: could not verify this requirement within its resource limit
   at line 9
     (run cap job)
              ^ `run` requires (le (. job :required) (. cap :scope))
@@ -1335,16 +1361,15 @@ The domain-specific rendering in the brief ("required: production.write / availa
 ### 13.4 Warnings
 
 - unreachable branch (§11.3);
-- a call whose hypotheses contradict each other, so the call is dead code (§11.3);
 - guard can never fail / always fails (§10.4);
 
-Not a warning: a refinement on a sort outside the logic ("refinements on `Float` are not supported") is an **error** (C18).
+Not a warning: a refinement on a sort outside the logic ("refinements on `Float` are not supported") is an **error** (C18), and so are contradictory facts at an obligation without `(unreachable)` and vacuous guarantees (§11.3).
 
 ---
 
 ## 14. Conformance suite (assignment item 12)
 
-Ten programs, each with its expected outcome. Programs that need more than Phase 0 and Phase 2.1 say so where they are listed. The expected diagnostic text is normative only for the parts listed (message line, caret target, failing conjunct); notes and hints may change wording.
+The core programs, C1–C10, each with its expected outcome (§14.2 adds C14–C20). Programs that need more than Phase 0 and Phase 2.1 say so where they are listed. The expected diagnostic text is normative only for the parts listed (message line, caret target, failing conjunct); notes and hints may change wording.
 
 | # | Program | Expected |
 |---|---|---|
@@ -1353,7 +1378,7 @@ Ten programs, each with its expected outcome. Programs that need more than Phase
 | C3 | `clamp0` correct | **compiles** |
 | C4 | `clamp0` returns `x` in the negative branch | **error:** result does not satisfy `(>= r 0)` |
 | C5 | `max2` correct; `max2-bad` swapped | first **compiles**; second **errors on both conjuncts**: `(>= v x)` in the then-branch and `(>= v y)` in the else-branch |
-| C6 | recursive `at` over lists; caller guards with `length`; off-by-one caller | `at` and guarded caller **compile**; `(at xs (length xs))` **error** on `(< k (len xs))` |
+| C6 | recursive `at` over lists; caller guards with `length`; off-by-one caller | `at` and guarded caller **compile**; `(at xs (length xs))` **error** on `(< (length xs) (len xs))` |
 | C7 | contradictory precondition | **error:** requirements can never be met |
 | C8 | an undecoded `Dyn` value feeding a refined parameter | **error:** this value has type Dyn |
 | C9 | `(and (!= y 0) (> (safe-div x y) 1))` | **compiles**: Core defines `and` as short-circuit (§4.3). On today's emitters it also *runs* correctly only on `:elixir` until P0-4 (D5). |
@@ -1427,10 +1452,12 @@ The refinement programs above test the checker. These properties test the archit
 | # | Program | Expected |
 |---|---|---|
 | C14 | **Rows and brands.** `(defn get-x [r] (. r :x))` applied to `(Point 1 2)` returns `1` on the evaluator and on BEAM (row evidence, §4.1; D24 today). `(defn deploy [j :Accepted] ...)` applied to `(Executed 1)` is rejected even though the rows have the same fields. | runs / rejected |
-| C15 | **Typed receive.** A process with protocol `<Add: Int \| Get: (Pid Int)>` receives `(Add 1)` from Vaisto code, and a raw Erlang `Pid ! {'Add', <<"x">>}`. The second is stray: it is never bound to a typed clause and is handled by the stray policy. | typed clause runs once; stray handled |
-| C16 | **Crash as an effect.** `safe-div` with its precondition verified has an effect row without `Crash` and is reported total. `(try (div x y) [catch [:error e 0]])` type-checks with `Crash` handled. `head` on an unrefined list keeps `Crash` in the row. | total / handled / partial |
+| C15 | **Typed receive.** A process with protocol `<Add: Int \| Get: (Pid Dyn)>` (a reply pid is `(Pid Dyn)`, because a specific protocol cannot be decoded, §4.6) receives `(Add 1)` from Vaisto code, and a raw Erlang `Pid ! {'Add', <<"x">>}`. The second is stray: it is never bound to a typed clause and is handled by the stray policy. | typed clause runs once; stray handled |
+| C16 | **Crash as an effect.** `safe-div` with its precondition verified has an effect row without `Crash` and is reported total. `(try (div x y) [catch [:error e 0]])` type-checks with `Crash` handled. `head` on an unrefined list keeps `Crash` in the row. The effect-row parts need Phase 4; the `try` part works from Phase 1a. | total / handled / partial |
 | C17 | **Reflection.** The two constant `run` calls of §16.4: the `Read` job compiles, the `Write` job fails with the rendered required/available lines. A `run` call on non-constant authorities without a `le?` check fails. | compiles / error / error |
 | C18 | **Lawless instances stay out.** A refinement over a `Float` (`{v :float \| (> v 0.0)}`) is rejected with "refinements on Float are not supported". A refinement using `Num`'s `+` at type `Int` is accepted. | rejected / accepted |
+| C19 | **Guard definedness.** `(match n [x :when (> (div 10 x) 1) 1] [x :when (< (div 10 x) 2) 2] [_ (safe-div 1 n)])`. The third clause's obligation `n ≠ 0` **fails**: at `n = 0` both guards crash, count as false, and the third clause runs. Without `def(g)` it would pass vacuously. | error on `(!= n 0)` |
+| C20 | **Only terminating functions enter the logic.** `(defn weird [x :int] {v :int \| (and (> v 0) (< v 0))} (weird x))` verifies under partial correctness but is reported as a vacuous guarantee, and it is not liftable. A client refinement that mentions `(weird 0)` is rejected. | error; not liftable |
 
 | # | Property | Expected |
 |---|---|---|
@@ -1468,7 +1495,7 @@ An `extern` declaration becomes a typed wrapper over the `external` effect:
 - **The declared result type is a decode target.** The raw `external` effect returns `Dyn`; the wrapper decodes it to the declared type on every call and crashes with a decode error when the foreign function returns something else. A wrong declaration becomes a crash with a clear reason, never a mistyped value. The result is ordinary typed data, not `Dyn`, so declared externs stay convenient.
 - **Argument refinements** are allowed. They only add obligations for callers, which is always sound.
 - **Result refinements** are allowed **only as decode targets** (runtime-checked when executable). A result refinement that cannot be checked at runtime is rejected: it would be an unchecked assumption about foreign code, which is exactly an `assume`.
-- **Externs cannot return sealed witness types**, since no `decode` exists for them (§4.7).
+- **Externs cannot return sealed types.** A sealed decoder verifies an authenticator that only a Vaisto issuer can produce, and Core Lint rejects extern result types that contain a sealed type (§4.6).
 
 ### 15.4 Lambda fallback
 
@@ -1530,7 +1557,11 @@ Clients reason **only in the theory**: their refinements mention the exported sy
 - **`deflaw`** states a closed law over exported symbols. Inside the module it is an **obligation** about the model; outside it is an **axiom**.
 - **`definvariant`** states a type's invariant (§4.1). Every constructor and every function that returns the type must establish it; clients assume it.
 
-**How clients use laws.** A client VC is quantifier-free. The checker instantiates each law on the ground terms of the VC before handing it to Z3. Instantiating a true law is always sound. Whether the instances drawn from the ground terms suffice for *completeness* is checked per domain in Phase 3 (Q27); when they do not, the answer is an honest `unknown`.
+**Which functions may appear in the logic.** An exported function becomes a logic symbol, as `meet`, `compose` and `plus` do, only if its effect row is empty (no `Crash`) and it is **proved to terminate**: non-recursive, or structurally recursive in the discipline of §12. Its axiom is guarded by its precondition: `pre(x) ⇒ post(x, f(x))`. A function verified only for partial correctness never becomes a symbol. Otherwise a function that never returns could export an impossible result refinement, such as `{v | v > 0 ∧ v < 0}`, as the axiom `false` (C20).
+
+**Runtime accessors.** An abstract measure is logic-only. When runtime code needs the value, the module exports an accessor whose result refinement ties it to the measure: `(defn scope-of [c :Capability] {s :A/Authority | (= s (scope c))} ...)`.
+
+**How clients use laws.** A client VC is quantifier-free. The checker instantiates each law on the ground terms of the VC before handing it to Z3, in **one round** over the terms of the original VC, never over terms that instantiation itself created, so it always terminates (`meet-greatest` would otherwise keep producing new `meet` terms). Instantiating a true law is always sound. Whether the instances drawn from the ground terms suffice for *completeness* is checked per domain in Phase 3 (Q27); when they do not, the answer is an honest `unknown`.
 
 **Law status.** Every exported law and invariant carries a status, recorded in the interface:
 
@@ -1580,20 +1611,20 @@ Clients see the status, and a build policy can demand `proved` for a domain (Q31
 ```
 
 - **No join is exported.** Union is where authority grows.
-- **Laws mention only exported symbols.** `meet` is exported to the logic as an abstract function symbol constrained by its result refinement, so it may appear in a law.
+- **Laws mention only exported symbols.** `meet` is exported to the logic as an abstract function symbol constrained by its result refinement, so it may appear in a law. It qualifies (§16.1) because it is pure, non-recursive and deterministic: attenuation computes the next MAC, it does not consult the issuer (§4.6).
 - **Two models, one theory:**
   - **Record of booleans**, a product of two-element lattices: laws decidable, status `proved`.
-  - **Grants over string-named resources** (`"repo:vaisto/src"` under `"repo:vaisto"`): the concrete `le` checks path prefixes and action order. The logic has no strings (§4.4), so these laws have status `tested` until Phase 8 proves them in Lean.
+  - **Grants over string-named resources** (`"repo:vaisto/src"` under `"repo:vaisto"`): the concrete `le` checks path prefixes and action order, over a **canonical** representation (the grants sorted and deduplicated, so that equal authority has equal content). The logic has no strings (§4.4), so these laws have status `tested` until Phase 8 proves them in Lean.
 
   Clients cannot tell the models apart.
 
 **Reflection for constants.** When both arguments of `le?` are closed constants, the checker may run `(le? a b)` in the reference evaluator at compile time and add `(le a b)`, or its negation, as a `Static` fact. The conditions:
 
-- `le?` is pure and total, with an empty effect row;
+- `le?` is total in the sense of §4.4 (an empty effect row, and proved to terminate), and compile-time evaluation runs under a **fuel limit**, so a mistake cannot hang the compiler;
 - its result refinement holds, with its status recorded in the fact's provenance;
 - the arguments are closed.
 
-A closed constant of a sealed type can only appear in the issuer's own code, or in code the issuer handed a constant to, so reflection does not bypass sealing.
+A closed constant of a sealed type can only appear in the issuer's own code, or in code the issuer handed a constant to, so reflection does not bypass sealing. Reflection evaluates `le?` on the canonical *content*; the authenticator plays no part in `le`.
 
 ### 16.3 Workflow phases and transitions
 
@@ -1629,11 +1660,19 @@ Three mechanisms, and only the second involves the logic:
 
 ```scheme
 (ns Vaisto.Transition)
-(deftype opaque Transition [from :State to :State steps (List Step)])
+(deftype sealed Transition [from :State to :State steps (List Step)])   ; sealed: the invariant is not executable
 
 (defmeasure before [t :Transition] :State ...)   ; exported as abstract symbols
 (defmeasure after  [t :Transition] :State ...)
-(definvariant Transition (valid-path (. t :from) (. t :steps) (. t :to)))   ; assumed by clients
+(defmeasure chain-ok [steps (List Step)] :bool           ; one argument, structural
+  [[] true]
+  [[s | rest] (and (valid-step (. s :before) (. s :op) (. s :after) (. s :evidence))
+                   (if (is Nil rest) true (= (. s :after) (. (head rest) :before)))
+                   (chain-ok rest))])
+(definvariant Transition                                  ; assumed by clients
+  (and (chain-ok (. t :steps))
+       (if (is Nil (. t :steps)) (= (. t :from) (. t :to))
+           (= (. t :from) (. (head (. t :steps)) :before)))))
 
 (defn step [b :State op :Operation a :State e {x :Evidence | (valid-step b op a x)}]
   {t :Transition | (and (= (before t) b) (= (after t) a))} ...)
@@ -1648,7 +1687,7 @@ Three mechanisms, and only the second involves the logic:
            (= (after  (compose (compose p q) r)) (after  (compose p (compose q r)))))))
 ```
 
-- **A consumer holding any `Transition` knows it is a valid path**, because the invariant is assumed of every value of the type. Refinements over `before` and `after` are writable without seeing the representation.
+- **A consumer holding any `Transition` knows it is a valid path**, because the invariant is assumed of every value of the type. `chain-ok` is an ordinary one-argument structural measure (§12). Its definition uses `valid-step`, so `step`'s precondition establishes the invariant of a one-step path by a single unfolding. `Transition` is **sealed**, not merely opaque, because `valid-step` concerns observed evidence and cannot be checked by a decoder. Refinements over `before` and `after` are writable without seeing the representation.
 - **`compose` is implemented inside the module** by concatenation, and must re-establish the invariant: concatenating two valid paths with matching endpoints gives a valid path. That needs induction over the step list, so the invariant obligation for `compose` has status `proved-lean` (or `tested` before Phase 8), recorded in the interface.
 - **Associativity at the level of endpoints** (the law above) is decidable, so its status is `proved`. Equality of the composed step lists is associativity of list concatenation, which needs induction: `proved-lean`.
 
@@ -1661,7 +1700,8 @@ This is the brief's `ValidTransition(before, job, result, after)` made exact, an
 (import Vaisto.Authority :as A)
 
 (deftype sealed Capability [actor :atom scope :A/Authority])
-(defmeasure scope [c :Capability] :A/Authority ...)      ; abstract outside
+(defmeasure scope [c :Capability] :A/Authority ...)      ; abstract outside, logic-only
+(defn scope-of [c :Capability] {s :A/Authority | (= s (scope c))} ...)   ; runtime accessor
 
 (defn mint [actor :atom a :A/Authority] :Capability ...)  ; :issuer-only
 
@@ -1692,11 +1732,11 @@ Demonstrations:
      note: available: repo:vaisto read
    ```
 
-2. **Runtime data, the realistic case.** `(if (A/le? (. job :required) (scope cap)) (run cap job) (deny job))` compiles; `(run cap job)` outside such a check does not. *Check once at the boundary, carry the fact statically.* `le?` is executable, `le` is a proposition, and a refinement connects them.
+2. **Runtime data, the realistic case.** `(if (A/le? (. job :required) (scope-of cap)) (run cap job) (deny job))` compiles; `(run cap job)` outside such a check does not. *Check once at the boundary, carry the fact statically.* `le?` is executable, `le` is a proposition, and a refinement connects them.
 3. **Chains.** `(delegate (attenuate cap extra) c2)` verifies. `attenuate`'s result refinement gives `le(scope(a), scope(cap))`, `delegate`'s precondition gives `le(scope(c2), scope(a))`, and the instantiated `le-transitive` gives `le(scope(c2), scope(cap))`. None of this depends on which model of `Authority` is in use.
 4. **Minting is impossible outside the issuer.** `(mint ...)`, `(A/top)` and `(A/grant ...)` are rejected in ordinary modules. So is decoding a `Capability` from `Dyn` without its authenticator (§4.6).
 
-It needs values and refinements over records (Phase 2), sealing (Phase 1a), and nothing from effects.
+It needs values and refinements over records (Phase 2), static sealing (Phase 1a) and runtime authentication (Phase 3), and nothing from the effect *type system*. Decoding a sealed value from a message asks the issuer, which is an effect handled at runtime.
 
 ### 16.5 Explanations
 
@@ -1708,6 +1748,7 @@ It needs values and refinements over records (Phase 2), sealing (Phase 1a), and 
 (deftype opaque Budget [cpu :int tokens :int net :int])
 (definvariant Budget (and (>= (. b :cpu) 0) (>= (. b :tokens) 0) (>= (. b :net) 0)))
 (defpred within [a :Budget b :Budget] ...)              ; pointwise <=, abstract outside
+(defn plus [a :Budget b :Budget] :Budget ...)            ; pure, non-recursive: liftable (§16.1)
 (defn spend [b :Budget c {k :Budget | (within k b)}]
   {r :Budget | (and (within r b) (= (plus r c) b))}     ; r = b - c, pointwise
   ...)
@@ -1720,7 +1761,7 @@ The invariant (every component is non-negative) and `within c b` make `b − c` 
 | Step | Needs | Unlocks |
 |---|---|---|
 | `defpred`, `deflaw`, `definvariant`, law status, instantiation, reflection | Phase 2 records; invariants of opaque types | the method of §16.1 |
-| Authority, with both models, and an issuer | the above; sealing (Phase 1a) | §16.2 |
+| Authority, with both models, and an issuer | the above; static sealing (Phase 1a); runtime authentication (Phase 3) | §16.2 |
 | Capability example | Authority | §16.4, the first demo that justifies the project |
 | Phases and transitions | brands, opacity, invariants | §16.3 |
 | Budgets | the above | §16.6 |
@@ -1736,7 +1777,7 @@ All of this is Phase 3 (§21). Everything except evidence-backed transitions wor
 
 Operators are library code over the effect algebra, not compiler special cases. They ship as library code in Phase 7; the Phase column below says when each operator's *refinement contract* becomes expressible.
 
-**The headline check survives.** Today's `prompt_output_mismatch` is row unification: a `generate :extract T` rejects a prompt whose output lacks `T`'s fields. In Core it becomes a row-polymorphic signature, `generate : (forall ((ρ Row)) (-> ((p (Prompt In {fields-of-T | ρ}))) Model T))`. The prompt's output row must contain `T`'s fields and may contain more, and missing fields are an ordinary row type error with the same field-level diff. The check moves from a special case in the checker into the type of a library function. Today only `generate` exists, inside `pipeline`, with unfinished payload threading (TODO at `type_checker.ex:1524-1531`).
+**The headline check survives.** Today's `prompt_output_mismatch` is row unification: a `generate :extract T` rejects a prompt whose output lacks `T`'s fields. In Core it becomes a row-polymorphic signature. For a record `T` with fields `x₁: τ₁ … xₙ: τₙ`, the elaborator instantiates `generate : (forall ((ρ Row)) (-> ((p (Prompt In {x₁: τ₁, …, xₙ: τₙ | ρ})) (d (Decodable T))) Model T))`. The row is spelled out per `T`, so no type operator is needed, and the hidden `Decodable T` dictionary carries the runtime schema and the decoder (§4.6). The prompt's output row must contain `T`'s fields and may contain more, and missing fields are an ordinary row type error with the same field-level diff. The check moves from a special case in the checker into the type of a library function. Today only `generate` exists, inside `pipeline`, with unfinished payload threading (TODO at `type_checker.ex:1524-1531`).
 
 | Operator | Built on | Refinement contract it can expose | Kind of any facts | Phase |
 |---|---|---|---|---|
@@ -1765,7 +1806,7 @@ Operators are library code over the effect algebra, not compiler special cases. 
 
 - **Separate module.** A contract lives in its own module; a pipeline or job module imports its interface.
 - **Structural immutability from the worker's side.** A module may not add or change refinements on a name it imports: "`legal-qa` is defined in `Contracts.Legal`; its requirements cannot be changed here". A worker that can edit only its own module cannot weaken the acceptance condition.
-- **Identity by digest.** An accepted result names the contract by its **contract digest**: the canonical bytes (§5.1) of the contract's *semantic* content only, meaning its types, requirements, guarantees and laws, never a file name. It is deliberately **not** the interface digest, which also covers build provenance (solver version, import digests). Otherwise a Z3 upgrade or an unrelated dependency change would un-accept every result.
+- **Identity by digest.** An accepted result names the contract by its **contract digest**: the canonical bytes (§5.1) of the contract's *semantic* content only, meaning its types, requirements, guarantees and laws, never a file name. It also covers the semantic digests of every theory the contract mentions, such as `Authority`'s laws and abstract predicates, so changing an imported theory changes the contract's identity. It is deliberately **not** the interface digest, which also covers build provenance (solver version, import digests). Otherwise a Z3 upgrade or an unrelated dependency change would un-accept every result.
 - **Change control.** Changing the contract changes its digest, so results produced against the old digest are not accepted under the new one. Who may change the contract module (repository permissions, review) is outside the compiler and must be settled by whatever runs the agents.
 - **Against weakened or vacuous specifications:** the vacuity check (§11.3) applies to every requirement; contracts carry concrete examples (inputs that must be admissible and inputs that must be rejected), compiled as tests; a contract diff is reviewed as a specification change.
 
@@ -1784,7 +1825,7 @@ Operators are library code over the effect algebra, not compiler special cases. 
 | Preservation | evaluation of a Lint-accepted term preserves its type |
 | Progress | a Lint-accepted pure term is a value, crashes with a defined reason, or steps |
 | Refinement soundness | if every VC is valid, values satisfy their refinements (§4.4) |
-| Erasure | `eval(e) = eval(erase(e))` for verified pure `e` (§7.2) |
+| Erasure | `eval(materialize(e)) = eval(erase(materialize(e)))` for verified pure `e` (§7.2) |
 | Effect lowering | lowering preserves the sequence of effect requests and the use of their results |
 | Replay determinism | same program, input and trace give the same result (§4.5); later, the same for a valid causal history |
 | Evidence integrity | an `Observed` fact cannot arise except from `observe` performed by a privileged observer |
@@ -2076,7 +2117,7 @@ For every mechanism: soundness assumption, trusted component, runtime representa
 | Trusted component | Observer modules and their declared axioms; the build configuration listing them. |
 | Runtime representation | Sealed witness values; the observer's `:protected` ETS table. |
 | Erasure | Witness types are runtime values and stay; origin tags are compile-time. |
-| Failure mode | A forgery route: construction outside the module, `Dyn`, externs, a forged interface, a hand-built tuple at runtime. Closed by opacity (§4.1), the absence of witness decoders (§4.6), the extern rule (§15.3) and interface checks (§8.3). |
+| Failure mode | A forgery route: construction outside the module, `Dyn`, externs, a forged interface, a hand-built tuple at runtime. Closed by opacity (§4.1), authenticator checks in sealed decoders (§4.6), the extern rule (§15.3), the privileged `exit` (§4.5) and interface checks (§8.3). |
 | Diagnostic | "`TestReceipt` can only be produced by `Vaisto.Tests`". |
 | Test strategy | K9; one compile-error test per forgery route; runtime lookup test. |
 | Creates / establishes / checks | The observer creates; its run against reality establishes; admission checks. |
@@ -2155,7 +2196,7 @@ For every mechanism: soundness assumption, trusted component, runtime representa
 | Runtime representation | None. |
 | Erasure | Removed. |
 | Failure mode | A recursive alias (rejected); a law outside the decidable fragment (reported as "needs a proof", deferred to Lean). |
-| Diagnostic | `:explain` text; "`endpoints-associate` could not be checked automatically; its status is `tested`"; laws over the string-resource model are reported the same way. |
+| Diagnostic | `:explain` text; "the path-equality form of associativity could not be checked automatically; its status is `proved-lean`"; laws over the string-resource model are reported the same way. |
 | Test strategy | §16.2 laws as conformance programs; recursion rejection. |
 | Creates / establishes / checks | The library author creates; the solver or Lean establishes; the checker records the result. |
 
@@ -2224,7 +2265,7 @@ For every mechanism: soundness assumption, trusted component, runtime representa
 | Q5 | Should measures also compile to executable functions? | open | logic-only first |
 | Q6 | Sets over finite enums | open | record-of-bools first (§16.2), `(Set E)` later |
 | Q7 | May CI run without a solver, using cached answers? | open | no, in the first refinement phases |
-| Q8 | Refinements on record fields (data invariants) | open | after Phase 2's first step |
+| Q8 | Refinements on record fields (data invariants) | **resolved for opaque types** (§4.1); invariants on transparent record fields remain later work | — |
 | Q9 | Should `:when` guards imply static preconditions? | open | no; add the two lints of §10.4 |
 | Q10 | Unreachable branch: warning or error? | open | warning |
 | Q11 | Canonical encoding for digests | **resolved**: canonical S-expressions (§5.1) | residual: exact leaf hints |
@@ -2233,7 +2274,7 @@ For every mechanism: soundness assumption, trusted component, runtime representa
 | Q14 | Where privileged observers are declared | open | build configuration |
 | Q15 | Strict or short-circuit `and`/`or` | **resolved**: Core defines short-circuit (§4.3) | — |
 | Q16 | Row polymorphism versus nominal phases | **resolved**: brands (§4.1) | — |
-| Q17 | How witness types resist `:any` | **resolved**: `Dyn` converts to nothing; sealed types have no `decode` (§4.7, §4.6) | — |
+| Q17 | How witness types resist `:any` | **resolved**: `Dyn` converts to nothing; sealed types decode only with a verified authenticator (§4.6, §4.7) | — |
 | Q18 | New modules and a new compiler back half versus AGENTS.md | **open, owner decision**; larger than in draft 1 | accept: a separate core is the point of the design |
 | Q19 | Effect polymorphism for higher-order functions | **resolved**: effect rows reuse the row algebra (§4.5) | — |
 | Q20 | Polymorphism in Core: explicit type abstraction and application, or let-schemes | **resolved**: explicit (§4.1, §9.2) | — |
@@ -2249,6 +2290,8 @@ For every mechanism: soundness assumption, trusted component, runtime representa
 | Q30 | Anonymous rows: keep Erlang maps, or tagged tuples with a synthetic tag (§4.1) | open | maps, for interoperability; inline accessors when the representation is known |
 | Q31 | Which law statuses a build accepts per domain (§16.1) | open, owner decision | `proved` for authority and budgets in production builds |
 | Q32 | Module-qualified runtime tags for records (§4.1): a representation change visible to Erlang code | open | qualify, and give Erlang callers an accessor instead of bare-tag matching |
+| Q33 | Issuer keys and availability: where the MAC key lives, how it rotates, and what sealed decoding does when the issuer is down (§4.6) | open | key held by the issuer process only; decoding fails closed |
+| Q34 | Surface syntax of the `(unreachable)` marker (§11.3) | open | a form that is itself an obligation `false` |
 
 ---
 
@@ -2267,18 +2310,26 @@ Refinements do not have to wait for the new backend. A refined program has two i
  VerifiedCore ── erase ──►  Core⁻                                (checks the program)
 ```
 
-The square **commutes** when `adapter(HM(P)) = erase(elaborate_refined(P))`, as Core terms up to renaming. When it does, the Core that was verified is, after erasure, exactly the program the old emitters run. So refinements can be checked through Core while programs still run through today's backends, and the evaluator-versus-BEAM harness (§6.3) covers those backends too. The square is checked for every program as part of the harness. A program for which it fails is not refinement-checked; it is reported as a bridge bug. The bridge needs one parser change. `(defn f [y {d :int | p}] ...)` becomes the plain `(defn f [y :int] ...)` that HM sees, plus a sibling `(refine-sig f ...)` form that only the refined elaboration reads. This is draft 1's side-table design (Appendix B), kept as a temporary bridge. The bridge is retired when HM elaborates directly to Core (Phase 1a) and the new lowering takes over (Phase 1b).
+The square **commutes** when `adapter(HM(P)) = erase(elaborate_refined(P))`, as Core terms up to renaming. When it does, the Core that was verified is, after erasure, exactly the program the old emitters run. So refinements can be checked through Core while programs still run through today's backends, and the evaluator-versus-BEAM harness (§6.3) covers those backends too. The square is checked for every program as part of the harness. A program for which it fails **does not build**.
+
+**Gates.** The bridge leans on A2 for the old emitters, which this document itself shows violate it for some constructs. So Phase 2.1:
+
+1. requires P0-4 (`and`/`or`, D5), P0-10 and the Elixir part of P0-14 for every construct a refined program uses;
+2. restricts refined code, and callers of refined functions, to constructs on which the harness shows both old emitters agreeing with the evaluator. **Externs are excluded**, because the old emitters do not decode their results;
+3. makes a failed square a build error, never "runs unchecked".
+
+Before Phase 1a the square commutes almost by construction, since the refined elaboration *is* the adapter plus the side table. What it then checks is that the refinements were attached to the right terms. It is the parity restriction that carries A2. The bridge needs one parser change. `(defn f [y {d :int | p}] ...)` becomes the plain `(defn f [y :int] ...)` that HM sees, plus a sibling `(refine-sig f ...)` form that only the refined elaboration reads. This is draft 1's side-table design (Appendix B), kept as a temporary bridge. The bridge is retired when HM elaborates directly to Core (Phase 1a) and the new lowering takes over (Phase 1b).
 
 ### 21.2 Phases
 
 | Phase | Name | Delivers | Depends on |
 |---|---|---|---|
 | **0** | Foundation | the written Core spec (§4 as a standalone document), including the full type algebra; canonical codec; reference evaluator with pure and scripted handlers; Core Lint; the typed-AST-to-Core adapter; differential harness; parser round-trip tests; the defect fixes marked "keep, Phase 0" in §21.3 | — |
-| **2.1** | Refinements, first step | `Int`/`Bool`/`List`, primitive specs, branch facts, Z3, diagnostics, C1–C13; runs on today's emitters through the bridge (§21.1) | 0 |
-| **1a** | The type algebra in Core | `Dyn` replaces `:any`; brands and opacity; row evidence (fixes D24); `crash` as an effect and `try` as its handler; typed receive by decoding; engines merged, HM elaborating directly to Core | 0 |
+| **2.1** | Refinements, first step | `Int`/`Bool`/`List`, primitive specs, branch facts, Z3, diagnostics; C1–C7, C9–C11, C13, C19, C20 (C8 needs `Dyn` from 1a; C12 needs 1b); runs on today's emitters through the gated bridge (§21.1) | 0, with P0-4, P0-10, P0-14 |
+| **1a** | The type algebra in Core | `Dyn` replaces `:any`; brands, opacity and **static** sealing; row evidence (fixes D24); `crash` as an effect and `try` as its handler; typed receive by decoding; engines merged, HM elaborating directly to Core | 0 |
 | **2.2** | Refinements over records and sums | branded records, sums, enums in the logic; row selectors | 1a, 2.1 |
 | **2.3** | Measures | §12 | 2.2 |
-| **3** | Library | the method of §16.1; authority, phases, transitions, budgets; reflection; **the capability demo** | 2.2 |
+| **3** | Library | the method of §16.1; **runtime authentication** for sealed library types (issuer keys, MAC chains); authority, phases, transitions, budgets; reflection; **the capability demo** | 2.2 |
 | **1b** | The new backend | lowering to the abstract format; old emitters retired at parity; canonical interfaces and digests (§8) | 1a |
 | **4** | Effects | effect rows and inference; the handler interface on BEAM; trace recording; single-process replay (K2) | 1a |
 | **5** | Evidence and admission | observers, sealed witnesses, `Observed` facts; `VSTY` admission and the loader | 3, 4, 1b |
@@ -2288,7 +2339,7 @@ The square **commutes** when `adapter(HM(P)) = erase(elaborate_refined(P))`, as 
 
 The numbering is historical: 2.1 comes before 1a because it depends only on Phase 0.
 
-- **Shortest path to the first refinement demo** (`safe-div`, `clamp`, bounded index): Phase 0, then Phase 2.1. The backend replacement is not on this path.
+- **Shortest path to the first refinement demo** (`safe-div`, `clamp`, bounded index): Phase 0 with P0-4, P0-10 and P0-14, then Phase 2.1. The backend replacement is not on this path.
 - **Shortest path to the capability demo:** Phase 0 → 1a → 2.1 → 2.2 → 3. Neither the new backend (1b) nor effects (4) are needed.
 - **Cross-module refinements** (conformance C12) need canonical interfaces, so they wait for 1b. Before that, refinements are checked within one module.
 
@@ -2486,7 +2537,7 @@ beam_lib:chunks(S, ["VSTY"], [allow_missing_chunks]).  % => [{"VSTY", missing_ch
 
 ---
 
-## Appendix C. Review of draft 2, and what changed
+## Appendix C. Reviews of drafts 2 and 3, and what changed
 
 Draft 2 was reviewed three ways: a read by the author, an adversarial programming-languages review, and a fact-check of every claim against the code. Each finding and its resolution:
 
@@ -2526,3 +2577,14 @@ Draft 2 was reviewed three ways: a read by the author, an adversarial programmin
 | R32 | Predicates could contain partial operators; guard semantics undefined; crash reasons could not match; type variables unspecified; Core Lint's checklist incomplete; solver answers depended on load and history. | Total predicates by construction; guard-safe guards where a crash means false; normalized crash reasons; type variables as uninterpreted sorts; a full Lint checklist; resource limits and fresh contexts, syntactic provenance, nonlinear caveat (§4.2, §4.4, §9.2, §11). |
 | R33 | Library examples were ill-formed: `spend` unverifiable, `depth` used a non-measure, laws mentioned ordinary functions, `rerank` claimed a permutation, K5 relied on a defect Phase 0 fixes, the contract digest included build provenance. | Each fixed (§12, §16, §17.1, §17.2, K5). |
 | R34 | While fixing R20 it became clear that banning `decode` on *all* opaque types would stop opaque values crossing processes, since a typed `receive` is decoding. | Abstraction and authentication are separated: opaque types decode only through their own module; sealed types also verify an authenticator (§4.6). |
+| R35 | Re-review of draft 3: a guard that crashes counts as false, but its negation assumed it was evaluated. A program verified and then divided by zero. | A guard means `def(g) ∧ g` everywhere (§4.2, §10.3); C19. |
+| R36 | Functions verified only for partial correctness were lifted into the logic, so a non-returning function could export the axiom `false`; reflection could hang. | Only terminating, effect-free functions are liftable, their axioms are guarded by their preconditions, and reflection has a fuel limit. Contradictory facts at an obligation are errors unless marked `(unreachable)`, and vacuous guarantees are errors (§4.4, §11.3, §16.1); C20. |
+| R37 | Opaque invariants were assumed of values decoded from forged messages. | Opaque decoders check the invariant; a type with a non-executable invariant must be sealed (`Transition` is) (§4.6, §16.3). |
+| R38 | The Phase 2.1 bridge relied on A2 for backends the document shows break it, and a failed square meant "runs unchecked". | Gated on P0-4, P0-10 and P0-14, parity-tested constructs only, no externs; a failed square is a build error (§21.1). |
+| R39 | Table-based authenticators made `meet` effectful and broke the laws and reflection; `==` on sealed values exposed the model. | Deterministic, macaroon-style MAC chains; laws and reflection on canonical content; no raw `==` on opaque or sealed types outside their module (§4.6, §16.2). |
+| R40 | No phase delivered sealing before the capability demo needed it. | Static sealing in Phase 1a, runtime authentication in Phase 3 (§21.2). |
+| R41 | Deep decoding cannot be written as receive guards; C15's protocol was not decodable. | Typed receive selects on tags and guards, then decodes after consumption; strays re-enter with the remaining timeout; C15 uses `(Pid Dyn)` (§4.6, §14.2). |
+| R42 | `exit` was unprivileged, so any worker could kill an observer or issuer. | `exit` is privileged like `external` (§4.5, §9.2). |
+| R43 | The `generate` signature used a type operator the algebra lacks; transitions used an inexpressible `valid-path`; measures were used at runtime; the IR could not express the logic; `Raised` outcomes were untyped. | Per-type signatures with a `Decodable` dictionary; one-argument structural `chain-ok`; runtime accessors; abstract, type-variable, field and lifted-function forms in the IR; typed `Outcome` in computations and traces (§4.5, §5.2, §16, §17.1). |
+| R44 | Recording arrival order was unspecified; the contract digest ignored imported theories; row fields and selectors were not identified; law instantiation could loop. | A privileged tracer via `erlang:trace/3`; theory digests in the contract digest; a field/selector axiom at instantiation; one-round instantiation (§4.4, §4.5, §16.1, §17.2). |
+| R45 | Stale text: the pipeline and theorems without `materialize`; "drop unsupported hypotheses"; solver-start and exhaustiveness wording; missing `badarg`; `==` on floats; "in 2s"; test counts; callee names in C6; the associativity status; the §8.5 handshake; Q8 and Q17. | Each corrected. |
