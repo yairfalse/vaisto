@@ -4,18 +4,31 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What is Vaisto?
 
-Vaisto ("Finnish for intuition") is a statically-typed Scheme-like language that compiles to BEAM bytecode. It combines:
-- S-expression syntax (minimal, parseable)
-- Hindley-Milner type inference (ML/Rust-style safety without annotation tax)
-- BEAM runtime (Erlang/Elixir ecosystem, fault tolerance, distribution)
+Vaisto ("Finnish for intuition") is a typed substrate for structurally accountable LLM systems. Prompts, contracts, and pipelines are typed artifacts checked at compile time — the headline compile error is `prompt_output_mismatch`, where a downstream `(generate :extract T)` rejects a prompt whose `:output` type lacks required fields. See `README.md` for the framing and `docs/design/task-contracts-manifesto.md` for the "why."
 
-The key insight: BEAM's process isolation makes Rust-style ownership unnecessary—you get safety through the runtime.
+The implementation vehicle is a statically-typed Scheme-like language compiling to BEAM bytecode:
+- S-expression syntax (minimal, parseable, no macros)
+- Hindley-Milner type inference (ML/Rust-style safety without annotation tax)
+- BEAM runtime — process isolation makes Rust-style ownership unnecessary; pipeline steps get fault isolation for free
+- A real compiler/LSP loop, so prompts behave like typed code with prose inside
+
+Most of the codebase today is the language and compiler; task contracts (`defprompt`, `pipeline`, `generate`) are a small but load-bearing surface on top. Treat both layers as first-class when scoping work.
+
+## Companion docs
+
+- `AGENTS.md` — working contract for AI agents in this repo (conventions, constraints, workflow). Read alongside this file.
+- `DESIGN.md` — long-form design rationale for the language and compiler.
+- `README.md` — the public framing: prompts as accountable, typed artifacts.
+- `docs/adr/` — accepted architecture decisions (e.g. compiler implementation choice).
+- `docs/design/` — spec drafts (`task-contracts-spec.md`, `task-contracts-manifesto.md`, `vaisto-bpf.md`); `task-contracts-spec.md` covers operators not yet wired in code.
+- `docs/design/liquid-vaisto-rfc.md` — the Liquid Vaisto RFC (refinement types over a small semantic core). §1 maps the current compiler, and §1.12 lists 24 reproduced defects with reproductions in Appendix A. Check it before assuming a language feature works end to end.
 
 ## Build Commands
 
 ```bash
-mix deps.get              # Install dependencies
-mix test                  # Run all tests (~1240 tests)
+mix deps.get              # Install dependencies (also needed in every fresh git worktree)
+mix test                  # Run all tests (~1270); excludes the :live OpenAI test
+mix test --include live   # Also run the live OpenAI test (needs OPENAI_API_KEY)
 mix test test/parser_test.exs       # Run a single test file
 mix test test/parser_test.exs:12    # Run a specific test by line number
 mix escript.build         # Build the CLI compiler (escript)
@@ -27,7 +40,9 @@ mix escript.build         # Build the CLI compiler (escript)
 ./vaistoc lsp                       # Start LSP server
 ```
 
-Dependencies: `jason ~> 1.4` (JSON for LSP), `toml ~> 0.7` (manifest parsing). No CI, no formatter config, no Credo/Dialyzer.
+Blackbox tests run against the built CLI: `mix escript.build`, then `test/blackbox/runner.sh`. The runner's cases are hardcoded; `test/blackbox/dataset.json` and `lsp_dataset.json` record each case's `spec_source` and are not read by the runner. `test/blackbox/lsp_runner.exs` talks to the LSP server directly, bypassing stdio.
+
+Requires Elixir `~> 1.15`. Dependencies: `jason ~> 1.4` (JSON for LSP), `toml ~> 0.7` (manifest parsing). No CI, no formatter config, no Credo/Dialyzer.
 
 ## Architecture
 
@@ -45,25 +60,19 @@ Orchestrated by `Vaisto.Compilation.compile/3`. The `Vaisto.Backend` behaviour d
 
 | Module | Purpose |
 |--------|---------|
-| `Vaisto.Parser` | S-expression parser. AST nodes are tuples with `%Loc{}` as final element. **Raises** on syntax errors (not `{:error, ...}`). |
-| `Vaisto.TypeChecker` | HM-style bidirectional type inference. Two-pass: collect signatures, then check bodies via `check_s`/`check_impl_s` (ctx-threaded). Returns `{:ok, type, typed_ast}`. |
-| `Vaisto.TypeChecker.TcCtx` | Type checking context. Threads substitution, tvar counter, constraints, constrained_tvars, field_tvars through inference. |
-| `Vaisto.TypeSystem.Infer` | Algorithm W for anonymous functions. **Separate** from main TypeChecker—used as fallback for `{:fn, ...}` nodes. Has its own context (`TypeSystem.Context`). |
-| `Vaisto.TypeSystem.Core` | Type primitives: `{:tvar, id}`, `{:rvar, id}`, substitutions, `apply_subst/2` |
-| `Vaisto.TypeSystem.Unify` | Unification with occurs check. Handles row polymorphism. `:any` unifies with everything. |
-| `Vaisto.CoreEmitter` | Typed AST → Core Erlang via `:cerl` module → BEAM via `:compile.forms/2` |
-| `Vaisto.Emitter` | Typed AST → Elixir quoted AST → compiled via `Code.compile_quoted/1` |
-| `Vaisto.Error` | Structured error struct with spans, expected/actual types, hints, notes. All errors flow through this. |
-| `Vaisto.Errors` | ~55 structured error constructors with Jaro-distance "did you mean?" hints |
-| `Vaisto.ErrorFormatter` | Rust-style error rendering with source context and ANSI colors |
-| `Vaisto.Compilation` | Pipeline orchestration. `compile/3` for full pipeline, `run/2` for eval (compile+execute+cleanup). `parse/2` wraps Parser raises into `{:error, Error}`. |
+| `Vaisto.Parser` | S-expression parser. AST nodes are tuples with `%Loc{}` as final element. **Raises** on syntax errors. |
+| `Vaisto.TypeChecker` (+ `TypeChecker.TcCtx`) | HM-style bidirectional inference. Two-pass: collect signatures, then check bodies via `check_s`/`check_impl_s` (ctx-threaded; `TcCtx` carries substitution, tvar counter, constraints, field_tvars). Returns `{:ok, type, typed_ast}`. |
+| `Vaisto.TypeSystem.Infer` | Algorithm W for anonymous functions. **Separate** from main TypeChecker — used as fallback for `{:fn, ...}` nodes. Has its own context (`TypeSystem.Context`). |
+| `Vaisto.TypeSystem.Unify` | Unification with occurs check, row polymorphism, `:any` unifying with everything. **Always use this — don't write bespoke field/type comparison.** |
+| `Vaisto.CoreEmitter` | Typed AST → Core Erlang via `:cerl` → BEAM via `:compile.forms/2`. Default for `:core`. |
+| `Vaisto.Emitter` | Typed AST → Elixir quoted AST → `Code.compile_quoted/1`. Default for `:elixir`. **Only this emitter handles `defprompt`/`pipeline`/`generate`.** |
+| `Vaisto.Error` (+ `Errors`, `ErrorFormatter`) | Structured error struct with spans, expected/actual, hints, notes. `Errors` exposes ~55 constructors with Jaro-distance "did you mean?" hints; `ErrorFormatter` renders Rust-style with source context. |
+| `Vaisto.Compilation` | Pipeline orchestration. `compile/3` runs the full pipeline, `run/2` is eval (compile+execute+cleanup), `parse/2` wraps Parser raises into `{:error, Error}`. |
 | `Vaisto.Runner` | Bridge to Elixir: `compile_and_load/3`, `run/2`, `call/3`, `spawn_process/2`. Used in e2e tests via `Runner.run(code, backend: :core)`. |
-| `Vaisto.Build` | Multi-file builds: dependency graph, topological sort, `.vsi` interface files |
-| `Vaisto.Interface` | Module interface serialization (Erlang `term_to_binary`) for separate compilation |
-| `Vaisto.TypeFormatter` | Formats types for display: `format(:int)` → `"Int"`. Used by errors, LSP hover, diagnostics. |
-| `Vaisto.LLM` | Behaviour + dispatcher. `call/4` looks up the provider via `Application.get_env(:vaisto, :llm, Vaisto.LLM.Mock)`. |
-| `Vaisto.LLM.Mock` | Test provider — returns canned responses for deterministic tests. |
-| `Vaisto.LLM.OpenAI` | Production provider via `:httpc` with structured outputs (Responses API). |
+| `Vaisto.Build` (+ `Interface`) | Multi-file builds: dependency graph, topological sort, `.vsi` interface files. `Interface` serializes module interfaces (Erlang `term_to_binary`). |
+| `Vaisto.Package.Manifest` / `Package.Namespace` | Parses `vaisto.toml`; resolves module names. Used by `Build` for multi-file compilation. |
+| `Vaisto.Lsp.Server` / `Lsp.Handler` | JSON-RPC over stdio. `Server` reads frames; `Handler` dispatches to feature modules: `Completion`, `Hover`, `SignatureHelp`, `References`, `InlayHints`. `AstAnalyzer` and `Position` are shared utilities. |
+| `Vaisto.LLM` (+ `LLM.Mock`, `LLM.OpenAI`) | Behaviour + dispatcher. `call/4` looks up provider via `Application.get_env(:vaisto, :llm, Vaisto.LLM.Mock)`. `Mock` returns canned responses for tests; `OpenAI` uses `:httpc` with structured outputs (Responses API). |
 
 ### Two Type Checkers — Important
 
@@ -72,6 +81,8 @@ The codebase has two separate type inference engines:
 2. **`Vaisto.TypeSystem.Infer`** — Algorithm W, used as fallback for anonymous functions (`{:fn, params, body}`)
 
 They use different context structs (`TcCtx` vs `TypeSystem.Context`) but both return structured `%Error{}`. When `Infer` is invoked from inside `TypeChecker.check_impl_s`, the `TcCtx` context is **not** propagated through the inference.
+
+`Infer` also keeps its own `@primitives` table (`infer.ex:26`), separate from `TypeEnv`. The two disagree today: `/` is `Int -> Int -> Int` there and `Float` in the main checker, so a function declared `:int` can return `3.5` through a lambda. Change primitive types in both places, or better, make `Infer` read `TypeEnv`.
 
 ### Lambda Fallback Mechanism
 
@@ -160,7 +171,7 @@ Dictionary-passing implementation:
 (Std.List/fold xs 0 +)         ; Qualified call
 ```
 
-Files in `std/` contain standard library modules with `.vsi` interface files for separate compilation.
+`std/` contains only `.va` source (plus `prelude.va`, which is prepended to every compile). `.vsi` interface files are generated by `vaistoc build` and are gitignored; `scripts/bootstrap.sh` builds `std` into `build/bootstrap`.
 
 ### Task Contracts
 
@@ -241,7 +252,13 @@ Typed AST shapes:
 - **Typed PIDs** — `spawn` returns `(Pid ProcessName)`, `!` validates message types
 - **Row polymorphism** — functions can require records with *at least* certain fields
 - **Exhaustiveness checking** — match on sum types and booleans must cover all variants
-- **Two backends** — Core Erlang (`:core`) and Elixir (`:elixir`), tested for parity via `core_backend_parity_test.exs`
+- **Two backends** — Core Erlang (`:core`) and Elixir (`:elixir`), tested for parity via `core_backend_parity_test.exs`. The suite misses known divergences:
+  - `and`/`or` are strict on `:core` and short-circuit on `:elixir`;
+  - guarded `defn` fails to compile on `:core`;
+  - record field access crashes on `:elixir`;
+  - `let` bindings leak on `:elixir`.
+
+  When touching an emitter, run end-to-end tests on both backends.
 
 ## Known Limitations & Gaps
 
@@ -251,6 +268,12 @@ Typed AST shapes:
 - Unknown qualified calls silently return `:any` instead of erroring
 - Multi-clause functions (`defn_multi`) hardcode arity=1
 - No receive-with-timeout, no binary/bitstring syntax
+- Record/sum annotations on `defn` parameters do not resolve at call sites: `[p :Point]` gives "expected `Point`, found `Point`". Existing tests only type-check such definitions and never call them.
+- Any call form in the return-type slot is read as a type: `(defn f [x] (println x) x)` silently drops `(println x)`.
+- Lambda parameters cannot be annotated: `(fn [x :int] x)` is a two-parameter lambda.
+- `(deftype opaque ...)` and `(deftype T p [...])` are silently misparsed as records.
+- Row-polymorphic field access type-checks but crashes at runtime on both backends when given a record.
+- The checker accepts some ill-typed programs with no `:any` in the source (leaked `let` scope, a declared return type checked without the body's substitution, ignored sum-constructor field types). The full list with reproductions is in the Liquid Vaisto RFC, §1.12 and Appendix A.
 
 ### Error Handling
 - Parser **raises** on syntax errors (wrap with `Compilation.parse/2` for `{:error, ...}`)
@@ -265,14 +288,33 @@ Typed AST shapes:
 
 Errors follow Rust's style: short, exact, with source context and actionable hints. Structured errors use `Vaisto.Error` with spans for rich formatting via `Vaisto.ErrorFormatter`.
 
+## When in Doubt — Navigation Guide
+
+Orienting heuristics for common change types:
+
+- **Adding a new top-level form** (alongside `defn` / `deftype` / `defprompt`): mirror `parse_defn` in `lib/vaisto/parser.ex`, wire through `TypeChecker.check_module_forms`, then **both emitters** (CoreEmitter and Emitter) — unless the form is task-contract-related, in which case Elixir-only is the documented asymmetry.
+- **Adding a new typed AST node**: every emitter that pattern-matches typed AST nodes needs a clause. Skipping `CoreEmitter` is fine for `defprompt`/`pipeline`/`generate` (already asymmetric); not fine for general language constructs.
+- **Adding a new error**: write a constructor in `Vaisto.Errors` returning `%Vaisto.Error{}` with a `%Span{}`. Use Jaro-distance hints when "did you mean?" applies — see `Errors.undefined_variable` for the pattern. In tests, match on the message string or the `%Error{message: ...}` shape.
+- **Touching unification or type comparison**: route through `Vaisto.TypeSystem.Unify`. Bespoke field-walking is the wrong answer.
+- **Lambda type-inference fails unexpectedly**: check `infer_should_fallback?/1` — fallback errors trigger `:any`-typed re-check, genuine errors propagate. Misclassifying turns real bugs into silent `:any` calls.
+- **Parser errors during compilation**: remember the parser **raises**. Use `Vaisto.Compilation.parse/2` to get `{:error, Error}` instead of an exception.
+- **Adding/changing types in typed AST**: `TypeFormatter` may need an entry so errors and LSP hover render correctly.
+- **LSP feature work**: feature modules under `lib/vaisto/lsp/` are dispatched from `Lsp.Handler`. `AstAnalyzer` + `Position` are the shared utilities for translating LSP positions to AST nodes.
+- **Multi-file changes**: `Vaisto.Build` writes `.vsi` files via `Vaisto.Interface`, but cross-module typing does not work today:
+  - interfaces are keyed `Elixir.A:f` while lookups use `A:f`, so imported calls are typed `:any`;
+  - loading an interface wipes the built-in typeclass registry;
+  - `DependencyResolver` never matches imports to graph keys, so build order follows atom-creation order. This is the cause of the intermittent failure at `test/build/integration_test.exs:124`.
+
+  Do not rely on imported types being checked.
+
 ## Testing
 
-~1270 tests across 49 files. Key test files:
-- `typeclass_test.exs` (120+) — typeclasses, constraints, deriving, both backends
-- `type_system/infer_test.exs` (122) — Algorithm W
-- `core_backend_parity_test.exs` (81+) — runs same code through both backends, compares results
-- `emitter_test.exs` (64) — Elixir backend end-to-end
-- `type_checker_test.exs` (66) — type checking, error messages, HM inference, lambda fallback
+About 1270 tests. `test/build/integration_test.exs:124` fails intermittently (see Multi-file changes above). Key test files:
+- `typeclass_test.exs` — typeclasses, constraints, deriving, both backends
+- `type_system/infer_test.exs` — Algorithm W
+- `core_backend_parity_test.exs` — runs same code through both backends, compares results
+- `emitter_test.exs` — Elixir backend end-to-end
+- `type_checker_test.exs` — type checking, error messages, HM inference, lambda fallback
 - `tuple_types_test.exs` — `(Tuple ...)` annotations and inference
 - `try_catch_test.exs` — parser, type checker, and e2e tests for try/catch/after (both backends)
 - `task_contract_parser_test.exs`, `task_contract_typecheck_test.exs`, `emitter_task_contract_test.exs` — `defprompt`/`pipeline`/`generate` (parser, type checker, Elixir-backend e2e)
