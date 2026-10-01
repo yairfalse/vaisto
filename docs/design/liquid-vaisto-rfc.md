@@ -1,6 +1,6 @@
 # RFC: Liquid Vaisto
 
-- **Status:** Draft 4 for discussion. Design only; nothing in this document is implemented.
+- **Status:** Draft 4 for discussion, amended: the type system is now `liquid-types.md` (§0.5, §9.1). Phase 0 is implemented: `liquid-core.md`, `lib/vaisto/liquid/`.
 - **Date:** 2026-10-01
 - **Supersedes:** draft 3 (merged in PR #6), after a second adversarial review. Appendix C lists the findings of both reviews and their fixes. Draft 3 superseded draft 2 (2026-09-30). Draft 2 superseded draft 1, written earlier the same day. Draft 1 layered refinements on top of today's compiler and treated BEAM behaviour as the definition of the primitives. Review of that draft produced the central idea of this one: **Vaisto has a semantics; BEAM implements it.** Appendix B lists every change.
 - **Baseline:** `origin/main` at `0ec7a82`. Test baseline: 1268 passing, 1 excluded, 1 intermittent failure (D10).
@@ -76,7 +76,7 @@ Everything else is **library**: authority, capabilities, budgets, workflow phase
 | Decision | Choice | Evidence or reason |
 |---|---|---|
 | Semantic authority | Liquid Core, executed by the reference evaluator; a backend is correct if and only if it agrees | the backends disagree today (D5, D11, D12, D15, D24) |
-| Type inference | HM stays, as an **untrusted elaborator**; its output is re-checked by **Core Lint**, which does no inference | HM accepts ill-typed programs (D15–D19, D21, D22) |
+| Type inference | **HM retires.** A bidirectional elaborator reads each type former's universal property: introductions are checked, eliminations synthesize. Unification stays, but only locally, to instantiate at an elimination site. Top-level definitions carry signatures, and **Core Lint** re-checks the output with the same rule table. See `liquid-types.md` | HM accepts ill-typed programs (D15–D19, D21, D22); over the test suite, 21 of the 25 programs Lint rejects are HM generalizing what it never constrained |
 | Refinements | live in Core types; HM never sees them; erased Core-to-Core before lowering | emitters and `Unify` pattern-match type terms structurally (§1.9) |
 | Effects | algebraic requests; handlers are the BEAM runtime or a trace replayer | replay determinism becomes a property of the semantics (§4.5) |
 | Type algebra | unit, labelled products (rows) and sums, functions with effect rows, named types as branded rows, `Pid`, `Map`, `Dyn` | covers the whole surface language; rows and nominal phases coexist (§4.1) |
@@ -93,7 +93,7 @@ The long-term target is the statement from the design review: **any execution ad
 
 ### 0.6 Tensions with the brief, stated plainly
 
-- **"Not a rewrite of Vaisto."** The surface language and HM stay, and programs keep their meaning except where today's meaning is a bug. The compiler's back half *is* replaced: two emitters become one lowering. This is staged: the new lowering runs beside the old emitters, and each old emitter is retired only when the harness shows parity (§7.3).
+- **"Not a rewrite of Vaisto."** The surface language stays, and programs keep their meaning except where today's meaning is a bug. HM does not stay: top-level definitions gain signatures, inserted mechanically from HM's own suggestions and then checked (`liquid-types.md` §13). The compiler's back half *is* replaced: two emitters become one lowering. This is staged: the new lowering runs beside the old emitters, and each old emitter is retired only when the harness shows parity (§7.3).
 - **"Full effect system" is a first-implementation non-goal.** The *semantics* of effects is in the core from the start, because determinism needs it. The *effect type system* starts minimal and arrives in Phase 4, after refinements (Phase 2).
 - **"Proof-carrying BEAM bytecode" is a non-goal.** `VSTY` carries hashes and a signature, not proofs, and nothing is proved at load time (§8.4).
 - **The first refinement target** (`Nat`, `safe-div`, `clamp`, bounded index) still comes first among refinement work, right after Phase 0. It never reasons directly about today's HM output, which would verify programs that crash (D15, D16). It reasons about Core that Core Lint has checked, while the programs still run on today's emitters through a bridge whose correctness is checked per program (§21.1).
@@ -668,7 +668,7 @@ Outcome(op)   ::= Ok r            ; r of op's result type
                 | Raised class reason
 ```
 
-This is the free `Σ`-algebra over `a`: operations are uninterpreted, and nothing identifies two trees except syntax. The single equation is for `crash`, whose result type is empty: `crash r` followed by anything is `crash r`. That is the algebraic definition of an exception.
+This is the free `Σ`-algebra over `a`: operations are uninterpreted, and nothing identifies two trees except syntax. `crash` has result type `0`, so its arity is empty and it has no continuation: `crash r` followed by anything is `crash r`. That is not an equation of the theory but a consequence of arity 0, and the free model over `crash` alone is `A + Reason`, the algebraic definition of an exception (`liquid-types.md` §7.1).
 
 **A handler is a Σ-algebra; running is the unique fold.** A handler interprets each operation. Running a computation with a handler is the unique homomorphism from the free algebra into the handler's algebra: a fold over the tree (the algebraic-effects view of Plotkin and Pretnar). The handlers of §6.2 are algebras:
 
@@ -1098,12 +1098,18 @@ A service exports an interface digest. When two nodes connect, each states the d
 
 ## 9. Elaboration and the two inference engines (assignment item 6)
 
-### 9.1 HM becomes an untrusted elaborator
+### 9.1 HM retires; a bidirectional elaborator replaces it
 
-HM stays as the inference engine, so programs keep their annotation-free style. Its job changes: it produces explicitly typed Core, and nothing downstream trusts it. Two consequences:
+*Amended.* Earlier drafts kept HM as an untrusted elaborator. Phase 0 measured what that costs. Over the 133 programs of the test suite, Core Lint rejected 25 that HM accepted. In 21 of them, HM generalized a type it never constrained (D17), or did not tie a scrutinee to its patterns (D22); the other 4 fell back to `:any`. Global inference fails silently when it cannot decide, and every feature Liquid Vaisto adds breaks its principal-types guarantee: refinement subsumption, higher rank, quotients, grades.
 
-- **HM's internal type terms never carry refinements.** §1.9 shows why: the emitters, `Unify`, `Core.apply_subst` and `Core.free_vars` all pattern-match type terms structurally, several with catch-all clauses that would silently mishandle a wrapper. Refinements attach during elaboration and live only in Core types.
-- **The two engines must merge.** Draft 1 left Engine B (`TypeSystem.Infer`) alone. That is no longer possible. `fallback_lambda/3` types lambda parameters as `:any`, and in Core that would be `Dyn`, which makes the lambda unusable at any concrete type and fails Core Lint. Lambdas must be typed by the same elaborator as everything else. Merging also removes Engine B's lossy boundary (§15.5) and its separate primitives table, the cause of D4. This is Phase 1a work.
+The front end is therefore a **bidirectional elaborator** (`liquid-types.md`):
+
+- **It reads the algebra.** Each type former's introduction forms are checked and its elimination forms synthesize (`liquid-types.md` §8). Core Lint implements the same rule table independently, so a disagreement between the two is an elaborator bug.
+- **Inference is local unification.** Unification is used only to choose type, row and effect arguments and class dictionaries at an elimination site, inside one definition (`liquid-types.md` §9).
+- **Top-level definitions carry signatures**, which are their contracts. Local `let`s are not generalized, and lambdas checked against a known arrow need no annotations, so the fallback lambda (§15.4) disappears. There is no `:any`.
+- **Refinements never enter HM's type terms.** This part of the old design is kept, for the reason §1.9 gives: the emitters, `Unify`, `Core.apply_subst` and `Core.free_vars` all pattern-match type terms structurally.
+
+Until the elaborator lands in Phase 1a, today's `TypeChecker` and the Phase 0 adapter (§9.3) serve as the untrusted front end, as before. Both engines (`TypeChecker` and `TypeSystem.Infer`) retire when the elaborator reaches parity on the corpus. Their inferred types survive only as *suggested* signatures during migration (`liquid-types.md` §13).
 
 ### 9.2 Core Lint
 
@@ -2292,6 +2298,7 @@ For every mechanism: soundness assumption, trusted component, runtime representa
 | Q32 | Module-qualified runtime tags for records (§4.1): a representation change visible to Erlang code | open | qualify, and give Erlang callers an accessor instead of bare-tag matching |
 | Q33 | Issuer keys and availability: where the MAC key lives, how it rotates, and what sealed decoding does when the issuer is down (§4.6) | open | key held by the issuer process only; decoding fails closed |
 | Q34 | Surface syntax of the `(unreachable)` marker (§11.3) | open | a form that is itself an obligation `false` |
+| Q35–Q40 | The type system: required signatures, local `let` generalization, surface quotients, definitional equivalences, grades, `Float` discreteness | open | see `liquid-types.md` §14 |
 
 ---
 
@@ -2326,7 +2333,7 @@ Before Phase 1a the square commutes almost by construction, since the refined el
 |---|---|---|---|
 | **0** | Foundation | the written Core spec (§4 as a standalone document), including the full type algebra; canonical codec; reference evaluator with pure and scripted handlers; Core Lint; the typed-AST-to-Core adapter; differential harness; parser round-trip tests; the defect fixes marked "keep, Phase 0" in §21.3 | — |
 | **2.1** | Refinements, first step | `Int`/`Bool`/`List`, primitive specs, branch facts, Z3, diagnostics; C1–C7, C9–C11, C13, C19, C20 (C8 needs `Dyn` from 1a; C12 needs 1b); runs on today's emitters through the gated bridge (§21.1) | 0, with P0-4, P0-10, P0-14 |
-| **1a** | The type algebra in Core | `Dyn` replaces `:any`; brands, opacity and **static** sealing; row evidence (fixes D24); `crash` as an effect and `try` as its handler; typed receive by decoding; engines merged, HM elaborating directly to Core | 0 |
+| **1a** | The type algebra in Core | `Dyn` replaces `:any`; brands, opacity and **static** sealing; row evidence (fixes D24); `crash` as an effect and `try` as its handler; typed receive by decoding; **a bidirectional elaborator with required signatures replaces HM and `Infer`** (`liquid-types.md` §8, §9); Core version 1 with kind `Prop` | 0 |
 | **2.2** | Refinements over records and sums | branded records, sums, enums in the logic; row selectors | 1a, 2.1 |
 | **2.3** | Measures | §12 | 2.2 |
 | **3** | Library | the method of §16.1; **runtime authentication** for sealed library types (issuer keys, MAC chains); authority, phases, transitions, budgets; reflection; **the capability demo** | 2.2 |
