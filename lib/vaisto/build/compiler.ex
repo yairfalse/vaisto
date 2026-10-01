@@ -141,8 +141,17 @@ defmodule Vaisto.Build.Compiler do
       end
 
     TypeChecker.primitives()
-    |> Map.merge(auto_import_env)
-    |> Map.merge(import_env)
+    |> merge_env(auto_import_env)
+    |> merge_env(import_env)
+  end
+
+  # Imported class and instance registries extend the built-in ones. A plain
+  # merge would replace them, and Show, Eq and the numeric classes with them.
+  defp merge_env(env, imported) do
+    Map.merge(env, imported, fn
+      key, base, extra when key in [:__classes__, :__instances__] -> Map.merge(base, extra)
+      _key, _base, extra -> extra
+    end)
   end
 
   defp typecheck(ast, env, source) do

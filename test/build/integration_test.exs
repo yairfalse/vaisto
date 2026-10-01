@@ -140,6 +140,35 @@ defmodule Vaisto.Build.IntegrationTest do
 
       assert {:error, :circular_dependency} = DependencyResolver.topological_sort(graph)
     end
+
+    # An import extends the importer's environment; it must not replace the
+    # built-in class instances. Spec: liquid-vaisto-rfc.md §21.3, P0-8
+    # ("`(show 1)` still dispatches to the Show instance after an import").
+    test "built-in classes still dispatch after an import", %{src_dir: src_dir, build_dir: build_dir} do
+      File.write!(Path.join(src_dir, "ImpBase.va"), """
+      (ns ImpBase)
+      (defn base [] :int 21)
+      """)
+
+      File.write!(Path.join(src_dir, "ImpUser.va"), """
+      (ns ImpUser)
+      (import ImpBase)
+      (defn total [] :int (+ (ImpBase/base) 21))
+      (defn shown [] :string (show 1))
+      (defn less [] :bool (< 1 2))
+      """)
+
+      assert {:ok, _results} = Vaisto.Build.build(src_dir, output_dir: build_dir)
+
+      for mod <- [ImpBase, ImpUser] do
+        beam = File.read!(Path.join(build_dir, "#{mod}.beam"))
+        {:module, ^mod} = :code.load_binary(mod, ~c"#{mod}.beam", beam)
+      end
+
+      assert apply(ImpUser, :total, []) == 42
+      assert apply(ImpUser, :shown, []) == "1"
+      assert apply(ImpUser, :less, []) == true
+    end
   end
 
   describe "module naming" do
