@@ -2,6 +2,13 @@
   "system": "Vaisto LSP Server",
   "version": "0.1.0",
   "protocol": "JSON-RPC 2.0 (Language Server Protocol)",
+  "contract_sources": {
+    "LSP_3_17": "https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/",
+    "JSON_RPC_2_0": "https://www.jsonrpc.org/specification",
+    "README": "README.md#Editor-support-(VS-Code) — advertises hover, diagnostics, symbols",
+    "CLAUDE": "CLAUDE.md (architecture reference; type checker behavior backs diagnostics)"
+  },
+  "annotation_notes": "Every case carries a spec_source field naming the contract anchor it derives from. Cases without a clear source carry spec_source: null and a needs_triage note — those should either get a Vaisto-side spec written or be deleted as code-derived.",
   "test_cases": [
     {
       "id": "POS-001",
@@ -12,7 +19,8 @@
       ],
       "expect_response_id": 1,
       "expect_result_keys": ["capabilities", "serverInfo"],
-      "expect_capability": "hoverProvider"
+      "expect_capability": "hoverProvider",
+      "spec_source": "LSP 3.17 §initialize (response must include `capabilities` and `serverInfo`)"
     },
     {
       "id": "POS-002",
@@ -24,7 +32,8 @@
         {"method": "shutdown", "id": 2, "params": null}
       ],
       "expect_response_id": 2,
-      "expect_result": null
+      "expect_result": null,
+      "spec_source": "LSP 3.17 §shutdown (`The result returned is null`)"
     },
     {
       "id": "POS-003",
@@ -36,7 +45,8 @@
         {"method": "textDocument/didOpen", "params": {"textDocument": {"uri": "file:///tmp/test.va", "languageId": "vaisto", "version": 1, "text": "(defn add [x :int y :int] :int (+ x y))"}}}
       ],
       "expect_notification": "textDocument/publishDiagnostics",
-      "expect_diagnostics_count": 0
+      "expect_diagnostics_count": 0,
+      "spec_source": "LSP 3.17 §textDocument_didOpen + §textDocument_publishDiagnostics — server publishes diagnostics on open; valid document → empty diagnostics array"
     },
     {
       "id": "POS-004",
@@ -48,7 +58,8 @@
         {"method": "textDocument/didOpen", "params": {"textDocument": {"uri": "file:///tmp/bad.va", "languageId": "vaisto", "version": 1, "text": "(defn broken [x :int] :string x)"}}}
       ],
       "expect_notification": "textDocument/publishDiagnostics",
-      "expect_diagnostics_min": 1
+      "expect_diagnostics_min": 1,
+      "spec_source": "LSP 3.17 §textDocument_publishDiagnostics + CLAUDE.md#Structured-Error-System — type mismatch between declared `:string` return and `:int` body must surface as a diagnostic"
     },
     {
       "id": "POS-005",
@@ -60,7 +71,8 @@
         {"method": "textDocument/didOpen", "params": {"textDocument": {"uri": "file:///tmp/parse_err.va", "languageId": "vaisto", "version": 1, "text": "(defn oops [x"}}}
       ],
       "expect_notification": "textDocument/publishDiagnostics",
-      "expect_diagnostics_min": 1
+      "expect_diagnostics_min": 1,
+      "spec_source": "LSP 3.17 §textDocument_publishDiagnostics + CLAUDE.md#Error-Handling — Parser raises on syntax errors; LSP must catch and surface as diagnostics"
     },
     {
       "id": "POS-006",
@@ -74,7 +86,8 @@
       ],
       "expect_notification": "textDocument/publishDiagnostics",
       "expect_diagnostics_count": 0,
-      "expect_notification_uri": "file:///tmp/close.va"
+      "expect_notification_uri": "file:///tmp/close.va",
+      "spec_source": "LSP 3.17 §textDocument_didClose (`a server should clear them by sending an empty array`)"
     },
     {
       "id": "POS-007",
@@ -87,7 +100,8 @@
         {"method": "textDocument/hover", "id": 2, "params": {"textDocument": {"uri": "file:///tmp/hover.va"}, "position": {"line": 0, "character": 6}}}
       ],
       "expect_response_id": 2,
-      "expect_result_not_null": true
+      "expect_result_not_null": true,
+      "spec_source": "LSP 3.17 §textDocument_hover + README.md#Editor-support (`Hover  Mouse over  Shows type: (Int, Int) -> Int`)"
     },
     {
       "id": "POS-008",
@@ -101,7 +115,8 @@
       ],
       "expect_response_id": 2,
       "expect_result_is_list": true,
-      "expect_result_min_length": 2
+      "expect_result_min_length": 2,
+      "spec_source": "LSP 3.17 §textDocument_documentSymbol + README.md#Editor-support (`Symbols  Cmd+Shift+O  Jump to functions, types, processes`)"
     },
     {
       "id": "POS-009",
@@ -114,7 +129,8 @@
         {"method": "textDocument/completion", "id": 2, "params": {"textDocument": {"uri": "file:///tmp/comp.va"}, "position": {"line": 1, "character": 2}}}
       ],
       "expect_response_id": 2,
-      "expect_result_not_null": true
+      "expect_result_not_null": true,
+      "spec_source": "LSP 3.17 §textDocument_completion (response is `CompletionItem[] | CompletionList | null`)"
     },
     {
       "id": "POS-010",
@@ -127,7 +143,8 @@
         {"method": "textDocument/didChange", "params": {"textDocument": {"uri": "file:///tmp/change.va", "version": 2}, "contentChanges": [{"text": "(defn add [x :int y :int] :string (+ x y))"}]}}
       ],
       "expect_notification": "textDocument/publishDiagnostics",
-      "expect_diagnostics_min": 1
+      "expect_diagnostics_min": 1,
+      "spec_source": "LSP 3.17 §textDocument_didChange + §textDocument_publishDiagnostics — re-validation on change must surface new diagnostics"
     },
     {
       "id": "POS-011",
@@ -139,7 +156,8 @@
         {"method": "textDocument/didOpen", "params": {"textDocument": {"uri": "file:///tmp/def.va", "languageId": "vaisto", "version": 1, "text": "(defn double [x :int] :int (* x 2))"}}},
         {"method": "textDocument/definition", "id": 2, "params": {"textDocument": {"uri": "file:///tmp/def.va"}, "position": {"line": 0, "character": 33}}}
       ],
-      "expect_response_id": 2
+      "expect_response_id": 2,
+      "spec_source": "LSP 3.17 §textDocument_definition (response is `Location | Location[] | LocationLink[] | null`)"
     },
     {
       "id": "POS-012",
@@ -151,7 +169,8 @@
         {"method": "textDocument/didOpen", "params": {"textDocument": {"uri": "file:///tmp/sig.va", "languageId": "vaisto", "version": 1, "text": "(defn add [x :int y :int] :int (+ x y))\n(add "}}},
         {"method": "textDocument/signatureHelp", "id": 2, "params": {"textDocument": {"uri": "file:///tmp/sig.va"}, "position": {"line": 1, "character": 5}}}
       ],
-      "expect_response_id": 2
+      "expect_response_id": 2,
+      "spec_source": "LSP 3.17 §textDocument_signatureHelp (response is `SignatureHelp | null`)"
     },
     {
       "id": "POS-013",
@@ -164,7 +183,8 @@
         {"method": "textDocument/references", "id": 2, "params": {"textDocument": {"uri": "file:///tmp/ref.va"}, "position": {"line": 0, "character": 6}}}
       ],
       "expect_response_id": 2,
-      "expect_result_is_list": true
+      "expect_result_is_list": true,
+      "spec_source": "LSP 3.17 §textDocument_references (response is `Location[] | null`)"
     },
     {
       "id": "POS-014",
@@ -176,7 +196,8 @@
         {"method": "textDocument/didOpen", "params": {"textDocument": {"uri": "file:///tmp/ren.va", "languageId": "vaisto", "version": 1, "text": "(defn double [x :int] :int (* x 2))"}}},
         {"method": "textDocument/prepareRename", "id": 2, "params": {"textDocument": {"uri": "file:///tmp/ren.va"}, "position": {"line": 0, "character": 6}}}
       ],
-      "expect_response_id": 2
+      "expect_response_id": 2,
+      "spec_source": "LSP 3.17 §textDocument_prepareRename (response is `Range | { range, placeholder } | { defaultBehavior } | null`)"
     },
     {
       "id": "POS-015",
@@ -188,7 +209,8 @@
         {"method": "textDocument/didOpen", "params": {"textDocument": {"uri": "file:///tmp/ren2.va", "languageId": "vaisto", "version": 1, "text": "(defn double [x :int] :int (* x 2))\n(double 5)"}}},
         {"method": "textDocument/rename", "id": 2, "params": {"textDocument": {"uri": "file:///tmp/ren2.va"}, "position": {"line": 0, "character": 6}, "newName": "twice"}}
       ],
-      "expect_response_id": 2
+      "expect_response_id": 2,
+      "spec_source": "LSP 3.17 §textDocument_rename (response is `WorkspaceEdit | null`)"
     },
     {
       "id": "POS-016",
@@ -198,7 +220,8 @@
         {"method": "initialize", "id": 1, "params": {"processId": null, "rootUri": "file:///tmp/lsp_test", "capabilities": {}}}
       ],
       "expect_response_id": 1,
-      "expect_capabilities": ["hoverProvider", "definitionProvider", "documentSymbolProvider", "completionProvider", "signatureHelpProvider", "referencesProvider", "renameProvider"]
+      "expect_capabilities": ["hoverProvider", "definitionProvider", "documentSymbolProvider", "completionProvider", "signatureHelpProvider", "referencesProvider", "renameProvider"],
+      "spec_source": "LSP 3.17 §initialize#ServerCapabilities + README.md#Status (`LSP server (hover, diagnostics, symbols)`) + README.md#Editor-support (Hover/Diagnostics/Symbols table)"
     },
     {
       "id": "POS-017",
@@ -210,7 +233,8 @@
         {"method": "textDocument/hover", "id": 2, "params": {"textDocument": {"uri": "file:///tmp/nonexistent.va"}, "position": {"line": 0, "character": 0}}}
       ],
       "expect_response_id": 2,
-      "expect_result": null
+      "expect_result": null,
+      "spec_source": "LSP 3.17 §textDocument_hover (`The result of a hover request. … null indicates no information available`)"
     },
     {
       "id": "POS-018",
@@ -224,7 +248,8 @@
       ],
       "expect_response_id": 2,
       "expect_result_is_list": true,
-      "expect_result_min_length": 3
+      "expect_result_min_length": 3,
+      "spec_source": "LSP 3.17 §textDocument_documentSymbol + README.md#Editor-support (`Jump to functions, types, processes` — all three top-level forms must appear as symbols)"
     },
 
     {
@@ -237,7 +262,8 @@
         {"method": "textDocument/bogus", "id": 2, "params": {}}
       ],
       "expect_response_id": 2,
-      "expect_error_code": -32601
+      "expect_error_code": -32601,
+      "spec_source": "JSON-RPC 2.0 §5.1 (`-32601  Method not found`) — LSP inherits the standard JSON-RPC error codes"
     },
     {
       "id": "NEG-002",
@@ -250,7 +276,8 @@
         {"method": "textDocument/hover", "id": 2, "params": {"textDocument": {"uri": "file:///tmp/ws.va"}, "position": {"line": 0, "character": 0}}}
       ],
       "expect_response_id": 2,
-      "expect_result": null
+      "expect_result": null,
+      "spec_source": "LSP 3.17 §textDocument_hover (`null indicates no information available`)"
     },
     {
       "id": "NEG-003",
@@ -263,7 +290,8 @@
         {"method": "textDocument/definition", "id": 2, "params": {"textDocument": {"uri": "file:///tmp/nodef.va"}, "position": {"line": 0, "character": 0}}}
       ],
       "expect_response_id": 2,
-      "expect_result": null
+      "expect_result": null,
+      "spec_source": "LSP 3.17 §textDocument_definition (response may be `null` when no definition is found)"
     },
     {
       "id": "NEG-004",
@@ -276,7 +304,8 @@
         {"method": "textDocument/prepareRename", "id": 2, "params": {"textDocument": {"uri": "file:///tmp/noname.va"}, "position": {"line": 0, "character": 0}}}
       ],
       "expect_response_id": 2,
-      "expect_result": null
+      "expect_result": null,
+      "spec_source": "LSP 3.17 §textDocument_prepareRename (`null indicates the symbol cannot be renamed at the requested location`)"
     },
     {
       "id": "NEG-006",
@@ -289,7 +318,8 @@
         {"method": "textDocument/prepareRename", "id": 2, "params": {"textDocument": {"uri": "file:///tmp/numlit.va"}, "position": {"line": 0, "character": 3}}}
       ],
       "expect_response_id": 2,
-      "expect_result": null
+      "expect_result": null,
+      "spec_source": "LSP 3.17 §textDocument_prepareRename (literals are not renameable symbols)"
     },
     {
       "id": "NEG-005",
@@ -302,7 +332,9 @@
       ],
       "expect_response_id": 2,
       "expect_result_is_list": true,
-      "expect_result_length": 0
+      "expect_result_length": 0,
+      "spec_source": null,
+      "needs_triage": "LSP spec accepts `null | CompletionItem[] | CompletionList` — choosing empty array (vs null) for unopened doc is an implementation choice not pinned by spec"
     },
 
     {
@@ -319,7 +351,8 @@
         {"method": "shutdown", "id": 3, "params": null}
       ],
       "expect_response_id": 3,
-      "expect_result": null
+      "expect_result": null,
+      "spec_source": "LSP 3.17 §lifeCycleMessages — composite assertion that the standard lifecycle proceeds without protocol violations"
     },
     {
       "id": "SYS-002",
@@ -334,7 +367,8 @@
         {"method": "textDocument/hover", "id": 3, "params": {"textDocument": {"uri": "file:///tmp/b.va"}, "position": {"line": 0, "character": 6}}}
       ],
       "expect_response_id": 3,
-      "expect_result_not_null": true
+      "expect_result_not_null": true,
+      "spec_source": "LSP 3.17 §textDocument_didOpen — server tracks one virtual document per open uri; multi-doc state must be isolated per uri"
     },
     {
       "id": "SYS-003",
@@ -347,7 +381,8 @@
         {"method": "textDocument/didChange", "params": {"textDocument": {"uri": "file:///tmp/fix.va", "version": 2}, "contentChanges": [{"text": "(defn good [x :int] :int x)"}]}}
       ],
       "expect_notification": "textDocument/publishDiagnostics",
-      "expect_diagnostics_count": 0
+      "expect_diagnostics_count": 0,
+      "spec_source": "LSP 3.17 §textDocument_publishDiagnostics — server must publish empty diagnostics when prior errors are fixed (otherwise stale diagnostics stay in the editor)"
     },
     {
       "id": "SYS-004",
@@ -358,7 +393,8 @@
         {"method": "initialized", "params": {}}
       ],
       "expect_response_id": 1,
-      "expect_no_extra_responses": true
+      "expect_no_extra_responses": true,
+      "spec_source": "LSP 3.17 §initialized + JSON-RPC 2.0 §4.1 (notifications never elicit a response)"
     },
     {
       "id": "SYS-005",
@@ -370,7 +406,8 @@
         {"method": "$/cancelRequest", "params": {"id": 999}}
       ],
       "expect_response_id": 1,
-      "expect_no_crash": true
+      "expect_no_crash": true,
+      "spec_source": "LSP 3.17 §dollarRequests (`$/` methods can be safely ignored if not supported`) + JSON-RPC 2.0 §4.1 (notifications never elicit a response)"
     },
 
     {
@@ -384,7 +421,9 @@
       ],
       "expect_notification": "textDocument/publishDiagnostics",
       "expect_diagnostics_min": 1,
-      "expect_diagnostic_source": "vaisto"
+      "expect_diagnostic_source": "vaisto",
+      "spec_source": null,
+      "needs_triage": "the literal value `\"vaisto\"` for `Diagnostic.source` is a Vaisto-side convention not documented in README/CLAUDE.md/AGENTS.md; the LSP spec only requires *some* string"
     },
     {
       "id": "INT-002",
@@ -397,7 +436,8 @@
       ],
       "expect_notification": "textDocument/publishDiagnostics",
       "expect_diagnostics_min": 1,
-      "expect_valid_ranges": true
+      "expect_valid_ranges": true,
+      "spec_source": "LSP 3.17 §Position (`Position in a text document expressed as zero-based line and zero-based character offset`) + §Range"
     },
     {
       "id": "INT-003",
@@ -409,7 +449,8 @@
         {"method": "textDocument/didOpen", "params": {"textDocument": {"uri": "file:///tmp/adt.va", "languageId": "vaisto", "version": 1, "text": "(deftype Maybe (Just v) (Nothing))\n(defn unwrap [m :Maybe] :int\n  (match m\n    [(Just v) v]\n    [(Nothing) 0]))"}}}
       ],
       "expect_notification": "textDocument/publishDiagnostics",
-      "expect_diagnostics_count": 0
+      "expect_diagnostics_count": 0,
+      "spec_source": "CLAUDE.md#Language-Features (`(match result [(Ok v) v] [(Err e) default])`) + §Design-Decisions (`Exhaustiveness checking`) — exhaustive ADT match must produce zero diagnostics"
     },
     {
       "id": "INT-004",
@@ -421,7 +462,8 @@
         {"method": "textDocument/didOpen", "params": {"textDocument": {"uri": "file:///tmp/adt2.va", "languageId": "vaisto", "version": 1, "text": "(deftype Color (Red) (Green) (Blue))"}}}
       ],
       "expect_notification": "textDocument/publishDiagnostics",
-      "expect_diagnostics_count": 0
+      "expect_diagnostics_count": 0,
+      "spec_source": "CLAUDE.md#Language-Features (`(deftype Color (Red) (Green) deriving [Eq Show])`)"
     },
 
     {
@@ -437,7 +479,9 @@
         "repeat": 20,
         "template": {"method": "textDocument/didChange", "params": {"textDocument": {"uri": "file:///tmp/rapid.va", "version": "INDEX"}, "contentChanges": [{"text": "(+ 1 INDEX)"}]}}
       },
-      "expect_no_crash": true
+      "expect_no_crash": true,
+      "spec_source": null,
+      "needs_triage": "20-event burst is a reasonable smoke test but no documented throughput contract"
     },
     {
       "id": "LOAD-002",
@@ -451,7 +495,9 @@
         "repeat": 10,
         "template": {"method": "textDocument/didOpen", "params": {"textDocument": {"uri": "file:///tmp/doc_INDEX.va", "languageId": "vaisto", "version": 1, "text": "(defn f_INDEX [x :int] :int (+ x INDEX))"}}}
       },
-      "expect_no_crash": true
+      "expect_no_crash": true,
+      "spec_source": null,
+      "needs_triage": "10-document concurrent open is a reasonable smoke test but no documented capacity contract"
     },
 
     {
@@ -462,7 +508,9 @@
         {"method": "initialize", "id": 1, "params": {"processId": null, "rootUri": "file:///tmp/lsp_test", "capabilities": {}}}
       ],
       "expect_response_id": 1,
-      "max_response_ms": 500
+      "max_response_ms": 500,
+      "spec_source": null,
+      "needs_triage": "500ms initialize budget is a reasonable smoke threshold but not pinned in any spec"
     },
     {
       "id": "PERF-002",
@@ -475,7 +523,9 @@
         {"method": "textDocument/hover", "id": 2, "params": {"textDocument": {"uri": "file:///tmp/perf.va"}, "position": {"line": 0, "character": 6}}}
       ],
       "expect_response_id": 2,
-      "max_response_ms": 1000
+      "max_response_ms": 1000,
+      "spec_source": null,
+      "needs_triage": "1s hover budget is a reasonable smoke threshold but not pinned in any spec"
     },
 
     {
@@ -487,7 +537,8 @@
         {"method": "initialized", "params": {}},
         {"method": "textDocument/didOpen", "params": {"textDocument": {"uri": "file:///tmp/empty.va", "languageId": "vaisto", "version": 1, "text": ""}}}
       ],
-      "expect_no_crash": true
+      "expect_no_crash": true,
+      "spec_source": "LSP 3.17 §textDocument_didOpen (`text` is the document content, may be empty) — server must accept and not crash"
     },
     {
       "id": "ABN-002",
@@ -498,7 +549,9 @@
         {"method": "initialized", "params": {}},
         {"method": "textDocument/didOpen", "params": {"textDocument": {"uri": "file:///tmp/huge.va", "languageId": "vaisto", "version": 1, "text": "GENERATE_REPEATED:(+ 1 1) :2000"}}}
       ],
-      "expect_no_crash": true
+      "expect_no_crash": true,
+      "spec_source": null,
+      "needs_triage": "10KB single-line document is graceful-handling territory; no documented size contract"
     },
     {
       "id": "ABN-003",
@@ -509,7 +562,8 @@
         {"method": "initialized", "params": {}},
         {"method": "textDocument/didOpen", "params": {"textDocument": {"uri": "file:///tmp/unicode.va", "languageId": "vaisto", "version": 1, "text": "; 日本語コメント\n(defn add [x :int y :int] :int (+ x y))"}}}
       ],
-      "expect_no_crash": true
+      "expect_no_crash": true,
+      "spec_source": "CLAUDE.md#Type-Representations (`:string` — UTF-8 by BEAM convention) — UTF-8 source must not crash the parser"
     },
     {
       "id": "ABN-004",
@@ -522,7 +576,8 @@
         {"method": "textDocument/hover", "id": 2, "params": {"textDocument": {"uri": "file:///tmp/oob.va"}, "position": {"line": 999, "character": 999}}}
       ],
       "expect_response_id": 2,
-      "expect_no_crash": true
+      "expect_no_crash": true,
+      "spec_source": "LSP 3.17 §textDocument_hover (out-of-range positions should return null, not crash)"
     },
     {
       "id": "ABN-005",
@@ -533,7 +588,9 @@
         {"method": "initialized", "params": {}},
         {"method": "textDocument/didOpen", "params": {"textDocument": {"uri": "file:///tmp/deep.va", "languageId": "vaisto", "version": 1, "text": "(+ 1 (+ 1 (+ 1 (+ 1 (+ 1 (+ 1 (+ 1 (+ 1 (+ 1 (+ 1 (+ 1 (+ 1 (+ 1 (+ 1 (+ 1 (+ 1 (+ 1 (+ 1 (+ 1 (+ 1 0)))))))))))))))))))"}}}
       ],
-      "expect_no_crash": true
+      "expect_no_crash": true,
+      "spec_source": null,
+      "needs_triage": "deeply-nested-expression handling is graceful-handling territory; no documented depth contract"
     },
     {
       "id": "ABN-006",
@@ -544,7 +601,8 @@
         {"method": "initialized", "params": {}},
         {"method": "textDocument/didOpen", "params": {"textDocument": {"uri": "file:///tmp/bin.va", "languageId": "vaisto", "version": 1, "text": "\u0000\u0001\u0002\u0003"}}}
       ],
-      "expect_no_crash": true
+      "expect_no_crash": true,
+      "spec_source": "CLAUDE.md#Error-Handling (`Parser raises on syntax errors`) — binary garbage must produce a parse error or empty diagnostics, never crash the LSP"
     },
     {
       "id": "ABN-007",
@@ -555,7 +613,8 @@
         {"method": "initialized", "params": {}},
         {"method": "textDocument/didChange", "params": {"textDocument": {"uri": "file:///tmp/never_opened.va", "version": 2}, "contentChanges": [{"text": "(+ 1 2)"}]}}
       ],
-      "expect_no_crash": true
+      "expect_no_crash": true,
+      "spec_source": "LSP 3.17 §textDocument_didChange (`change events MUST be sent in document order`) — server may not crash on out-of-order changes from a misbehaving client"
     },
     {
       "id": "ABN-008",
@@ -567,7 +626,8 @@
         {"method": "textDocument/rename", "id": 2, "params": {"textDocument": {"uri": "file:///tmp/no_such.va"}, "position": {"line": 0, "character": 0}, "newName": "x"}}
       ],
       "expect_response_id": 2,
-      "expect_no_crash": true
+      "expect_no_crash": true,
+      "spec_source": "LSP 3.17 §textDocument_rename (response may be `null` when the document is unknown; server must not crash)"
     },
     {
       "id": "ABN-009",
@@ -578,7 +638,8 @@
         {"method": "initialized", "params": {}},
         {"method": "textDocument/didSave", "params": {"textDocument": {"uri": "file:///tmp/unsaved.va"}}}
       ],
-      "expect_no_crash": true
+      "expect_no_crash": true,
+      "spec_source": "LSP 3.17 §textDocument_didSave (server must accept the notification gracefully even if it never observed an open)"
     }
   ]
 }
