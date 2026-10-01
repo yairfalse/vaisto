@@ -1,109 +1,87 @@
 # Vaisto
 
-**Finnish for "intuition"** — a typed substrate for structurally accountable
-LLM systems.
+**Finnish for "intuition"**: a typed language on the BEAM, and a substrate for
+structurally accountable LLM systems.
 
-Vaisto treats prompts, task contracts, and LLM pipelines as typed artifacts.
-The goal is not to prove that a model will behave deterministically. It is to
-make the pieces around that model accountable: the prompt text, the input
-schema, the output schema, the contract, the pipeline, and the runtime evidence
-produced by each execution.
+Vaisto has three layers, each built on the one below:
+
+1. **A statically typed Scheme-like language** that compiles to BEAM bytecode:
+   S-expression syntax, Hindley-Milner type inference, algebraic data types,
+   type classes, typed processes, and Erlang interop.
+2. **Task contracts**: prompts and LLM pipelines as typed artifacts. A
+   pipeline that extracts a type the prompt does not promise does not compile.
+3. **Liquid Vaisto**: a small semantic core that says what every Vaisto
+   program means, with a reference evaluator, a trusted checker and a
+   differential harness. BEAM becomes one implementation of it, and
+   refinement types are the next step.
 
 > Prompts are prose. Vaisto makes them structurally accountable.
 
-## The Problem
+Vaisto is early. The language, both backends, the LSP server and the prompt
+checks work today; the semantic core has its foundation in place. Every
+known gap is listed under [Status and known gaps](#status-and-known-gaps).
+
+## Contents
+
+- [Why Vaisto](#why-vaisto)
+- [Accountable prompts, today](#accountable-prompts-today)
+- [The language](#the-language)
+- [Task contracts](#task-contracts)
+- [Liquid Vaisto: a semantic core](#liquid-vaisto-a-semantic-core)
+- [Architecture](#architecture)
+- [Getting started](#getting-started)
+- [Editor support](#editor-support)
+- [Development](#development)
+- [Status and known gaps](#status-and-known-gaps)
+- [Documentation](#documentation)
+- [Related work](#related-work)
+
+## Why Vaisto
 
 LLM systems drift in ways ordinary software tools do not catch.
 
 A prompt changes but the downstream parser still expects the old shape. A model
 is swapped and starts omitting fields. A retrieval step is "improved" and the
 answerer no longer receives the evidence the product depends on. A pipeline
-written against one provider API becomes fossilized when the ecosystem changes.
+written against one provider's API fossilizes when the ecosystem moves.
 
-Today these failures usually appear late: in production, in eval dashboards, or
-in a customer-visible malformed response. The code did not necessarily rot. The
+These failures usually appear late: in production, in eval dashboards, or in a
+customer-visible malformed response. The code did not necessarily rot. The
 abstractions did.
 
-Durable software usually survives churn by separating **what must hold** from
-**how it is executed**:
+Durable software survives churn by separating **what must hold** from **how it
+is executed**. SQL separates a query from the plan the database chooses. POSIX
+separates a program's contract with the operating system from kernel
+internals. LLM systems need the same separation, so Vaisto is built around two
+languages:
 
-- SQL separates a query from the physical plan chosen by the database.
-- POSIX separates a program's operating-system contract from kernel internals.
-- Network APIs separate communication intent from the hardware below.
-
-LLM systems need the same kind of separation.
-
-## The Vaisto Bet
-
-Vaisto is built around a double DSL:
-
-1. **Contract DSL** — the durable obligation: input type, output type, budget,
+1. **Contracts**: the durable obligation. Input type, output type, budget,
    quality target, policy, and failure semantics.
-2. **Pipeline DSL** — one executable strategy for satisfying that obligation:
-   retrieve, generate, extract, verify, branch, escalate, and call tools.
+2. **Pipelines**: one executable strategy for meeting that obligation, by
+   retrieving, generating, extracting, verifying, branching, escalating and
+   calling tools.
 
-The contract should outlive model churn. Pipelines, prompts, model bindings,
-retrievers, and tools can evolve underneath it.
+The contract should outlive model churn; pipelines, prompts, model bindings,
+retrievers and tools evolve underneath it.
 
 ```text
-Contract DSL  -> typed obligation
-Pipeline DSL  -> typed implementation
-Compiler      -> structural satisfaction
-Optimizer     -> binding choice
-Runtime       -> stochastic agreement
+Contract   -> typed obligation
+Pipeline   -> typed implementation
+Compiler   -> structural satisfaction
+Optimizer  -> binding choice
+Runtime    -> stochastic agreement
 ```
 
-The SQL metaphor is useful but not exact. SQL optimizers can rely on many
-algebraic equivalences. Vaisto cannot honestly say that two prompts or two
-models are semantically equivalent. Vaisto replaces algebraic equivalence with:
+The SQL analogy is useful but not exact. A SQL optimizer relies on algebraic
+equivalences; Vaisto cannot honestly claim that two prompts or two models are
+equivalent. It replaces algebraic equivalence with static types, structural
+prompt checks, declared contracts, typed failures, runtime provenance, and a
+history of empirical agreement.
 
-- static types
-- structural prompt accountability
-- declared contracts
-- typed failures
-- runtime provenance
-- eval and agreement history
-
-In short:
-
-> SQL made data work durable by separating declarative intent from physical
-> execution. Vaisto aims to do the same for LLM work, but replaces algebraic
-> equivalence with typed contracts plus empirical agreement.
-
-## What This Looks Like
+## Accountable prompts, today
 
 A prompt is not an anonymous string. It declares the input it may reference and
-the output it promises to produce:
-
-```scheme
-(deftype DocId [value :String])
-(deftype Question [text :String])
-(deftype CitedAnswer [text :String evidence (List DocId)])
-
-(defprompt answer-with-citations
-  :input  Question
-  :output CitedAnswer
-  :template """
-  Answer the question with citations.
-
-  Question: {text}
-
-  Return:
-  - text
-  - evidence
-  """)
-```
-
-That gives the compiler and editor something real to check:
-
-```text
-template placeholders must exist on the input type
-declared output fields can be checked against downstream consumers
-prompt/schema drift can become a compiler diagnostic
-```
-
-Today Vaisto already checks the important structural case: a pipeline cannot
-extract a type that the prompt's declared output does not satisfy.
+the output it promises:
 
 ```scheme
 (deftype DocId [value :String])
@@ -125,29 +103,208 @@ extract a type that the prompt's declared output does not satisfy.
   (generate :prompt answer-with-citations :extract Answer))
 ```
 
-If someone changes the prompt output type and drops `evidence`:
+If someone changes the prompt's output type and drops `evidence`:
 
 ```scheme
 (deftype CitedAnswer [text :String])
 ```
 
-Vaisto refuses to compile the pipeline:
+the pipeline no longer compiles:
 
 ```text
+$ vaistoc qa.va
 error: prompt output type mismatch
-  at line 6
-      (generate :prompt answer-with-citations :extract Answer)
+  at line 17
+      (generate :prompt answer-with-citations :extract Answer))
       ^ expected `Answer`, found `CitedAnswer`
-  note: prompt `answer-with-citations` output CitedAnswer
-        does not satisfy extract target Answer
-  note: missing field: evidence : (List DocId)
+  note: prompt `answer-with-citations` output CitedAnswer does not satisfy extract target Answer
+  note: missing field: evidence : List(:DocId)
 ```
 
-A silent prompt/schema failure becomes a compile-time error.
+A silent prompt/schema failure has become a compile-time error.
 
-## Contracts and Pipelines
+## The language
 
-The design direction is to make contracts first-class:
+Vaisto is a Lisp in syntax and an ML in its types. Programs are S-expressions,
+types are inferred, and the output is ordinary BEAM bytecode. There are no
+macros: the syntax stays small enough that types, tools and the editor can see
+everything. Every example below compiles and runs on both backends unless it
+says otherwise.
+
+### Functions and inference
+
+```scheme
+(defn square [x :int] :int (* x x))
+(defn twice [f x] (f (f x)))
+
+(defn main [] :int (twice square 3))   ; 81
+```
+
+Annotations are optional and can be mixed: `twice` is inferred as
+`(a -> a) -> a -> a`.
+
+### Algebraic data types and pattern matching
+
+```scheme
+(deftype Shape (Circle :float) (Rect :float :float))
+
+(defn area [s]
+  (match s
+    [(Circle r) (* 3.0 (* r r))]
+    [(Rect w h) (* w h)]))
+
+(defn main [] :float (+ (area (Circle 1.0)) (area (Rect 2.0 3.0))))   ; 9.0
+```
+
+A `match` on a sum type must cover every constructor:
+
+```text
+error: non-exhaustive pattern match
+  at line 4
+      (match (Circle s)
+      ^
+  note: match on `Shape` does not cover all variants
+  help: missing variants: Rect
+```
+
+### Records
+
+```scheme
+(deftype Point [x :int y :int])
+
+(defn main [] :int
+  (match (Point 3 4)
+    [(Point x y) (+ (* x x) (* y y))]))   ; 25
+```
+
+Fields can also be read with `(. p :x)`, which today compiles only on the Core
+Erlang backend (D12, below).
+
+### Lists, higher-order functions, and multi-clause definitions
+
+```scheme
+(defn main [] :int
+  (fold + 0 (map (fn [x] (* x x)) (filter (fn [x] (> x 2)) [1 2 3 4]))))   ; 25
+
+(defn len
+  [[] 0]
+  [[h | t] (+ 1 (len t))])
+```
+
+### Type classes
+
+Classes compile to dictionary passing. Instances can be written by hand or
+derived:
+
+```scheme
+(defclass Describe [a] (describe [x :a] :string))
+(instance Describe :int (describe [x] "an int"))
+(instance Describe :bool (describe [x] "a bool"))
+
+(deftype Color (Red) (Green) deriving [Eq Show])
+
+(defn main [] :string (++ (describe 42) (show (Red))))   ; "an intRed"
+```
+
+### Errors
+
+```scheme
+(defn safe-div [a :int b :int] :int
+  (try (div a b) [catch [:error e 0]]))
+
+(defn main [] :int (+ (safe-div 10 2) (safe-div 1 0)))   ; 5
+```
+
+`try` also takes an `[after ...]` clause.
+
+### Processes and typed PIDs
+
+A process declares its state and the messages it accepts. `spawn` returns a
+PID typed by the process, so sending it a message it does not accept is a
+compile error:
+
+```scheme
+(process counter 0
+  :increment (+ state 1)
+  :get state)
+
+(defn bump []
+  (let [pid (spawn counter 0)]
+    (! pid :log)))
+```
+
+```text
+error: invalid message type
+  at line 7
+        (! pid :log)))
+        ^
+  note: process `counter` does not accept `:log`
+  help: accepted messages: :increment, :get
+```
+
+`!!` sends without the check. Supervision is syntax as well:
+`(supervise :one_for_one (counter 0))`. From Elixir, `Vaisto.Runner` loads,
+spawns and talks to processes:
+
+```elixir
+{:ok, mod} = Vaisto.Runner.compile_and_load(source, :CounterApp)
+{:ok, pid} = Vaisto.Runner.spawn_process(mod, 0)
+Vaisto.Runner.send_msg(pid, :increment)   # 1
+```
+
+### Erlang interop
+
+```scheme
+(extern erlang:abs [:int] :int)
+
+(defn main [] :int (erlang:abs -42))   ; 42
+```
+
+### Modules and packages
+
+```scheme
+(ns Geometry)                 ; optional; checked against the file path
+(import Std.List)
+(import Std.List :as L)
+(Std.List/fold xs 0 +)        ; a qualified call
+```
+
+Module names come from file paths (`src/Vaisto/Lexer.va` is
+`Vaisto.Lexer`). `vaistoc build` compiles a directory in dependency order and
+writes an interface file (`.vsi`) for each module. A package is a directory
+with a `vaisto.toml`:
+
+```bash
+vaistoc init hello-world && cd hello-world && vaistoc build
+vaistoc add ../json-parser          # a local dependency
+```
+
+The standard library lives in `std/`: `List`, `Map`, `String`, `Math`, `IO`,
+`File`, `Json`, `Regex`, `Binary`, `State`, and a prelude.
+
+## Task contracts
+
+What is implemented today:
+
+- `defprompt`, a typed prompt with an input type, an output type and a
+  template;
+- `pipeline` and `generate`, which compose prompts into a typed pipeline;
+- the check above: a pipeline cannot extract a type its prompt's output does
+  not satisfy, reported with the missing fields;
+- two LLM providers, selected at runtime. `Vaisto.LLM.Mock`, the default,
+  returns canned responses for deterministic tests. `Vaisto.LLM.OpenAI` uses
+  structured outputs over `:httpc`, with no extra dependency:
+
+  ```elixir
+  Application.put_env(:vaisto, :llm, Vaisto.LLM.OpenAI)
+  System.put_env("OPENAI_API_KEY", "sk-...")
+  ```
+
+Task-contract forms compile on the Elixir backend only.
+
+The design goes further, and none of what follows is implemented yet.
+Contracts become first-class, and several pipelines can satisfy one contract
+with different strategies:
 
 ```scheme
 (defcontract legal-qa
@@ -155,27 +312,8 @@ The design direction is to make contracts first-class:
   :output CitedAnswer
   :quality {:min-conf 0.90}
   :budget {:cost 0.10 :latency 8s}
-  :failure {
-    :timeout retry
-    :malformed-extract retry
-    :low-confidence escalate
-  })
-```
+  :failure {:timeout retry :malformed-extract retry :low-confidence escalate})
 
-A pipeline then claims to satisfy the contract:
-
-```scheme
-(pipeline legal-qa-fast
-  :satisfies legal-qa
-  (retrieve :from legal-corpus :k 8)
-  (rerank :model auto :keep-top 3)
-  (generate :prompt answer-with-citations :extract CitedAnswer)
-  (verify :rule citation-check))
-```
-
-Another pipeline can satisfy the same contract with a different strategy:
-
-```scheme
 (pipeline legal-qa-careful
   :satisfies legal-qa
   (retrieve :from legal-corpus :k 20)
@@ -187,144 +325,155 @@ Another pipeline can satisfy the same contract with a different strategy:
     pass))
 ```
 
-The contract is the durable artifact. Pipelines are implementations. Bindings
-choose concrete models, tools, retrievers, and prompts. Runs produce evidence.
+Prompt lint makes writing a prompt feel like writing typed code with prose
+inside it:
+- placeholders autocomplete from the input type;
+- unknown placeholders are errors;
+- unused input fields and unmentioned output fields are warnings.
 
-## Prompt Accountability
+Lint is deliberately modest: it shows that a prompt is structurally aligned
+with its types and contract, not that it is good or truthful.
 
-Vaisto should make prompt writing feel like writing typed code with prose inside
-it.
+Each run produces an **agreement record**:
+- the contract, pipeline and binding;
+- whether extraction and verification passed;
+- cost, latency and confidence;
+- the provenance of the prompt, model and tool versions.
 
-The useful compiler and LSP loop is:
+That is the empirical counterpart to SQL's algebraic equivalence. Vaisto cannot
+prove two bindings equivalent, but it can record whether a binding meets its
+contract often enough, cheaply enough and safely enough.
 
-```text
-autocomplete for placeholders from the input type
-hover types inside prompt placeholders
-error on unknown placeholders
-warning on unused input fields
-warning on output fields not mentioned by the prompt
-warning when prompt text does not appear to account for contract requirements
+The full argument is in the
+[manifesto](docs/design/task-contracts-manifesto.md), and the eleven planned
+operators and the `Ctx` type are specified in the
+[task-contracts spec](docs/design/task-contracts-spec.md).
+
+## Liquid Vaisto: a semantic core
+
+Today the meaning of a Vaisto program is whatever its two backends do with it,
+and they do not always agree. Liquid Vaisto turns that around: Vaisto has a
+semantics, and BEAM implements it.
+
+The semantics is **Liquid Core**, a small typed language with four primitives:
+- values;
+- refinements (types with predicates, such as "a non-zero integer");
+- algebraic effects (sending, receiving and crashing are operations a handler
+  interprets);
+- evidence origin (where each fact a checker relies on came from).
+
+Everything else is library code over those four, among it type classes, rows,
+processes, contracts and authority. A program elaborates to Core:
+- a reference evaluator defines what it means;
+- a trusted checker, Core Lint, re-checks every elaboration;
+- a differential harness holds BEAM to the evaluator.
+
+The design, its algebra and its roadmap are in the
+[Liquid Vaisto RFC](docs/design/liquid-vaisto-rfc.md).
+
+### What exists
+
+Phase 0, the foundation, is in place:
+
+| Piece | Where | What it does |
+|---|---|---|
+| The Core specification | [`docs/design/liquid-core.md`](docs/design/liquid-core.md) | Normative: types, terms, evaluation, primitives, representations on BEAM, and the typing rules |
+| Canonical trees | `Vaisto.Liquid.Canonical` | Canonical S-expression bytes, SHA-256 digests that ignore metadata, and a readable form |
+| Reference evaluator | `Vaisto.Liquid.Eval` | The executable form of the specification |
+| Core Lint | `Vaisto.Liquid.Lint` | Checks Core and infers nothing: kinds, rows, exhaustiveness, guards, ground equality, unique binders |
+| Soundness tests | `test/liquid/soundness_test.exs` | On every run: 1,000 generated well-typed terms and 20,000 mutants. If Lint gives a term a type, it never goes wrong when evaluated |
+| Adapter | `Vaisto.Liquid.Adapter` | Today's typed AST to Core. Where HM left a type unknown it writes `Dyn`, so Lint names the place |
+| Differential harness | `Vaisto.Liquid.Harness` | Runs a program through the evaluator and both backends and compares outcomes |
+
+Run over the 133 programs in the test suite, the harness gave these verdicts
+when this was written:
+
+| Verdict | Programs | What it means |
+|---|---|---|
+| agree | 81 | the evaluator and both backends give the same result |
+| disagree | 2 | D11: a guarded `defn` that the Core Erlang backend cannot compile |
+| Lint rejects | 25 | programs HM accepted but left ill-typed, such as arithmetic on an unannotated parameter. This is the to-do list for the type checker |
+| outside the core so far | 20 | processes, `str`, and calls across modules |
+| rejected by HM | 5 | tests that expect a type error |
+
+### What comes next
+
+The next step fixes the backend disagreements the harness reports (D5, D11,
+D12) and the scoping bug D15. Then comes the first refinement step, checked
+with the Z3 solver:
+
+```scheme
+; design: not implemented yet
+(defn safe-div [x :int y {d :int | (!= d 0)}] :int (div x y))
+(defn clamp0 [x :int] {r :int | (>= r 0)} (if (< x 0) 0 x))
 ```
 
-This is intentionally modest. Vaisto should not claim that lint proves a prompt
-is good, truthful, or semantically complete. Prompt lint means:
+Calling `safe-div` with a divisor that might be zero becomes a compile error
+with a counterexample; a refined function's result is a fact its callers can
+use. Later phases bring effect rows and deterministic replay, sealed types and
+capabilities, and contracts as a library. The RFC's §21 has the order and the
+dependencies.
 
-> The prompt is structurally aligned with the input type, output type, and
-> contract it claims to serve.
-
-That leaves the hard stochastic questions to runtime verification, evals,
-calibration, and human escalation.
-
-## Runtime Accountability
-
-Each execution should produce an agreement record:
+## Architecture
 
 ```text
-contract: legal-qa
-pipeline: legal-qa-fast
-binding: selected model + retriever + verifier
-input shape: short legal question
-result:
-  extraction: ok
-  verification: passed
-  cost: 0.04
-  latency: 4.2s
-  confidence: 0.91
-  provenance: prompt version, model version, tool versions
+Source (.va) -> Parser -> AST -> TypeChecker (HM) -> typed AST -+-> CoreEmitter -> Core Erlang -> BEAM  (default)
+                                                                +-> Emitter     -> Elixir AST  -> BEAM
+                                                                |
+                                                                +-> Liquid Adapter -> Liquid Core
+                                                                       -> Core Lint (checks)
+                                                                       -> reference evaluator (means)
+                                                                       -> harness: evaluator vs both backends
 ```
 
-This is the empirical counterpart to SQL's algebraic equivalence. Vaisto cannot
-prove that a model binding is semantically identical to another. It can record
-whether a binding satisfies a contract often enough, cheaply enough, and safely
-enough for the deployment's policy.
+| Path | What lives there |
+|---|---|
+| `lib/vaisto/parser.ex` | S-expression parser; every AST node carries its location |
+| `lib/vaisto/type_checker.ex`, `type_system/` | Bidirectional HM checker, unification with row polymorphism, and an Algorithm W engine for lambdas |
+| `lib/vaisto/core_emitter.ex` | The Core Erlang backend, the default for the CLI and builds |
+| `lib/vaisto/emitter.ex` | The Elixir backend, the only one that compiles task contracts |
+| `lib/vaisto/errors.ex`, `error_formatter.ex` | Structured errors with spans and hints, rendered in Rust's style |
+| `lib/vaisto/build/`, `package/` | Multi-file builds, dependency order, `.vsi` interfaces, `vaisto.toml` |
+| `lib/vaisto/lsp/` | The language server |
+| `lib/vaisto/llm/` | LLM providers |
+| `lib/vaisto/liquid/` | Liquid Core: codec, evaluator, Lint, adapter, harness |
+| `std/` | The standard library, in Vaisto |
+| `src/Vaisto/` | A proof-of-concept compiler written in Vaisto ([ADR-002](docs/adr/002-compiler-implementation.md)); not the production compiler, and out of date |
 
-## Current Status
+## Getting started
 
-Vaisto is early, but the core language and compiler are real.
-
-Implemented today:
-
-- S-expression parser with multi-line heredocs
-- Hindley-Milner-style type checker
-- Algebraic data types, records, pattern matching, and type classes
-- `defprompt`, `pipeline`, and `generate`
-- Prompt-output compatibility checks for downstream extraction
-- Elixir backend for runnable task pipelines
-- Core Erlang backend for the general language subset
-- LSP server and VS Code extension
-- Mock LLM provider for deterministic tests
-- OpenAI provider via `:httpc` with structured outputs
-- Multi-file builds; `.vsi` interface files are written but not yet used to
-  type-check imports (see below)
-
-Known gaps, each reproduced against the current code (details and
-reproductions in the [Liquid Vaisto RFC](docs/design/liquid-vaisto-rfc.md),
-§1.12):
-
-- Cross-module calls are not type-checked yet: imported calls are typed `Any`.
-- The type checker accepts some ill-typed programs, for example a `let`
-  binding that leaks out of its scope, or a function declared `:int` that
-  returns a float.
-- The two backends disagree on a few constructs (`and`/`or` evaluation,
-  guarded `defn`, record field access, `let` scoping), and row-polymorphic
-  field access on a record crashes at runtime.
-- Record and sum-type annotations on function parameters do not resolve at
-  call sites.
-
-Design direction:
-
-- **Liquid Vaisto**: a small semantic core with refinement types, algebraic
-  effects and evidence origin, a reference evaluator as the executable
-  specification, and BEAM as its production implementation. See
-  [docs/design/liquid-vaisto-rfc.md](docs/design/liquid-vaisto-rfc.md).
-- first-class `defcontract`
-- `pipeline :satisfies contract`
-- prompt placeholder lint
-- contract-aware prompt lint
-- `Ctx` with payload, trace, budget, and provenance
-- typed failures and supervision semantics
-- `retrieve`, `rerank`, `extract`, `verify`, `tool`, `branch`, `map`,
-  `parallel`, `fold`, and `escalate`
-- model/tool catalog
-- `:model auto` binding
-- runtime agreement records
-- refinement types for logical contract checks, discharged with Z3
-
-For the full design argument, see
-[docs/design/task-contracts-manifesto.md](docs/design/task-contracts-manifesto.md),
-[docs/design/task-contracts-spec.md](docs/design/task-contracts-spec.md),
-and [docs/design/liquid-vaisto-rfc.md](docs/design/liquid-vaisto-rfc.md).
-
-## Quickstart
+You need Elixir `~> 1.15` and a matching Erlang/OTP. Vaisto depends only on
+`jason` and `toml`.
 
 ```bash
 git clone https://github.com/yairfalse/vaisto.git
 cd vaisto
 mix deps.get
 mix test
+mix escript.build        # builds ./vaistoc
 ```
 
-Build the CLI:
+The CLI:
 
 ```bash
-mix escript.build
-./vaistoc --eval "(+ 1 2)"
-./vaistoc build src/ -o build/
-./vaistoc repl
+./vaistoc file.va                     # compile to BEAM (Core Erlang backend)
+./vaistoc file.va -o build/File.beam  # choose the output
+./vaistoc file.va --backend elixir    # use the Elixir backend
+./vaistoc --eval "(+ 1 2)"            # evaluate an expression
+./vaistoc build src/ -o build/        # build a directory
+./vaistoc init my-lib                 # start a package
+./vaistoc repl                        # interactive REPL
+./vaistoc lsp                         # language server on stdio
 ```
 
-Run a pipeline against the OpenAI provider:
+From Elixir, `Vaisto.Runner.run(source)` compiles and runs a program's `main`;
+pass `backend: :core` or `backend: :elixir`.
 
-```elixir
-# In iex -S mix
-iex> Application.put_env(:vaisto, :llm, Vaisto.LLM.OpenAI)
-iex> System.put_env("OPENAI_API_KEY", "sk-...")
-# then compile and call your pipeline as usual
-```
+## Editor support
 
-## Editor Support
-
-Vaisto has an LSP server and VS Code extension for real-time type feedback.
+`vaistoc lsp` provides diagnostics, hover types, completion, signature help,
+references and inlay hints. A VS Code extension lives in `editors/vscode`:
+install the packaged `vaisto-0.1.0.vsix`, or run it from source:
 
 ```bash
 mix escript.build
@@ -332,43 +481,113 @@ cd editors/vscode
 npm install
 ```
 
-Open `editors/vscode` in VS Code and press **F5** to launch the Extension
-Development Host. Open any `.va` file to get hover types, diagnostics, and
-symbol navigation.
-
-If `vaistoc` is not in your PATH, add this to VS Code settings:
+Then open `editors/vscode` in VS Code and press **F5** to start an Extension
+Development Host. If `vaistoc` is not on your `PATH`, point the extension at
+it:
 
 ```json
-{
-  "vaisto.serverPath": "/path/to/vaisto/vaistoc"
-}
+{ "vaisto.serverPath": "/path/to/vaisto/vaistoc" }
 ```
 
-## Stack
+## Development
 
-| Layer | Tool | Purpose |
-|-------|------|---------|
-| Substrate | Vaisto | Typed IR for contracts, prompts, and pipelines |
-| Runtime | BEAM | Process isolation, supervision, distribution |
-| Observability | AHTI | Causality correlation across operations |
-| Deployment | SYKLI | CI for systems built on contracts |
+```bash
+mix test                              # the whole suite; the live OpenAI test is excluded
+mix test --include live               # also call OpenAI (needs OPENAI_API_KEY)
+mix test test/parser_test.exs         # one file
+mix test test/parser_test.exs:12      # one test
+mix test test/liquid/                 # Liquid Core, including the soundness fuzzing and the harness
+```
 
-## Related Work
+Black-box tests run against the built CLI: `mix escript.build`, then
+`test/blackbox/runner.sh`. `test/blackbox/lsp_runner.exs` drives the language
+server.
 
-- **DSPy** — Python optimizer for prompt-tuning. Vaisto is focused on typed
-  closure, structural accountability, and runtime supervision.
-- **LangChain / LlamaIndex** — composition by framework convention. Vaisto
-  moves composition checks into the language.
-- **Z3** — SMT solver from Microsoft Research. The solver the Liquid Vaisto
-  RFC proposes for refinement checks; not a substitute for runtime LLM
-  evaluation.
-- **Gleam** — typed BEAM language and close architectural cousin.
-- **LFE** — Lisp on BEAM, untyped.
+To see what the harness says about one program:
+
+```bash
+mix run -e 'IO.inspect(Vaisto.Liquid.Harness.run(File.read!("program.va")).verdict)'
+```
+
+`test/liquid/harness_test.exs` runs it over every program in the test suite on
+each `mix test`, and fails on any disagreement that is not a known defect.
+
+`AGENTS.md` is the working contract for contributors, human or AI: the
+conventions, the constraints and the expected workflow. `CLAUDE.md` is the
+architecture reference. There is no CI or formatter configuration yet; CI is
+planned on [SYKLI](#related-work).
+
+## Status and known gaps
+
+Each gap below has been reproduced against the current code. The numbers are
+the defect IDs of the [Liquid Vaisto RFC](docs/design/liquid-vaisto-rfc.md)
+(§1.12, with reproductions in Appendix A) and of
+[`liquid-core.md`](docs/design/liquid-core.md) §12.
+
+**The backends disagree** on some programs, as the harness shows:
+- `and`/`or` are strict on the Core Erlang backend, and short-circuit on the
+  Elixir one (D5);
+- the Core Erlang backend cannot compile a guarded `defn` (D11), and the
+  Elixir backend cannot compile field access with `.` (D12);
+- `==` is exact equality on one backend and numeric equality on the other
+  (D25);
+- a failed match crashes with a different reason on each backend (D26).
+
+**The type checker accepts some ill-typed programs.** Among them:
+- a `let` binding leaks out of its scope (D15);
+- a function declared `:int` can return a float or a string (D4, D16);
+- arithmetic on an unannotated parameter is generalized to any type (D17);
+- a `match` on an unannotated parameter is not tied to its patterns' type
+  (D22);
+- `:any` unifies with everything;
+- unknown qualified calls are typed `Any`;
+- multi-clause functions are typed `Any -> Any`.
+
+**Modules.** Cross-module calls are not type-checked yet. `.vsi` interfaces are
+written but not used for typing imports (D9).
+
+**Records.** A function parameter annotated with a record or sum type does not
+match values of that type at call sites (D1, D2). Row-polymorphic field access
+on a record crashes at run time (D24).
+
+**Not there yet:** receive with a timeout, binary syntax, decoding values
+from `Dyn`, refinements, effect rows, CI.
+
+## Documentation
+
+| Document | What it is |
+|---|---|
+| [`docs/design/liquid-vaisto-rfc.md`](docs/design/liquid-vaisto-rfc.md) | Liquid Vaisto: the semantic core, refinements, effects, evidence, and the roadmap |
+| [`docs/design/liquid-core.md`](docs/design/liquid-core.md) | The normative definition of Liquid Core, version 0 |
+| [`docs/design/task-contracts-manifesto.md`](docs/design/task-contracts-manifesto.md) | Why task contracts |
+| [`docs/design/task-contracts-spec.md`](docs/design/task-contracts-spec.md) | The planned contract operators and `Ctx` |
+| [`docs/design/vaisto-bpf.md`](docs/design/vaisto-bpf.md) | Compiling a Vaisto subset to eBPF |
+| [`DESIGN.md`](DESIGN.md) | Language design decisions |
+| [`docs/adr/`](docs/adr/) | Architecture decisions: [compiler implementation](docs/adr/002-compiler-implementation.md); [built-in telemetry](docs/adr/001-builtin-telemetry.md), accepted but not built |
+| [`AGENTS.md`](AGENTS.md), [`CLAUDE.md`](CLAUDE.md) | Contributor contract and architecture reference |
+
+## Related work
+
+- **DSPy**: a Python optimizer for prompt tuning. Vaisto focuses on typed
+  closure, structural accountability and runtime supervision.
+- **LangChain, LlamaIndex**: composition by framework convention. Vaisto moves
+  composition checks into the language.
+- **Liquid Haskell**: refinement types checked by an SMT solver. Liquid Vaisto
+  takes the idea to a BEAM language with algebraic effects.
+- **Z3**: the SMT solver the Liquid Vaisto RFC uses for refinement checks. It
+  is not a substitute for evaluating a model at run time.
+- **Gleam**: a typed BEAM language and a close architectural cousin.
+- **LFE**: a Lisp on the BEAM, untyped.
+
+Vaisto is meant to sit in a larger stack: Vaisto is the typed substrate for
+contracts, prompts and pipelines; BEAM provides isolation, supervision and
+distribution; AHTI correlates causality across operations; SYKLI runs CI for
+systems built on contracts.
 
 ## Origin
 
 Conceived January 2026, 3am Berlin, while waiting for family to fly home.
-Started as "learn Elixir methodically," became a language design through
+Started as "learn Elixir methodically" and became a language design by
 following intuition.
 
 ## License
