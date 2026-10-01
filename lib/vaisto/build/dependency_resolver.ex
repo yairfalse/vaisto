@@ -100,7 +100,9 @@ defmodule Vaisto.Build.DependencyResolver do
   @spec topological_sort(dependency_graph()) ::
           {:ok, [compilation_unit()]} | {:error, :circular_dependency}
   def topological_sort(graph) do
-    modules = Map.keys(graph)
+    # Sorted, so that modules with no ordering between them always come out
+    # in the same order.
+    modules = graph |> Map.keys() |> Enum.sort()
 
     # Build adjacency list: module -> modules that depend on it
     adjacency = build_adjacency(modules, graph)
@@ -125,10 +127,8 @@ defmodule Vaisto.Build.DependencyResolver do
       nil ->
         []
 
-      %{imports: imports} ->
-        imports
-        |> Enum.map(fn {m, _alias} -> m end)
-        |> Enum.filter(&Map.has_key?(graph, &1))
+      _info ->
+        internal_deps(graph, module)
     end
   end
 
@@ -144,11 +144,25 @@ defmodule Vaisto.Build.DependencyResolver do
 
   # Private helpers
 
+  # Imports name a module as written (`(import A)` gives `:A`), while the graph
+  # is keyed by the name inferred from the file path (`:"Elixir.A"`).
+  defp internal_deps(graph, mod) do
+    graph[mod].imports
+    |> Enum.map(fn {m, _alias} -> module_key(m) end)
+    |> Enum.filter(&Map.has_key?(graph, &1))
+    |> Enum.uniq()
+  end
+
+  defp module_key(name) do
+    case Atom.to_string(name) do
+      "Elixir." <> _ -> name
+      bare -> :"Elixir.#{bare}"
+    end
+  end
+
   defp build_adjacency(modules, graph) do
     Enum.reduce(modules, %{}, fn mod, acc ->
-      deps = graph[mod].imports |> Enum.map(fn {m, _alias} -> m end)
-
-      Enum.reduce(deps, acc, fn dep, inner_acc ->
+      Enum.reduce(internal_deps(graph, mod), acc, fn dep, inner_acc ->
         Map.update(inner_acc, dep, [mod], &[mod | &1])
       end)
     end)
@@ -156,10 +170,7 @@ defmodule Vaisto.Build.DependencyResolver do
 
   defp build_in_degree(modules, graph) do
     Enum.reduce(modules, %{}, fn mod, acc ->
-      deps = graph[mod].imports |> Enum.map(fn {m, _alias} -> m end)
-      # Only count dependencies that are in our graph (internal modules)
-      internal_deps = Enum.filter(deps, &Map.has_key?(graph, &1))
-      Map.put(acc, mod, length(internal_deps))
+      Map.put(acc, mod, length(internal_deps(graph, mod)))
     end)
   end
 
@@ -185,7 +196,7 @@ defmodule Vaisto.Build.DependencyResolver do
     ]
 
     # Decrease in-degree of dependents
-    dependents = Map.get(adjacency, mod, [])
+    dependents = adjacency |> Map.get(mod, []) |> Enum.sort()
 
     {new_in_degree, new_queue} =
       Enum.reduce(dependents, {in_degree, rest}, fn dep, {deg, q} ->

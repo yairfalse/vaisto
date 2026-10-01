@@ -147,4 +147,70 @@ defmodule Vaisto.Build.DependencyResolverTest do
       assert [] = DependencyResolver.dependents(graph, :"Elixir.B")
     end
   end
+
+  # Graphs built from files, as `Vaisto.Build` builds them: `(import A)` names
+  # the module bare, while the graph is keyed by the name inferred from the
+  # path (`Elixir.A`). Spec: the moduledoc above ("dependencies come before
+  # dependents") and liquid-vaisto-rfc.md §21.3, P0-9.
+  describe "graphs built from files" do
+    setup do
+      dir = Path.join(System.tmp_dir!(), "vaisto_deps_#{System.unique_integer([:positive])}")
+      File.mkdir_p!(dir)
+      on_exit(fn -> File.rm_rf!(dir) end)
+      %{dir: dir}
+    end
+
+    test "orders a chain of imports under 50 seeded file orders", %{dir: dir} do
+      for seed <- 1..50 do
+        :rand.seed(:exsss, seed)
+        # Fresh names per seed, so atom creation order differs every round.
+        names = for i <- 0..3, do: "Chain#{seed}x#{System.unique_integer([:positive])}L#{i}"
+
+        files =
+          names
+          |> Enum.with_index()
+          |> Enum.map(fn {name, i} ->
+            import = if i > 0, do: "(import #{Enum.at(names, i - 1)})\n", else: ""
+            write_module(dir, name, import <> "(defn f [] :int #{i})")
+          end)
+          |> Enum.shuffle()
+
+        assert {:ok, graph} = DependencyResolver.build_graph(files)
+        assert {:ok, order} = DependencyResolver.topological_sort(graph)
+        modules = Enum.map(order, & &1.module)
+
+        assert modules == Enum.map(names, &:"Elixir.#{&1}"),
+               "seed #{seed}: got #{inspect(modules)}"
+      end
+    end
+
+    test "reports a two-module cycle", %{dir: dir} do
+      files = [
+        write_module(dir, "CycA", "(import CycB)\n(defn f [] :int 1)"),
+        write_module(dir, "CycB", "(import CycA)\n(defn g [] :int 2)")
+      ]
+
+      assert {:ok, graph} = DependencyResolver.build_graph(files)
+      assert {:error, :circular_dependency} = DependencyResolver.topological_sort(graph)
+    end
+
+    test "matches a dotted import to its file under std/", %{dir: dir} do
+      std = Path.join(dir, "std")
+      File.mkdir_p!(std)
+      list = Path.join(std, "List.va")
+      File.write!(list, "(ns Std.List)\n(defn one [] :int 1)\n")
+      app = write_module(dir, "UsesList", "(import Std.List)\n(defn f [] :int 2)")
+
+      assert {:ok, graph} = DependencyResolver.build_graph([app, list])
+      assert DependencyResolver.dependencies(graph, :"Elixir.UsesList") == [:"Elixir.Std.List"]
+      assert {:ok, order} = DependencyResolver.topological_sort(graph)
+      assert Enum.map(order, & &1.module) == [:"Elixir.Std.List", :"Elixir.UsesList"]
+    end
+  end
+
+  defp write_module(dir, name, body) do
+    path = Path.join(dir, "#{name}.va")
+    File.write!(path, "(ns #{name})\n#{body}\n")
+    path
+  end
 end
