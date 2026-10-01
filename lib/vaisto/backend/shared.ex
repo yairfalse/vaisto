@@ -192,4 +192,23 @@ defmodule Vaisto.Backend.Shared do
   def defn_name({:defn, name, _, _, _, _}), do: name
   def defn_name({:defn_multi, name, _, _}), do: name
   def defn_name({:defn_multi, name, _, _, _}), do: name
+
+  # ============================================================================
+  # Field Access
+  # ============================================================================
+
+  @doc """
+  Where `(. record field)` reads the field, so that both backends agree.
+
+  A record is the tuple `{Tag, Field1, Field2, ...}`, so its field N (0-based)
+  is element N + 2 (1-based, after the tag). A row or an unknown type is read
+  as a map key.
+  """
+  @spec field_slot(term(), atom()) :: {:element, pos_integer()} | :map_key
+  def field_slot(record_expr, field) do
+    case Vaisto.TypeChecker.typed_ast_type(record_expr) do
+      {:record, _name, fields} -> {:element, Enum.find_index(fields, fn {f, _type} -> f == field end) + 2}
+      _ -> :map_key
+    end
+  end
 end

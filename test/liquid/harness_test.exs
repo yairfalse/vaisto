@@ -12,11 +12,23 @@ defmodule Vaisto.Liquid.HarnessTest do
       assert %{verdict: :agree, eval: {:crash, :no_match}} = Harness.run("(defn f [n :int] :int (match n [0 1]))\n(defn main [] :int (f 5))")
     end
 
-    test "D5: the Core Erlang backend does not short-circuit and" do
+    # P0-4 (D5): and/or short-circuit on both backends (liquid-core.md §4.3)
+    test "D5 fixed: and does not run its right operand when the left is false" do
       result = Harness.run("(defn chk [x :int y :int] :bool (and (!= y 0) (> (div x y) 1)))\n(defn main [] :bool (chk 10 0))")
-      assert %{verdict: {:disagree, [:core]}, eval: {:ok, false}} = result
-      assert result.beam.core == {:crash, :badarith}
-      assert result.beam.elixir == {:ok, false}
+      assert %{verdict: :agree, eval: {:ok, false}} = result
+    end
+
+    test "D5 fixed: or does not run its right operand when the left is true" do
+      result = Harness.run("(defn chk [x :int y :int] :bool (or (== y 0) (> (div x y) 1)))\n(defn main [] :bool (chk 10 0))")
+      assert %{verdict: :agree, eval: {:ok, true}} = result
+    end
+
+    test "and and or run their right operand when the left does not decide" do
+      assert %{verdict: :agree, eval: {:crash, :badarith}} =
+               Harness.run("(defn chk [x :int y :int] :bool (and (== y 0) (> (div x y) 1)))\n(defn main [] :bool (chk 10 0))")
+
+      assert %{verdict: :agree, eval: {:crash, :badarith}} =
+               Harness.run("(defn chk [x :int y :int] :bool (or (!= y 0) (> (div x y) 1)))\n(defn main [] :bool (chk 10 0))")
     end
 
     test "D25: the Elixir backend's == is not exact equality" do
@@ -25,17 +37,44 @@ defmodule Vaisto.Liquid.HarnessTest do
       assert result.beam.elixir == {:ok, true}
     end
 
-    test "D11: the Core Erlang backend cannot compile a guarded defn" do
-      result = Harness.run("(defn neg [x :int :when (< x 0)] :int (- 0 x))\n(defn main [] :int (neg -5))")
-      assert %{verdict: {:disagree, [:core]}, eval: {:ok, 5}} = result
-      assert {:compile_error, _} = result.beam.core
+    # P0-10 (D11): guarded defn on the Core Erlang backend
+    test "D11 fixed: a guarded defn runs on both backends" do
+      neg = "(defn neg [x :int :when (< x 0)] :int (- 0 x))\n"
+      assert %{verdict: :agree, eval: {:ok, 5}} = Harness.run(neg <> "(defn main [] :int (neg -5))")
+      assert %{verdict: :agree, eval: {:crash, :no_match}} = Harness.run(neg <> "(defn main [] :int (neg 5))")
     end
 
-    test "D12: the Elixir backend cannot compile field access" do
+    test "a guard that crashes counts as false (liquid-core.md §6.6)" do
+      result = Harness.run("(defn f [x :int y :int :when (> (div x y) 0)] :int x)\n(defn main [] :int (f 1 0))")
+      assert %{verdict: :agree, eval: {:crash, :no_match}} = result
+    end
+
+    test "or short-circuits inside a guard" do
+      result = Harness.run("(defn f [x :int y :int :when (or (== y 0) (> (div x y) 1))] :int 7)\n(defn main [] :int (f 10 0))")
+      assert %{verdict: :agree, eval: {:ok, 7}} = result
+    end
+
+    # P0-10 (D12): field access on the Elixir backend
+    test "D12 fixed: field access runs on both backends" do
       result = Harness.run("(deftype Point [x :int y :int])\n(defn main [] :int (. (Point 1 2) :y))")
-      assert %{verdict: {:disagree, [:elixir]}, eval: {:ok, 2}} = result
-      assert result.beam.core == {:ok, 2}
-      assert {:compile_error, _} = result.beam.elixir
+      assert %{verdict: :agree, eval: {:ok, 2}} = result
+    end
+
+    test "field access reads a record whatever expression produces it" do
+      point = "(deftype Point [x :int y :int])\n"
+      assert %{verdict: :agree, eval: {:ok, 2}} = Harness.run(point <> "(defn main [] :int (. (do (Point 1 2)) :y))")
+      assert %{verdict: :agree, eval: {:ok, 1}} = Harness.run(point <> "(defn main [] :int (let [p (Point 1 2)] (. p :x)))")
+    end
+
+    # P0-14 (D15): let, try and receive bindings are lexically scoped
+    test "D15 fixed: a let binding does not leak into the enclosing block" do
+      result = Harness.run("(defn f [x :int] :int (do (let [x 100] x) x))\n(defn main [] :int (f 1))")
+      assert %{verdict: :agree, eval: {:ok, 1}} = result
+    end
+
+    test "D15 fixed: HM rejects a use of the outer binding at the leaked type" do
+      assert %{verdict: {:hm_rejects, _}} =
+               Harness.run("(defn f [x :string] :int (do (let [x 1] x) (+ x 1)))\n(defn main [] :int (f \"hi\"))")
     end
 
     test "Lint rejects what HM accepted but left ill-typed (D17)" do
@@ -58,9 +97,7 @@ defmodule Vaisto.Liquid.HarnessTest do
     # The disagreements the harness is known to find there, each a defect
     # this repository has recorded. A new disagreement fails this test; so
     # does fixing one of these without removing it here.
-    @known [
-      {"D11", "(defn negate [x :int :when (< x 0)] :int (- 0 x))"}
-    ]
+    @known []
 
     test "no program makes the harness raise, and every disagreement is a known defect" do
       # The test suite as it was before Liquid Core: the tests under test/liquid
