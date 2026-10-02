@@ -194,6 +194,7 @@ defmodule Vaisto.CoreEmitter do
     # Separate defn forms from other expressions
     {defns, exprs} = Enum.split_with(forms, fn
       {:defn, _, _, _, _} -> true
+      {:defn, _, _, _, _, _} -> true  # Guarded defn
       {:defn_multi, _, _, _, _} -> true  # 5 elements: name, arity, clauses, type
       {:defval, _, _, _} -> true   # Value bindings
       {:process, _, _, _, _} -> true # Process definition
@@ -232,6 +233,7 @@ defmodule Vaisto.CoreEmitter do
     # Note: defn_multi from type checker has 5 elements: {:defn_multi, name, arity, clauses, type}
     defns = Enum.filter(defns, fn
       {:defn, _, _, _, _} -> true
+      {:defn, _, _, _, _, _} -> true
       {:defn_multi, _, _, _, _} -> true
       {:defval, _, _, _} -> true
       {:process, _, _, _, _} -> true
@@ -258,11 +260,13 @@ defmodule Vaisto.CoreEmitter do
         local_vars = MapSet.new(params)
         body_core = to_core_expr(body, user_fns, local_vars)
         guard_core = to_core_expr(typed_guard, user_fns, local_vars)
-        # case guard of true -> body; _ -> erlang:error(function_clause) end
-        true_clause = :cerl.c_clause([:cerl.c_atom(true)], body_core)
+        # case nil of _ when Guard -> Body; _ -> erlang:error(function_clause) end
+        # A clause guard, not a case on the guard's value, so a guard that crashes
+        # counts as false (liquid-core.md §6.6), as on the Elixir backend.
+        true_clause = :cerl.c_clause([:cerl.c_var(:_)], guard_core, body_core)
         fail_clause = :cerl.c_clause([:cerl.c_var(:_)],
           :cerl.c_call(:cerl.c_atom(:erlang), :cerl.c_atom(:error), [:cerl.c_atom(:function_clause)]))
-        guarded_body = :cerl.c_case(guard_core, [true_clause, fail_clause])
+        guarded_body = :cerl.c_case(:cerl.c_atom(nil), [true_clause, fail_clause])
         fun = :cerl.c_fun(param_vars, guarded_body)
         fname = :cerl.c_fname(name, length(params))
         {fname, fun}
@@ -454,7 +458,10 @@ defmodule Vaisto.CoreEmitter do
       [:cerl.c_cons(l, :cerl.c_cons(r, :cerl.c_nil()))]
     )
   end
-  defp to_core_expr_with_state({:call, op, [left, right], _type}, state_var) when op in [:+, :-, :*, :/, :and, :or, :div, :rem] do
+  defp to_core_expr_with_state({:call, op, [left, right], _type}, state_var) when op in [:and, :or] do
+    short_circuit(op, to_core_expr_with_state(left, state_var), to_core_expr_with_state(right, state_var))
+  end
+  defp to_core_expr_with_state({:call, op, [left, right], _type}, state_var) when op in [:+, :-, :*, :/, :div, :rem] do
     :cerl.c_call(
       :cerl.c_atom(:erlang),
       :cerl.c_atom(op),
@@ -782,8 +789,13 @@ defmodule Vaisto.CoreEmitter do
     )
   end
 
-  # Arithmetic and boolean binary: (+ a b), (and a b), (div a b) → erlang:op(a, b)
-  defp to_core_expr({:call, op, [left, right], _type}, user_fns, local_vars) when op in [:+, :-, :*, :/, :and, :or, :div, :rem] do
+  # Boolean binary: (and a b), (or a b) short-circuit
+  defp to_core_expr({:call, op, [left, right], _type}, user_fns, local_vars) when op in [:and, :or] do
+    short_circuit(op, to_core_expr(left, user_fns, local_vars), to_core_expr(right, user_fns, local_vars))
+  end
+
+  # Arithmetic binary: (+ a b), (div a b) → erlang:op(a, b)
+  defp to_core_expr({:call, op, [left, right], _type}, user_fns, local_vars) when op in [:+, :-, :*, :/, :div, :rem] do
     :cerl.c_call(
       :cerl.c_atom(:erlang),
       :cerl.c_atom(op),
@@ -1164,10 +1176,8 @@ defmodule Vaisto.CoreEmitter do
     :cerl.c_tuple(elements)
   end
 
-  # Field access on record → erlang:element(index, tuple)
-  # Records are stored as {:record_name, field1, field2, ...}
-  # So field at position N (0-indexed) in field list is at tuple index N+2 (1-indexed, after tag)
-  # New 5-element format: {:field_access, record_expr, field, field_type, record_type}
+  # Field access: erlang:element(index, tuple) on a record, maps:get otherwise
+  # (Shared.field_slot/2). New 5-element format: {:field_access, record_expr, field, field_type, record_type}
   defp to_core_expr({:field_access, record_expr, field, _field_type, _record_type}, user_fns, local_vars) do
     to_core_expr({:field_access, record_expr, field, :any}, user_fns, local_vars)
   end
@@ -1175,29 +1185,15 @@ defmodule Vaisto.CoreEmitter do
   defp to_core_expr({:field_access, record_expr, field, _type}, user_fns, local_vars) do
     record_core = to_core_expr(record_expr, user_fns, local_vars)
 
-    # Extract record type from the typed expression to find field index
-    case extract_type(record_expr) do
-      {:record, _name, fields} ->
-        # Find field index in the field list
-        field_index = Enum.find_index(fields, fn {f, _type} -> f == field end)
-        # Tuple index: 1-indexed, first element is the record tag
-        tuple_index = field_index + 2
+    case Shared.field_slot(record_expr, field) do
+      {:element, tuple_index} ->
         :cerl.c_call(
           :cerl.c_atom(:erlang),
           :cerl.c_atom(:element),
           [:cerl.c_int(tuple_index), record_core]
         )
 
-      {:row, _fields, _tail} ->
-        # Row types are maps - use maps:get
-        :cerl.c_call(
-          :cerl.c_atom(:maps),
-          :cerl.c_atom(:get),
-          [:cerl.c_atom(field), record_core]
-        )
-
-      _other ->
-        # Unknown type - fall back to maps:get (for interop with Erlang maps)
+      :map_key ->
         :cerl.c_call(
           :cerl.c_atom(:maps),
           :cerl.c_atom(:get),
@@ -1309,17 +1305,22 @@ defmodule Vaisto.CoreEmitter do
 
   # --- Helper functions ---
 
-  # Extract type from a typed AST node
-  defp extract_type({:var, _name, type}), do: type
-  defp extract_type({:call, _func, _args, type}), do: type
-  defp extract_type({:field_access, _expr, _field, field_type, _record_type}), do: field_type
-  defp extract_type({:field_access, _expr, _field, type}), do: type
-  defp extract_type({:let, _bindings, _body, type}), do: type
-  defp extract_type({:if, _cond, _then, _else, type}), do: type
-  defp extract_type({:match, _expr, _clauses, type}), do: type
-  defp extract_type({:lit, type, _value}), do: type
-  defp extract_type({:map, _pairs, type}), do: type
-  defp extract_type(_), do: :any
+  # (and a b) → case a of true -> b; false -> false end
+  # (or a b)  → case a of true -> true; false -> b end
+  # The right operand runs only when the left does not decide (liquid-core.md
+  # §4.3), as on the Elixir backend. A case is also legal in a clause guard.
+  defp short_circuit(op, left, right) do
+    {on_true, on_false} =
+      case op do
+        :and -> {right, :cerl.c_atom(false)}
+        :or -> {:cerl.c_atom(true), right}
+      end
+
+    :cerl.c_case(left, [
+      :cerl.c_clause([:cerl.c_atom(true)], on_true),
+      :cerl.c_clause([:cerl.c_atom(false)], on_false)
+    ])
+  end
 
   # Simple variable binding
   defp emit_let_binding({name, expr, _type}, body, user_fns, local_vars) when is_atom(name) do

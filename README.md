@@ -177,8 +177,7 @@ error: non-exhaustive pattern match
     [(Point x y) (+ (* x x) (* y y))]))   ; 25
 ```
 
-Fields can also be read with `(. p :x)`, which today compiles only on the Core
-Erlang backend (D12, below).
+Fields can also be read with `(. p :x)`.
 
 ### Lists, higher-order functions, and multi-clause definitions
 
@@ -385,22 +384,23 @@ Phase 0, the foundation, is in place:
 | Adapter | `Vaisto.Liquid.Adapter` | Today's typed AST to Core. Where HM left a type unknown it writes `Dyn`, so Lint names the place |
 | Differential harness | `Vaisto.Liquid.Harness` | Runs a program through the evaluator and both backends and compares outcomes |
 
-Run over the 133 programs in the test suite, the harness gave these verdicts
+Run over the 135 programs in the test suite, the harness gave these verdicts
 when this was written:
 
 | Verdict | Programs | What it means |
 |---|---|---|
-| agree | 81 | the evaluator and both backends give the same result |
-| disagree | 2 | D11: a guarded `defn` that the Core Erlang backend cannot compile |
+| agree | 84 | the evaluator and both backends give the same result |
+| disagree | 0 | a backend differs from the evaluator: a backend bug |
 | Lint rejects | 25 | programs HM accepted but left ill-typed, such as arithmetic on an unannotated parameter. This is the to-do list for the type checker |
 | outside the core so far | 20 | processes, `str`, and calls across modules |
-| rejected by HM | 5 | tests that expect a type error |
+| rejected by HM | 6 | tests that expect a type error |
 
 ### What comes next
 
-The next step fixes the backend disagreements the harness reports (D5, D11,
-D12) and the scoping bug D15. Then comes the first refinement step, checked
-with the Z3 solver:
+The backend disagreements the harness found (D5, D11, D12) and the scoping
+bug D15 are fixed: these are the defect fixes RFC §21.1 requires before
+refinements can run on today's backends. Next comes the first refinement step,
+checked with the Z3 solver:
 
 ```scheme
 ; design: not implemented yet
@@ -524,17 +524,12 @@ the defect IDs of the [Liquid Vaisto RFC](docs/design/liquid-vaisto-rfc.md)
 (§1.12, with reproductions in Appendix A) and of
 [`liquid-core.md`](docs/design/liquid-core.md) §12.
 
-**The backends disagree** on some programs, as the harness shows:
-- `and`/`or` are strict on the Core Erlang backend, and short-circuit on the
-  Elixir one (D5);
-- the Core Erlang backend cannot compile a guarded `defn` (D11), and the
-  Elixir backend cannot compile field access with `.` (D12);
+**The backends disagree** on some programs:
 - `==` is exact equality on one backend and numeric equality on the other
   (D25);
 - a failed match crashes with a different reason on each backend (D26).
 
 **The type checker accepts some ill-typed programs.** Among them:
-- a `let` binding leaks out of its scope (D15);
 - a function declared `:int` can return a float or a string (D4, D16);
 - arithmetic on an unannotated parameter is generalized to any type (D17);
 - a `match` on an unannotated parameter is not tied to its patterns' type

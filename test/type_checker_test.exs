@@ -612,4 +612,29 @@ defmodule Vaisto.TypeCheckerTest do
       assert {:fn, [:int, :int], :int} = type
     end
   end
+
+  # P0-14 (D15): a binding is in scope only inside the form that binds it.
+  # Past its scope a name is the outer binding, or else an atom literal.
+  describe "lexical scope" do
+    defp check_source(code), do: code |> Vaisto.Parser.parse() |> TypeChecker.check()
+
+    test "a let binding does not leak into the enclosing block" do
+      assert {:error, %Vaisto.Error{message: "type mismatch", actual: :string}} =
+               check_source(~s|(defn f [x :string] :int (do (let [x 1] x) (+ x 1)))|)
+    end
+
+    test "after a let, its name refers to the outer binding again" do
+      assert {:ok, {:fn, [:string], :string}, _} = check_source(~s|(defn f [x :string] :string (do (let [x 1] x) x))|)
+    end
+
+    test "a catch variable does not leak out of its handler" do
+      assert {:error, %Vaisto.Error{message: "return type mismatch", actual: {:atom, :e}}} =
+               check_source(~s|(defn f [] :int (do (try 1 [catch [:error e 0]]) e))|)
+    end
+
+    test "a receive pattern variable does not leak out of its clause" do
+      assert {:error, %Vaisto.Error{message: "return type mismatch", actual: {:atom, :v}}} =
+               check_source(~s|(defn f [] :int (do (receive [v 0]) v))|)
+    end
+  end
 end

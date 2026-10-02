@@ -694,10 +694,11 @@ defmodule Vaisto.TypeChecker do
   # let binding
   defp check_impl_s({:let, bindings, body}, ctx) do
     case check_bindings_s(bindings, ctx, []) do
-      {:ok, ctx, typed_bindings} ->
-        case check_s(body, ctx) do
-          {:ok, body_type, typed_body, ctx} ->
-            {:ok, body_type, {:let, typed_bindings, typed_body, body_type}, ctx}
+      {:ok, let_ctx, typed_bindings} ->
+        case check_s(body, let_ctx) do
+          {:ok, body_type, typed_body, body_ctx} ->
+            # Keep the substitution, but the bindings end with the let (D15)
+            {:ok, body_type, {:let, typed_bindings, typed_body, body_type}, %{body_ctx | env: ctx.env}}
           error -> error
         end
       error -> error
@@ -1808,39 +1809,40 @@ defmodule Vaisto.TypeChecker do
     end
   end
 
-  # Extract the type from a typed AST node
-  defp typed_ast_type({:lit, type, _}), do: type
-  defp typed_ast_type({:var, _, type}), do: type
-  defp typed_ast_type({:call, _, _, type}), do: type
-  defp typed_ast_type({:class_call, _, _, _, _, type}), do: type
-  defp typed_ast_type({:class_call, _, _, _, _, type, _}), do: type
-  defp typed_ast_type({:if, _, _, _, type}), do: type
-  defp typed_ast_type({:match, _, _, type}), do: type
-  defp typed_ast_type({:let, _, _, type}), do: type
-  defp typed_ast_type({:do, _, type}), do: type
-  defp typed_ast_type({:list, _, type}), do: type
-  defp typed_ast_type({:fn, _, _, type}), do: type
-  defp typed_ast_type({:apply, _, _, type}), do: type
-  defp typed_ast_type({:fn_ref, _, _, type}), do: type
-  defp typed_ast_type({:cons, _, _, type}), do: type
-  defp typed_ast_type({:tuple, _, type}), do: type
-  defp typed_ast_type({:map, _, type}), do: type
-  defp typed_ast_type({:receive, _, type}), do: type
-  defp typed_ast_type({:try, _, _, _, type}), do: type
-  defp typed_ast_type({:defn, _, _, _, type}), do: type
-  defp typed_ast_type({:defn_multi, _, _, _, type}), do: type
-  defp typed_ast_type({:deftype, _, _, _}), do: :unit
-  defp typed_ast_type({:defprompt, _, _, _, _, type}), do: type
-  defp typed_ast_type({:pipeline, _, _, _, _, type}), do: type
-  defp typed_ast_type({:generate, _, _, type}), do: type
-  defp typed_ast_type({:process, _, _, _, type}), do: type
-  defp typed_ast_type({:field_access, _, _, type}), do: type
-  defp typed_ast_type({:field_access, _, _, type, _}), do: type
-  defp typed_ast_type({:constraint_call, _, _, _, type}), do: type
-  defp typed_ast_type({:cast, _, _, _type} = node), do: elem(node, 1)
-  defp typed_ast_type({:defval, _, _, type}), do: type
-  defp typed_ast_type({:supervise, _, _, type}), do: type
-  defp typed_ast_type(_), do: :any
+  @doc false
+  # The type a typed AST node carries (also read by the backends, Backend.Shared)
+  def typed_ast_type({:lit, type, _}), do: type
+  def typed_ast_type({:var, _, type}), do: type
+  def typed_ast_type({:call, _, _, type}), do: type
+  def typed_ast_type({:class_call, _, _, _, _, type}), do: type
+  def typed_ast_type({:class_call, _, _, _, _, type, _}), do: type
+  def typed_ast_type({:if, _, _, _, type}), do: type
+  def typed_ast_type({:match, _, _, type}), do: type
+  def typed_ast_type({:let, _, _, type}), do: type
+  def typed_ast_type({:do, _, type}), do: type
+  def typed_ast_type({:list, _, type}), do: type
+  def typed_ast_type({:fn, _, _, type}), do: type
+  def typed_ast_type({:apply, _, _, type}), do: type
+  def typed_ast_type({:fn_ref, _, _, type}), do: type
+  def typed_ast_type({:cons, _, _, type}), do: type
+  def typed_ast_type({:tuple, _, type}), do: type
+  def typed_ast_type({:map, _, type}), do: type
+  def typed_ast_type({:receive, _, type}), do: type
+  def typed_ast_type({:try, _, _, _, type}), do: type
+  def typed_ast_type({:defn, _, _, _, type}), do: type
+  def typed_ast_type({:defn_multi, _, _, _, type}), do: type
+  def typed_ast_type({:deftype, _, _, _}), do: :unit
+  def typed_ast_type({:defprompt, _, _, _, _, type}), do: type
+  def typed_ast_type({:pipeline, _, _, _, _, type}), do: type
+  def typed_ast_type({:generate, _, _, type}), do: type
+  def typed_ast_type({:process, _, _, _, type}), do: type
+  def typed_ast_type({:field_access, _, _, type}), do: type
+  def typed_ast_type({:field_access, _, _, type, _}), do: type
+  def typed_ast_type({:constraint_call, _, _, _, type}), do: type
+  def typed_ast_type({:cast, _, _, _type} = node), do: elem(node, 1)
+  def typed_ast_type({:defval, _, _, type}), do: type
+  def typed_ast_type({:supervise, _, _, type}), do: type
+  def typed_ast_type(_), do: :any
 
   # ============================================================================
   # Apply substitution to typed AST — resolves all tvars in the output
@@ -2778,8 +2780,9 @@ defmodule Vaisto.TypeChecker do
     typed_pattern = type_pattern(pattern, :any, ctx.env)
 
     case check_s(body, extended_ctx) do
-      {:ok, body_type, typed_body, ctx} ->
-        {:ok, {typed_pattern, typed_body, body_type}, ctx}
+      {:ok, body_type, typed_body, clause_ctx} ->
+        # Pattern-bound variables end with the clause, as in match (D15)
+        {:ok, {typed_pattern, typed_body, body_type}, %{clause_ctx | env: ctx.env}}
       error -> error
     end
   end
@@ -2793,8 +2796,9 @@ defmodule Vaisto.TypeChecker do
       extended_ctx = %{ctx | env: Map.put(ctx.env, var, :any)}
 
       case check_s(handler, extended_ctx) do
-        {:ok, handler_type, typed_handler, ctx} ->
-          case unify_types_s(acc_type, handler_type, ctx) do
+        {:ok, handler_type, typed_handler, handler_ctx} ->
+          # The exception variable ends with the handler (D15)
+          case unify_types_s(acc_type, handler_type, %{handler_ctx | env: ctx.env}) do
             {:ok, unified, ctx} ->
               typed_clause = {class, {:var, var, :any}, typed_handler, handler_type}
               {:cont, {:ok, unified, [typed_clause | acc], ctx}}

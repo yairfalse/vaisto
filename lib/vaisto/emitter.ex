@@ -8,6 +8,7 @@ defmodule Vaisto.Emitter do
   directly. More sustainable, better documented, battle-tested.
   """
 
+  alias Vaisto.Backend.Shared
   alias Vaisto.Errors
   alias Vaisto.TypeChecker
 
@@ -142,44 +143,23 @@ defmodule Vaisto.Emitter do
     {:__block__, [], expr_asts}
   end
 
-  # Let bindings → nested assignments using Elixir's block
-  # (let [x 1 y 2] (+ x y)) → (x = 1; y = 2; x + y)
+  # Let bindings → nested single-clause cases
+  # (let [x 1 y 2] (+ x y)) → case 1 do x -> case 2 do y -> x + y end end
+  # A case clause scopes its bindings, so they do not leak past the let into
+  # the enclosing block (D15), as on the Core Erlang backend.
   def to_elixir({:let, bindings, body, _type}) do
     body_ast = to_elixir(body)
 
-    # Build assignments from innermost to outermost
+    # Build from innermost to outermost
     List.foldr(bindings, body_ast, fn
       {name, expr, _type}, acc when is_atom(name) ->
-        var = Macro.var(name, nil)
-        value = to_elixir(expr)
-        quote do
-          unquote(var) = unquote(value)
-          unquote(acc)
-        end
+        scoped_binding(Macro.var(name, nil), to_elixir(expr), acc)
 
-      {{:pattern, _, _, _} = pattern, expr, _type}, acc ->
-        pattern_ast = emit_pattern(pattern)
-        value = to_elixir(expr)
-        quote do
-          unquote(pattern_ast) = unquote(value)
-          unquote(acc)
-        end
+      {{tag, _, _, _} = pattern, expr, _type}, acc when tag in [:pattern, :cons_pattern] ->
+        scoped_binding(emit_pattern(pattern), to_elixir(expr), acc)
 
       {{:tuple_pattern, _, _} = pattern, expr, _type}, acc ->
-        pattern_ast = emit_pattern(pattern)
-        value = to_elixir(expr)
-        quote do
-          unquote(pattern_ast) = unquote(value)
-          unquote(acc)
-        end
-
-      {{:cons_pattern, _, _, _} = pattern, expr, _type}, acc ->
-        pattern_ast = emit_pattern(pattern)
-        value = to_elixir(expr)
-        quote do
-          unquote(pattern_ast) = unquote(value)
-          unquote(acc)
-        end
+        scoped_binding(emit_pattern(pattern), to_elixir(expr), acc)
     end)
   end
 
@@ -211,6 +191,21 @@ defmodule Vaisto.Emitter do
   # Comparison calls
   def to_elixir({:call, op, [left, right], _type}) when op in [:==, :!=, :<, :>, :<=, :>=] do
     {op, [], [to_elixir(left), to_elixir(right)]}
+  end
+
+  # Field access: :erlang.element on a record, :maps.get otherwise, the same
+  # calls as the Core Erlang backend (Shared.field_slot/2)
+  def to_elixir({:field_access, record_expr, field, _field_type, _record_type}) do
+    to_elixir({:field_access, record_expr, field, :any})
+  end
+
+  def to_elixir({:field_access, record_expr, field, _type}) do
+    record_ast = to_elixir(record_expr)
+
+    case Shared.field_slot(record_expr, field) do
+      {:element, tuple_index} -> quote do: :erlang.element(unquote(tuple_index), unquote(record_ast))
+      :map_key -> quote do: :maps.get(unquote(field), unquote(record_ast))
+    end
   end
 
   # --- List operations ---
@@ -1206,6 +1201,11 @@ defmodule Vaisto.Emitter do
   defp emit_pattern(:_), do: Macro.var(:_, nil)
   defp emit_pattern(a) when is_atom(a), do: a
   defp emit_pattern(n) when is_integer(n), do: n
+
+  # case value do pattern -> body end: binds pattern in body only
+  defp scoped_binding(pattern_ast, value_ast, body_ast) do
+    {:case, [], [value_ast, [do: [{:->, [], [[pattern_ast], body_ast]}]]]}
+  end
 
   # Function head patterns (for multi-clause functions)
   # These patterns are used directly as function arguments
