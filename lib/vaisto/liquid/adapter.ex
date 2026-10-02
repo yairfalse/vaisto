@@ -309,7 +309,7 @@ defmodule Vaisto.Liquid.Adapter do
   defp let_term(ctx, [{pattern, e, _type} | rest], body) when not is_atom(pattern) do
     {core, binds} = pat(ctx, pattern, hm_type(e))
     rest_term = let_term(%{ctx | env: Map.merge(ctx.env, binds)}, rest, body)
-    [:match, tm(ctx, e), [core, rest_term], [:_, [:perform, :crash, [:inj, [:Reason], :no_match]]]]
+    [:match, tm(ctx, e), [core, rest_term] | fallback(ctx, hm_type(e), [core])]
   end
 
   defp let_term(ctx, [{x, e, type} | rest], body) do
@@ -494,9 +494,21 @@ defmodule Vaisto.Liquid.Adapter do
         end
       end
 
-    total? = match?([p, _] when p == :_ or (is_atom(p) and p not in [true, false, nil]), List.last(core_clauses))
-    fallback = if total?, do: [], else: [[:_, [:perform, :crash, [:inj, [:Reason], :no_match]]]]
-    [:match, scrutinee | core_clauses ++ fallback]
+    [:match, scrutinee | core_clauses ++ fallback(ctx, stype, for([p, _body] <- core_clauses, do: p))]
+  end
+
+  # A final clause that crashes with no_match, as a failed match does today,
+  # unless the unguarded clauses already cover the type: then it could never
+  # be chosen, and Core Lint rejects a clause that can never be chosen.
+  defp fallback(ctx, stype, unguarded) do
+    covered? =
+      try do
+        Vaisto.Liquid.Lint.exhaustive?(unguarded, ty(ctx, stype), types: for(t <- Map.keys(ctx.decls), do: core_decl(ctx, t)))
+      catch
+        {:unsupported, _} -> false
+      end
+
+    if covered?, do: [], else: [[:_, [:perform, :crash, [:inj, [:Reason], :no_match]]]]
   end
 
   # A pattern, typed against the scrutinee's HM type, and the names it binds.

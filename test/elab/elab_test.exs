@@ -130,8 +130,11 @@ defmodule Vaisto.ElabTest do
       assert {:ok, _} = elab("(defn f [b :bool] :int (match b [true 1] [false 0]))")
     end
 
-    test "a guarded clause does not count towards exhaustiveness" do
-      assert error("(defn f [n :int] :int (match n [0 1]))").message == "this match is not exhaustive"
+    test "a clause no value can reach is an error (liquid-core.md §10.8)" do
+      assert error("(defn f [n :int] :int (match n [_ 1] [0 2]))").message == "clause 2 of this match can never be chosen"
+
+      e = error("(deftype C (R) (G))\n(defn f [c :C] :int (match c [(R) 1] [(G) 2] [_ 3]))")
+      assert e.message == "clause 3 of this match can never be chosen"
     end
 
     test "a let pattern must be irrefutable" do

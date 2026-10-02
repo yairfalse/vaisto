@@ -423,6 +423,8 @@ The unguarded clauses of every `match` must match every value of the scrutinee's
 
 A non-exhaustive `match` is reported with an example of a value no clause matches.
 
+**Every clause is reachable.** A clause is rejected when its pattern is not *useful*, by the same algorithm, against the unguarded clauses before it: no value matches it without already matching one of them. A guarded clause before it does not count, since its guard may be false. A clause that can never be chosen is dead code, and in elaborated Core it means the producer put the clauses in the wrong order or added one it should not have.
+
 ### 10.9 Patterns
 
 | Pattern | Types against `τ` when | Binds |
@@ -477,11 +479,15 @@ A module `(module M (core-version 0) item…)` passes when:
 - in each declaration the parameters are distinct, the constructor names or field labels are distinct, no field label is a brand, and every field type is well formed with `Δ` the declaration's parameters;
 - its definition names are distinct, each definition's type is well formed with `Δ` empty, its binders are distinct (§10.12), and each `fn` checks against its type (§10.7) with every definition in `Γ`.
 
+A definition whose type is not well formed is not in `Γ`: code that names it is rejected, never checked against an ill-formed type. When a declaration has a problem, the definitions are not checked, since their types refer to declarations that mean nothing.
+
 Each problem is reported with the name of the definition it is in and the nearest enclosing `(meta (span …))`.
+
+**Lint is total.** On any tree at all, Lint answers with acceptance or a list of problems; it never raises. A tree that is not Core is a problem in the tree, not an error in Lint.
 
 ### 10.14 Not checked in version 0
 
-Effect rows, A-normal form, opacity and sealing, privilege, and the well-formedness of refinements (RFC §9.2). Each arrives with the feature it protects; until then no Core term can need them.
+`crash` in effect rows (the other operations of §8 are checked, §10.16), A-normal form, opacity and sealing, privilege, and the well-formedness of refinements (RFC §9.2). Each arrives with the feature it protects; until then no Core term can need them.
 
 ### 10.15 Soundness
 
@@ -496,6 +502,19 @@ This is type safety: progress and preservation, stated as one property of the tw
 1. **Generated terms.** Random closed terms are built from the rules of §10.4 and a type, and Lint must accept every one at exactly that type: the generator and Lint agree on what is well typed.
 2. **Safety.** Every generated term is evaluated, and the property above must hold.
 3. **Mutants.** Each generated term is corrupted at random: a subterm replaced, a constructor, label, primitive or variable changed, a child dropped. Lint must reject the mutant, or the mutant must satisfy the property at the type Lint gives it. A mutant that Lint accepts and that then goes wrong is a hole in Lint. This is RFC K5, fault injection, with the faults chosen at random instead of by hand.
+
+The same is tested on real Core: the elaborator's output for every program in the test suite is corrupted at random, declarations included. Lint must answer on every corruption (totality, §10.13), and a corrupted module it accepts must satisfy the property for its `main`.
+
+### 10.16 Effects
+
+The operations of §8 other than `crash` exist in version 0, so their effect rows are checked:
+
+- a `fn` checked against `(-> (τ…) ε τ)` has its body checked under `ε`. A `fn` whose type is synthesized is pure: its body runs under `(eff closed)`;
+- `(perform op e…)` needs `op` among the labels of the row it runs under;
+- `(app f e…)` with `f ⇒ (-> (τ…) ε' τ)` performs `ε'`. Every label of `ε'` must be in the row it runs under, and an open tail `(evar e)` of `ε'` must be that row's own tail, since an effect variable stands for what the caller allows and no other code may add to it;
+- a term outside every `fn` may perform anything: the handler that evaluates it interprets what it performs.
+
+`crash` is exempt. Every partial function crashes, and which ones do is tracked from Phase 4, where `Crash` joins the rows (RFC §4.4).
 
 ## 11. Differences from the RFC
 

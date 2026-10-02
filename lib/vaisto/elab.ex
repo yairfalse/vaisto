@@ -322,8 +322,14 @@ defmodule Vaisto.Elab do
     term = Types.zonk(term, ctx.s)
     if Types.unsolved?(term), do: undetermined(term, ctx)
 
-    for {patterns, stype, kind, loc} <- Enum.reverse(ctx.matches) do
-      case Exhaustive.missing(patterns, Types.zonk(stype, ctx.s), ctx.decls) do
+    for {clauses, stype, kind, loc} <- Enum.reverse(ctx.matches) do
+      stype = Types.zonk(stype, ctx.s)
+
+      if i = Exhaustive.redundant(clauses, stype, ctx.decls) do
+        fail(%{ctx | loc: loc}, "clause #{i} of this match can never be chosen", note: "the clauses before it match every value it does")
+      end
+
+      case Exhaustive.missing(for({p, false} <- clauses, do: p), stype, ctx.decls) do
         nil -> :ok
         witness when kind == :let -> fail(%{ctx | loc: loc}, "this pattern can fail to match", note: "it does not match #{witness}", hint: "use match, with a clause for every case")
         witness -> fail(%{ctx | loc: loc}, "this match is not exhaustive", note: "no clause matches #{witness}")
@@ -827,7 +833,7 @@ defmodule Vaisto.Elab do
   defp let([{pattern, e} | rest], body, type, ctx) do
     {core, etype, ctx} = synth(e, ctx)
     {p, binds, ctx} = pattern(pattern, etype, ctx)
-    ctx = %{ctx | matches: [{[p], etype, :let, ctx.loc} | ctx.matches]}
+    ctx = %{ctx | matches: [{[{p, false}], etype, :let, ctx.loc} | ctx.matches]}
     {rest_core, ctx} = in_scope(%{ctx | env: Map.merge(ctx.env, binds)}, fn ctx -> let(rest, body, type, ctx) end)
     {[:match, core, [p, rest_core]], ctx}
   end
@@ -857,8 +863,8 @@ defmodule Vaisto.Elab do
         end)
       end)
 
-    unguarded = for [p, _b] <- cores, do: p
-    {[:match, s | cores], %{ctx | matches: [{unguarded, stype, :match, loc} | ctx.matches]}}
+    clauses = for [p | rest] <- cores, do: {p, length(rest) == 2}
+    {[:match, s | cores], %{ctx | matches: [{clauses, stype, :match, loc} | ctx.matches]}}
   end
 
   # A guard is guard-safe Core (liquid-core.md §6.6): no application, perform,

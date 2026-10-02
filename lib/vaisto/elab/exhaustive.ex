@@ -25,6 +25,53 @@ defmodule Vaisto.Elab.Exhaustive do
     end
   end
 
+  @doc """
+  The position (from 1) of the first clause no value can reach, because the
+  unguarded clauses before it match every value it does; `nil` if none.
+  `clauses` is a list of `{pattern, guarded?}`.
+  """
+  @spec redundant([{term(), boolean()}], term(), map()) :: pos_integer() | nil
+  def redundant(clauses, type, decls) do
+    result =
+      clauses
+      |> Enum.with_index(1)
+      |> Enum.reduce_while([], fn {{p, guarded?}, i}, earlier ->
+        row = [normalize(p, type, decls)]
+
+        cond do
+          not useful?(earlier, row, [type], decls) -> {:halt, i}
+          guarded? -> {:cont, earlier}
+          true -> {:cont, earlier ++ [row]}
+        end
+      end)
+
+    if is_integer(result), do: result
+  end
+
+  # Is the pattern vector q useful against `rows` (Maranget's U)?
+  defp useful?(rows, [], [], _decls), do: rows == []
+
+  defp useful?(rows, [{:con, k, args} | qs], [type | types], decls) do
+    fts =
+      case signature(type, decls) do
+        {:finite, ctors} -> ctors |> List.keyfind(k, 0) |> elem(1)
+        :infinite -> []
+      end
+
+    useful?(specialize(rows, k, length(args)), args ++ qs, fts ++ types, decls)
+  end
+
+  defp useful?(rows, [:wild | qs], [type | types], decls) do
+    heads = rows |> Enum.flat_map(fn [p | _] -> if match?({:con, _, _}, p), do: [elem(p, 1)], else: [] end) |> Enum.uniq()
+
+    with {:finite, ctors} <- signature(type, decls),
+         true <- Enum.all?(ctors, fn {k, _} -> k in heads end) do
+      Enum.any?(ctors, fn {k, fts} -> useful?(specialize(rows, k, length(fts)), List.duplicate(:wild, length(fts)) ++ qs, fts ++ types, decls) end)
+    else
+      _ -> useful?(default(rows), qs, types, decls)
+    end
+  end
+
   # A pattern as {:con, key, subpatterns} or :wild.
   defp normalize(x, _type, _decls) when is_atom(x), do: :wild
   defp normalize([:as, _x, p], type, decls), do: normalize(p, type, decls)

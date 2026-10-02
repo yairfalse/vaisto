@@ -441,5 +441,59 @@ defmodule Vaisto.Liquid.LintTest do
       assert {:error, [%{message: m}]} = Lint.check_module(core("(module T (core-version 1))"))
       assert m =~ "not a Liquid Core version 0 module"
     end
+
+    test "a definition whose type is not well formed is not in scope" do
+      assert {:error, problems} = module("(def f (-> Int (eff closed) Int) (fn () 1)) (def main (-> () (eff closed) Int) (fn () (app f)))")
+      assert Enum.any?(problems, &(&1.in == :f))
+      assert Enum.any?(problems, &(&1.in == :main and &1.message =~ "unbound"))
+    end
+
+    test "Lint is total: bad declarations are problems, through every entry point" do
+      bad = core("((type S () (sum (A) (A Int))))")
+      assert {:error, _} = Lint.synth(core("1"), types: bad)
+      assert {:error, _} = Lint.check(core("1"), :Int, types: bad)
+      assert {:error, _} = module("(type S () (sum (A) (A Int))) (def main (-> () (eff closed) Int) (fn () (match (inj (S) A) ((inj (S) A) 1))))")
+    end
+  end
+
+  describe "§10.8 every clause is reachable" do
+    test "a clause after clauses that match everything it does" do
+      rejects("(match 1 (_ 1) (2 2))", "clause 2 of the match can never be chosen")
+      rejects("(match (inj (Color) Red) ((inj (Color) Red) 1) ((inj (Color) Green) 2) (_ 3))", "clause 3 of the match can never be chosen")
+    end
+
+    test "a guarded clause before does not make a later one unreachable" do
+      accepts("(match 1 (n (when (prim gt n 0)) 1) (_ 0))", "Int")
+    end
+
+    test "the exhaustiveness oracle for producers of Core" do
+      types = [types: core(@types)]
+      assert Lint.exhaustive?(core("((inj (Color) Red) (inj (Color) Green))"), core("(Color)"), types)
+      refute Lint.exhaustive?(core("((inj (Color) Red))"), core("(Color)"), types)
+      refute Lint.exhaustive?([0, 1], :Int, types)
+      refute Lint.exhaustive?([:not_a_pattern, [:junk]], [:Nope], types)
+    end
+  end
+
+  describe "§10.16 effects" do
+    test "a function performs only the operations its row allows" do
+      assert {:error, [%{message: m}]} = module("(def f (-> () (eff closed) Int) (fn () (perform now)))")
+      assert m =~ "now is performed here"
+      assert :ok = module("(def f (-> () (eff now closed) Int) (fn () (perform now)))")
+    end
+
+    test "a call performs the callee's effects" do
+      assert {:error, [%{in: :g, message: m}]} = module("(def f (-> () (eff now closed) Int) (fn () (perform now))) (def g (-> () (eff closed) Int) (fn () (app f)))")
+      assert m =~ "now is performed here"
+    end
+
+    test "a synthesized fn is pure" do
+      rejects("(let ((f (-> () (eff now closed) Int) (fn () (perform now)))) (app (fn () (app f))))", "now is performed here")
+    end
+
+    test "crash is exempt until Phase 4, and a term outside every fn may perform anything" do
+      assert :ok = module("(def f (-> () (eff closed) Int) (fn () (perform crash (inj (Reason) no_match))))")
+      accepts("(perform now)", "Int")
+    end
   end
 end
