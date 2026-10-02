@@ -31,6 +31,18 @@ defmodule Vaisto.Liquid.Harness do
   @type outcome ::
           {:ok, term()} | {:crash, term()} | {:compile_error, String.t()} | :did_not_end | {:went_wrong, String.t()}
 
+  @doc "The outcome of running `main` on each backend, compiled from source by today's pipeline."
+  @spec beam_outcomes(String.t()) :: %{core: outcome(), elixir: outcome()}
+  def beam_outcomes(source), do: for(backend <- [:core, :elixir], into: %{}, do: {backend, on_beam(source, backend)})
+
+  @doc "The outcome of evaluating a Core module's `main`, bounded in time and memory."
+  @spec evaluate(Vaisto.Liquid.Canonical.tree()) :: outcome()
+  def evaluate(core), do: bounded(fn -> Eval.run(core, :main, []) end)
+
+  @doc "Whether two outcomes agree (liquid-core.md §9)."
+  @spec agrees?(outcome(), outcome()) :: boolean()
+  def agrees?(a, b), do: agree?(a, b)
+
   @doc "Run one program every way and compare (see the module doc)."
   @spec run(String.t()) :: map()
   def run(source) do
