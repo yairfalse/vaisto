@@ -325,6 +325,7 @@ The `:any` audit (§15.5) found further holes that let ill-typed programs throug
 | D22 | Nominal types are not enforced at function boundaries. An unannotated parameter is a type variable: matching it against constructor patterns of type `A` accepts a value of type `B`, and exhaustiveness is skipped because the scrutinee type is unknown. With a known scrutinee type both are checked. | With `(deftype A (X :int))` and `(deftype B (Y :int))`: `(defn f [v] :int (match v [(X n) n]))` then `(f (Y 1))` is accepted, while `(match (Y 1) [(X n) n])` is rejected as non-exhaustive. | Workflow phases cannot be enforced (§16.3). |
 | D24 | Row-polymorphic field access crashes at runtime on both backends: row-typed access compiles to `maps:get` (`core_emitter.ex:1191`) but records are tagged tuples, and the Elixir emitter has no field-access clause. | `(defn get-x [r] (. r :x))` applied to `(Point 1 2)` type-checks, then raises `BadMapError` on `:core` and `FunctionClauseError` on `:elixir`. | A documented feature (row polymorphism) does not work; fixed by row evidence (§4.1). |
 | D23 | `(deftype Job p [id :int])` is silently parsed as a legacy record with fields `p` and a bracket; record types cannot take type parameters. | The parser returns `{:deftype, :Job, {:product, [{:p, :any}, {{:bracket, ...}, :any}]}}`. | Phantom phase parameters are unavailable (§16.3); another silent misparse like D7. |
+| D27 | `match` and `receive` clauses have no guards: `[x :when g body]` parsed as pattern `x` with the body `(do :when g body)`, so the guard was evaluated and ignored. Found while writing C19 (2026-10-02). Now a parse error until clause guards exist. | `(match n [x :when (> x 0) 1] [_ 0])` returned `1` for every `n`. | C19 cannot be written in surface syntax; it is tested on Core. |
 
 Further findings from the audit, read from source but not executed, are listed in §15.5.
 
@@ -2264,8 +2265,8 @@ For every mechanism: soundness assumption, trusted component, runtime representa
 
 | # | Question | Status | Recommendation |
 |---|---|---|---|
-| Q1 | Surface syntax for refinements and `decode` | **open, owner decision** | `{v :int \| p}` in type position; `(requires ...)`/`(ensures ...)` sugar; head-tagged forms, never positional guessing |
-| Q2 | Z3 as an external tool requirement (AGENTS.md: "Do not add dependencies") | **open, owner decision** | require `z3` on PATH for refined code; no internal solver |
+| Q1 | Surface syntax for refinements and `decode` | **decided** (2026-10-02): `{v :int \| p}` in the type slot of parameters and results; `decode` still open | `{v :int \| p}` in type position; `(requires ...)`/`(ensures ...)` sugar; head-tagged forms, never positional guessing |
+| Q2 | Z3 as an external tool requirement (AGENTS.md: "Do not add dependencies") | **decided** (2026-10-02): `z3` on PATH, over a Port; AGENTS.md says so | require `z3` on PATH for refined code; no internal solver |
 | Q3 | Decoding entry points for exported functions (M20) | open | opt-in first; default-on once measured |
 | Q4 | Locations in the typed AST | **resolved**: Core spans (§9.4) | — |
 | Q5 | Should measures also compile to executable functions? | open | logic-only first |
@@ -2353,6 +2354,8 @@ The numbering is historical: 2.1 comes before 1a because it depends only on Phas
 ### 21.3 Defect fixes
 
 Draft 1's Phase 0 items are still the acceptance tests for today's defects. The last column says what the current architecture does with each.
+
+**Status (2026-10-02).** Done: P0-4, P0-10 and P0-14 (the bridge gates, PR #14), P0-5 (D6, with Phase 2.1) and P0-9. Since `liquid-types.md` retires HM in Phase 1a, the fixes that only patch HM (P0-1, P0-15, P0-16, P0-18, P0-20, P0-21) are superseded by the bidirectional elaborator: Core Lint already rejects what they would fix, and refined code must pass Core Lint (§21.1). Their acceptance tests become tests of the elaborator.
 
 | # | Fixes | Change | Acceptance test | Under this draft |
 |---|---|---|---|---|

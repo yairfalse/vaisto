@@ -8,7 +8,9 @@ working contract.
 
 Vaisto is a statically-typed Scheme-like language compiling to BEAM.
 Implementation is Elixir. Build with `mix`. Two dependencies: `jason`,
-`toml`. No CI, no formatter config, no Credo, no Dialyzer.
+`toml`. Refinement checking also needs the `z3` executable on PATH (owner
+decision Q2): it is reached over a Port, not a dependency, and only programs
+with refinements start it. No CI, no formatter config, no Credo, no Dialyzer.
 
 ## Conventions you must follow
 
@@ -51,7 +53,8 @@ For any non-trivial task:
 ## Verification commands
 
 - `mix deps.get` — install dependencies (one-time).
-- `mix test` — run the full suite (~1,200 tests).
+- `mix test` — run the full suite (~1,560 tests). The refinement tests
+  (`test/refine/`) need `z3` on PATH and fail without it.
 - `mix test path/to/file_test.exs` — run one file.
 - `mix test path/to/file_test.exs:LINE` — run one test.
 - `mix escript.build` — build the `vaistoc` CLI.
