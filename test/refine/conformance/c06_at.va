@@ -5,4 +5,5 @@
   (if (== i 0) (head xs) (at (tail xs) (- i 1))))
 (defn first-or-zero [xs (List :int)] :int
   (if (> (length xs) 0) (at xs 0) 0))
-(defn main [] :int (+ (first-or-zero [5 6 7]) (first-or-zero [])))
+(defn empty [] (List :int) (tail [0]))
+(defn main [] :int (+ (first-or-zero [5 6 7]) (first-or-zero (empty))))

@@ -440,8 +440,13 @@ This is the RFC's Phase 2.1, and it is deliberately narrow:
   but not `div` or function calls;
 - the program still runs on today's backends, through the gated bridge of RFC
   §21.1. Every definition that has or uses refinements must be in the Core
-  fragment, pass Core Lint, and avoid constructs the backends disagree on.
-  Otherwise the build fails; it never runs unchecked.
+  fragment and avoid constructs the backends disagree on, and every definition
+  in a module with refinements must pass Core Lint. Until the elaborator of
+  Phase 1a, that rejects some of HM's imprecise types, such as an empty list
+  literal `[]`, typed `(List Any)`. Otherwise the build fails; it never runs
+  unchecked;
+- refinements are checked within one module. A call to a refined function in
+  another module is refused until interfaces carry refinements (RFC C12).
 
 ### What comes next
 

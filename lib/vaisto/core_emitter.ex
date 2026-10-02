@@ -450,13 +450,8 @@ defmodule Vaisto.CoreEmitter do
     )
   end
   defp to_core_expr_with_state({:call, :++, [left, right], _type}, state_var) do
-    l = to_core_expr_with_state(left, state_var)
-    r = to_core_expr_with_state(right, state_var)
-    :cerl.c_call(
-      :cerl.c_atom(:erlang),
-      :cerl.c_atom(:iolist_to_binary),
-      [:cerl.c_cons(l, :cerl.c_cons(r, :cerl.c_nil()))]
-    )
+    [to_core_expr_with_state(left, state_var), to_core_expr_with_state(right, state_var)]
+    |> in_order(fn [l, r] -> concat_call(l, r) end)
   end
   defp to_core_expr_with_state({:call, op, [left, right], _type}, state_var) when op in [:and, :or] do
     short_circuit(op, to_core_expr_with_state(left, state_var), to_core_expr_with_state(right, state_var))
@@ -510,16 +505,13 @@ defmodule Vaisto.CoreEmitter do
   defp to_core_expr({:list, elements, _type}, user_fns, local_vars) do
     elements
     |> Enum.map(&to_core_expr(&1, user_fns, local_vars))
-    |> Enum.reverse()
-    |> Enum.reduce(:cerl.c_nil(), fn elem, acc -> :cerl.c_cons(elem, acc) end)
+    |> in_order(fn elems -> elems |> Enum.reverse() |> Enum.reduce(:cerl.c_nil(), &:cerl.c_cons/2) end)
   end
 
   # Cons expression: [head | tail] → prepend head to tail list
   defp to_core_expr({:cons, head, tail, _type}, user_fns, local_vars) do
-    :cerl.c_cons(
-      to_core_expr(head, user_fns, local_vars),
-      to_core_expr(tail, user_fns, local_vars)
-    )
+    [to_core_expr(head, user_fns, local_vars), to_core_expr(tail, user_fns, local_vars)]
+    |> in_order(fn [h, t] -> :cerl.c_cons(h, t) end)
   end
 
   # Variables
@@ -780,13 +772,8 @@ defmodule Vaisto.CoreEmitter do
 
   # String concatenation: (++ a b) → erlang:iolist_to_binary([a | [b]])
   defp to_core_expr({:call, :++, [left, right], _type}, user_fns, local_vars) do
-    l = to_core_expr(left, user_fns, local_vars)
-    r = to_core_expr(right, user_fns, local_vars)
-    :cerl.c_call(
-      :cerl.c_atom(:erlang),
-      :cerl.c_atom(:iolist_to_binary),
-      [:cerl.c_cons(l, :cerl.c_cons(r, :cerl.c_nil()))]
-    )
+    [to_core_expr(left, user_fns, local_vars), to_core_expr(right, user_fns, local_vars)]
+    |> in_order(fn [l, r] -> concat_call(l, r) end)
   end
 
   # Boolean binary: (and a b), (or a b) short-circuit
@@ -875,10 +862,8 @@ defmodule Vaisto.CoreEmitter do
 
   # cons: [elem | list]
   defp to_core_expr({:call, :cons, [elem_expr, list_expr], _type}, user_fns, local_vars) do
-    :cerl.c_cons(
-      to_core_expr(elem_expr, user_fns, local_vars),
-      to_core_expr(list_expr, user_fns, local_vars)
-    )
+    [to_core_expr(elem_expr, user_fns, local_vars), to_core_expr(list_expr, user_fns, local_vars)]
+    |> in_order(fn [h, t] -> :cerl.c_cons(h, t) end)
   end
 
   # empty?: list == []
@@ -1304,6 +1289,28 @@ defmodule Vaisto.CoreEmitter do
   defp to_core_expr(a, _user_fns, _local_vars) when is_atom(a), do: :cerl.c_atom(a)
 
   # --- Helper functions ---
+
+  # Core Erlang leaves the evaluation order of a constructor's fields
+  # unspecified, and the compiler builds a cons cell's tail before its head.
+  # Liquid Core evaluates left to right (liquid-core.md §6.2), so operands that
+  # are not already values are bound in order first (D28).
+  defp in_order(cores, build) do
+    {operands, bindings} =
+      Enum.map_reduce(cores, [], fn core, bindings ->
+        if :cerl.is_literal(core) or :cerl.type(core) == :var do
+          {core, bindings}
+        else
+          var = :cerl.c_var(:"__ord#{System.unique_integer([:positive])}__")
+          {var, [{var, core} | bindings]}
+        end
+      end)
+
+    Enum.reduce(bindings, build.(operands), fn {var, core}, body -> :cerl.c_let([var], core, body) end)
+  end
+
+  defp concat_call(l, r) do
+    :cerl.c_call(:cerl.c_atom(:erlang), :cerl.c_atom(:iolist_to_binary), [:cerl.c_cons(l, :cerl.c_cons(r, :cerl.c_nil()))])
+  end
 
   # (and a b) → case a of true -> b; false -> false end
   # (or a b)  → case a of true -> true; false -> b end

@@ -75,9 +75,9 @@ defmodule Vaisto.Build.Compiler do
          {:ok, module_name} <- resolve_module_name(ast, source_path, source_roots),
          env = build_environment(ast, import_env, search_paths, auto_import),
          {:ok, typed_ast} <- typecheck(ast, env, full_source),
-         :ok <- check_refinements(typed_ast, sigs, ast, full_source, opts),
+         :ok <- check_refinements(typed_ast, sigs, ast, full_source, Keyword.put(opts, :env, env)),
          {:ok, bytecode} <- emit(typed_ast, module_name, backend),
-         :ok <- write_outputs(module_name, bytecode, typed_ast, output_dir) do
+         :ok <- write_outputs(module_name, bytecode, typed_ast, Map.keys(sigs), output_dir) do
       {:ok,
        %{
          module: module_name,
@@ -151,6 +151,7 @@ defmodule Vaisto.Build.Compiler do
   defp merge_env(env, imported) do
     Map.merge(env, imported, fn
       key, base, extra when key in [:__classes__, :__instances__] -> Map.merge(base, extra)
+      :__refined_imports__, base, extra -> MapSet.union(base, extra)
       _key, _base, extra -> extra
     end)
   end
@@ -171,7 +172,7 @@ defmodule Vaisto.Build.Compiler do
   end
 
   defp check_refinements(typed_ast, sigs, ast, source, opts) do
-    case Compilation.check_refinements(typed_ast, sigs, ast, source, Keyword.take(opts, [:solver, :rlimit, :z3])) do
+    case Compilation.check_refinements(typed_ast, sigs, ast, source, Keyword.take(opts, [:solver, :rlimit, :z3, :env])) do
       :ok -> :ok
       {:error, errors} -> {:error, Vaisto.ErrorFormatter.format_all(errors, source)}
     end
@@ -184,7 +185,7 @@ defmodule Vaisto.Build.Compiler do
     end
   end
 
-  defp write_outputs(module_name, bytecode, typed_ast, output_dir) do
+  defp write_outputs(module_name, bytecode, typed_ast, refined, output_dir) do
     # Write .beam
     beam_path = Path.join(output_dir, "#{module_name}.beam")
     File.mkdir_p!(Path.dirname(beam_path))
@@ -193,7 +194,7 @@ defmodule Vaisto.Build.Compiler do
     # Write .vsi interface
     types = extract_types(typed_ast)
     exports = extract_exports(typed_ast)
-    Interface.save(module_name, exports, types, output_dir)
+    Interface.save(module_name, Map.put(exports, :__refined__, refined), types, output_dir)
 
     :ok
   end

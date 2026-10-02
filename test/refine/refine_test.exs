@@ -173,6 +173,62 @@ defmodule Vaisto.Refine.RefineTest do
     end
   end
 
+  # Each from a program the adversarial review of Phase 2.1 found accepted
+  # while breaking the soundness claim of §4.4, or wrongly rejected.
+  describe "review findings" do
+    @describetag :z3
+
+    test "1: a crashing arm's negation is used only when its selection is exact" do
+      # [0 | t] is not exact (a head test on a fresh name), so the fallback arm's
+      # condition len(xs) ≠ 0 is only necessary; f (list 0) returns 2.
+      source = "(defn f [xs (List :int)] {r :int | (== r 1)} (let [r (match xs [[0 | t] 2] [[] 1])] r))"
+      assert ["result does not satisfy the declared type"] = messages(compile(source))
+    end
+
+    test "2: every definition must pass Core Lint, not only refined code and its callers" do
+      source = "(defn inc [x] (+ x 1))\n(defn f [n {v :int | (> v 0)}] :int (div 10 n))\n(defn main [] :int (let [y (inc -0.5)] (if (> y 0) (f y) 0)))"
+      assert [message] = messages(compile(source))
+      assert message =~ "needs `inc` to be well typed"
+    end
+
+    test "3: class and instance methods must not use refined functions" do
+      source = @safe_div <> "(defclass Foo [a] (foo [x :a] :int))\n(instance Foo :int (foo [x] (safe-div 10 x)))"
+      assert [message] = messages(compile(source))
+      assert message =~ "only calls inside a `defn` are checked"
+    end
+
+    test "4: a call to a refined function in another module is refused until interfaces carry refinements (C12)" do
+      dir = Path.join(System.tmp_dir!(), "vaisto_refine_xmod_#{System.unique_integer([:positive])}")
+      File.mkdir_p!(dir)
+      on_exit(fn -> File.rm_rf!(dir) end)
+
+      File.write!(Path.join(dir, "RefA.va"), "(ns RefA)\n" <> @safe_div)
+      File.write!(Path.join(dir, "RefB.va"), "(ns RefB)\n(import RefA)\n(defn main [] :int (RefA/safe-div 1 0))")
+
+      assert {:error, message} = Vaisto.Build.build(dir, output_dir: Path.join(dir, "out"))
+      assert inspect(message) =~ "`RefA/safe-div` has refinements, and calls across modules are not checked yet"
+    end
+
+    test "6: a parameter named result does not capture the result placeholder" do
+      source = "(defn f [result :int] {r :int | (>= r result)} (- result 1))"
+      assert ["result does not satisfy the declared type"] = messages(compile(source))
+    end
+
+    test "7: a parameter named like a fresh name does not collide with one" do
+      source = "(defn zero [] {r :int | (== r 0)} 0)\n(defn f [#2 :int] {r :int | (== r 0)} (let [z (zero)] #2))"
+      assert ["result does not satisfy the declared type"] = messages(compile(source))
+    end
+
+    test "8: a match on a sum type in synthesis position adds no false contradiction" do
+      source = "(deftype Opt (Some :int) (None))\n" <> @safe_div <> "(defn f [o :int] :int (let [k (match (Some o) [(Some v) 1] [(None) 2])] (safe-div 10 3)))"
+      assert {:ok, _, _} = compile(source)
+    end
+
+    test "9: a list match in synthesis position keeps what every arm returns" do
+      assert {:ok, _, _} = compile("(defn f [xs (List :int)] {r :int | (== r 1)} (let [r (match xs [[h | t] 1] [[] 1])] r))")
+    end
+  end
+
   describe "the solver (§11.2)" do
     test "a program without refinements never starts the solver" do
       assert {:ok, _, _} = compile("(defn f [x :int] :int (div 1 x))", solver: __MODULE__.NoSolver, z3: "/nonexistent/z3")

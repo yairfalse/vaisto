@@ -26,10 +26,18 @@ defmodule Vaisto.Refine.VCGen do
 
   alias Vaisto.Refine.{IR, Predicate, Render, Surface, VC}
 
+  # Names in the logic. A Core binder keeps its own name. Fresh names and a
+  # signature's placeholders contain a space, which no Vaisto name can, so a
+  # parameter called `result` or `#2` can neither capture a placeholder nor
+  # collide with a fresh name.
+  @result :"the result"
+  defp param(i), do: :"param #{i}"
+  defp fresh_name(n), do: :"fresh #{n}"
+
   defmodule LogicSig do
     @moduledoc false
     # A refined signature in the logic. Predicates mention the placeholders
-    # {:var, {:param, i}, sort} and {:var, :result, sort}. A conjunct is
+    # {:var, param(i), sort} and {:var, @result, sort}. A conjunct is
     # {surface_predicate, ir_predicate, binder_names}.
     defstruct [:name, :params, :result_sort, :result, :surface]
   end
@@ -69,13 +77,13 @@ defmodule Vaisto.Refine.VCGen do
         |> Enum.with_index()
         |> Enum.map_reduce(%{}, fn {{{pname, base, ref}, ptype}, i}, scope ->
           sort = sort_of(ptype)
-          scope = if sort, do: Map.put(scope, pname, {{:var, {:param, i}, sort}, sort}), else: scope
-          conjuncts = conjuncts(name, pname, base, ref, scope, sort, {:param, i})
+          scope = if sort, do: Map.put(scope, pname, {{:var, param(i), sort}, sort}), else: scope
+          conjuncts = conjuncts(name, pname, base, ref, scope, sort, param(i))
           {%{name: pname, sort: sort, conjuncts: conjuncts}, scope}
         end)
 
       result_sort = sort_of(result_type)
-      result = conjuncts(name, :result, elem(sig.result, 0), rref, scope, result_sort, :result)
+      result = conjuncts(name, :result, elem(sig.result, 0), rref, scope, result_sort, @result)
 
       problems = for p <- [result | Enum.map(logic_params, & &1.conjuncts)], match?({:error, _}, p), do: elem(p, 1)
 
@@ -139,7 +147,7 @@ defmodule Vaisto.Refine.VCGen do
         st
 
       sig ->
-        param_terms = for {[x, _], i} <- Enum.with_index(params), into: %{}, do: {{:param, i}, term_of(binds[x])}
+        param_terms = for {[x, _], i} <- Enum.with_index(params), into: %{}, do: {param(i), term_of(binds[x])}
         requires = for p <- sig.params, {_s, ir, _b} <- p.conjuncts, do: fact(IR.subst(ir, param_terms))
         env = %{env | facts: Enum.reverse(requires)}
         st = vacuity(f, env, body, st)
@@ -176,7 +184,7 @@ defmodule Vaisto.Refine.VCGen do
 
   defp guarantee(f, sig, env, goals, st) do
     {r, st} = fresh(sig.result_sort, st)
-    held = for {_s, ir, _b} <- goals, do: fact(IR.subst(ir, %{:result => r}))
+    held = for {_s, ir, _b} <- goals, do: fact(IR.subst(ir, %{@result => r}))
     emit(st, :vacuity, env.facts ++ held, {:bool, false}, %{def: f, about: :guarantee})
   end
 
@@ -221,8 +229,8 @@ defmodule Vaisto.Refine.VCGen do
       sv ->
         {_, st} =
           Enum.reduce(clauses, {[], st}, fn clause, {earlier, st} ->
-            {clause_env, body, negation, st} = clause_env(clause, sv, earlier, env, st)
-            {earlier ++ [negation], check(body, clause_env, st, goals, within)}
+            {clause_env, body, matched, st} = clause_env(clause, sv, earlier, env, st)
+            {earlier ++ [matched], check(body, clause_env, st, goals, within)}
           end)
 
         st
@@ -248,14 +256,14 @@ defmodule Vaisto.Refine.VCGen do
 
         Enum.reduce(goals, st, fn {surface, ir, binder}, st ->
           meta = %{def: env.def, about: :result, expr: e, within: within, conjunct: surface, subst: %{binder => "the result"}, notes: notes(env)}
-          emit(st, :postcondition, env.facts, IR.subst(ir, %{:result => r}), meta)
+          emit(st, :postcondition, env.facts, IR.subst(ir, %{@result => r}), meta)
         end)
     end
   end
 
   defp sort_of_goals([{_s, ir, _b} | _], v) do
-    case IR.vars(ir) |> Enum.find(fn {name, _} -> name == :result end) do
-      {:result, sort} -> sort
+    case IR.vars(ir) |> Enum.find(fn {name, _} -> name == @result end) do
+      {@result, sort} -> sort
       nil -> v.s
     end
   end
@@ -334,7 +342,8 @@ defmodule Vaisto.Refine.VCGen do
         {phi, st} = bool_term(cv, st)
         {va, env_a, st} = synth(a, add_fact(env, phi, branch_note(c, true)), st)
         {vb, env_b, st} = synth(b, add_fact(env, IR.not_(phi), branch_note(c, false)), st)
-        join(phi, {va, learned(env_a, env, 1)}, {vb, learned(env_b, env, 1)}, env, st)
+        arms = [%{sel: phi, v: va, facts: learned(env_a, env, 1)}, %{sel: IR.not_(phi), v: vb, facts: learned(env_b, env, 1)}]
+        join_arms(arms, env, st)
     end
   end
 
@@ -344,14 +353,13 @@ defmodule Vaisto.Refine.VCGen do
         {:bottom, env, st}
 
       {sv, env, st} ->
-        {arms, st} =
+        {{_matched, arms}, st} =
           Enum.reduce(clauses, {{[], []}, st}, fn clause, {{earlier, arms}, st} ->
-            {clause_env, body, negation, st} = clause_env(clause, sv, earlier, env, st)
+            {clause_env, body, matched, st} = clause_env(clause, sv, earlier, env, st)
             {v, body_env, st} = synth(body, clause_env, st)
-            arm = {IR.and_(learned_all(clause_env, env)), v, learned(body_env, clause_env, 0)}
-            {{earlier ++ [negation], arms ++ [arm]}, st}
+            arm = %{sel: selection(earlier, matched), v: v, facts: learned(clause_env, env, 0) ++ learned(body_env, clause_env, 0)}
+            {{earlier ++ [matched], arms ++ [arm]}, st}
           end)
-          |> then(fn {{_, arms}, st} -> {arms, st} end)
 
         join_arms(arms, env, st)
     end
@@ -409,7 +417,7 @@ defmodule Vaisto.Refine.VCGen do
 
   defp fresh_like(v, env, st) do
     {t, st} = fresh(v.s, st)
-    {%{v | t: t}, env, st}
+    {val(t, v.s, v.ty), env, st}
   end
 
   # A lambda's body is checked where it is written, with its parameters
@@ -423,46 +431,52 @@ defmodule Vaisto.Refine.VCGen do
 
   # --- Joins ---------------------------------------------------------------------------
 
-  # The guarded join of an `if` in synthesis position (§4.4): each branch's
-  # facts hold under its condition. A branch that crashes contributes the
-  # negation of its condition.
-  defp join(phi, {va, facts_a}, {vb, facts_b}, env, st) do
-    join_arms([{phi, va, facts_a}, {IR.not_(phi), vb, facts_b}], env, st)
-  end
-
+  # The guarded join of an `if` or a `match` in synthesis position (§4.4). An
+  # arm is %{sel: its exact selection condition or nil, v: its value or
+  # :bottom, facts: what holds when it is taken}.
+  #
+  # `sel ⇒ facts` is sound only when sel is sufficient for taking the arm, and
+  # `¬sel` for a crashing arm only when sel is necessary too: so both need an
+  # exact sel. Facts naming fresh binders go in the consequent, where a model
+  # cannot falsify them to make the implication vacuous.
   defp join_arms(arms, env, st) do
-    live = for {cond, v, facts} <- arms, v != :bottom, do: {cond, v, facts}
-
-    case live do
+    case Enum.reject(arms, &(&1.v == :bottom)) do
       [] ->
         {:bottom, env, st}
 
-      [{cond, v, facts}] ->
-        # Only one way out: its condition and its facts hold afterwards.
-        env = Enum.reduce([cond | facts], env, &add_fact(&2, &1))
-        {v, env, st}
+      [arm] ->
+        # Only one way out, so it was taken: its facts hold afterwards.
+        facts = if arm.sel, do: [arm.sel | arm.facts], else: arm.facts
+        {arm.v, Enum.reduce(facts, env, &add_fact(&2, &1)), st}
 
-      [{_, first, _} | _] ->
-        sort = Enum.find_value(live, fn {_, v, _} -> v.s end)
+      [first | _] = live ->
+        sort = Enum.find_value(live, & &1.v.s)
         {r, st} = if sort, do: fresh(sort, st), else: {nil, st}
 
         guarded =
-          for {cond, v, facts} <- live do
+          for %{sel: sel, v: v, facts: facts} <- live, sel != nil do
             eq = if r && v.t && v.s == sort, do: [{:eq, r, v.t}], else: []
-            IR.implies(cond, IR.and_(facts ++ eq))
+            IR.implies(sel, IR.and_(facts ++ eq))
           end
 
-        # The arms are exhaustive only if one of the conditions holds; the
-        # crashing arms already said which ones cannot.
-        dead = for {cond, :bottom, _} <- arms, do: IR.not_(cond)
+        dead = for %{sel: sel, v: :bottom} <- arms, sel != nil, do: IR.not_(sel)
         env = Enum.reduce(guarded ++ dead, env, &add_fact(&2, &1))
-        {%{t: r, s: sort, ty: first.ty}, env, st}
+        {val(r, sort, first.v.ty), env, st}
+    end
+  end
+
+  # A match arm is taken exactly when no earlier clause matched and its own
+  # does. That is expressible only when every one of those match conditions
+  # is; an arm with no exact selection condition guards nothing and is
+  # negated by nothing (§10.3, §11.2).
+  defp selection(earlier, matched) do
+    if matched != nil and Enum.all?(earlier, &(&1 != nil)) do
+      IR.and_(Enum.map(earlier, &IR.not_/1) ++ [matched])
     end
   end
 
   # The facts env gained since `base`, minus the first `skip` it was given on entry.
   defp learned(env, base, skip), do: env.facts |> Enum.take(length(env.facts) - length(base.facts) - skip) |> Enum.map(& &1.p) |> Enum.reverse()
-  defp learned_all(env, base), do: learned(env, base, 0)
 
   # --- Primitives (§4.3) ---------------------------------------------------------------
 
@@ -628,7 +642,7 @@ defmodule Vaisto.Refine.VCGen do
           |> Enum.with_index()
           |> Enum.map_reduce(st, fn {{v, p}, i}, st ->
             {t, st} = if p.sort, do: logic_term(v, st, p.sort), else: {nil, st}
-            {{{:param, i}, t}, st}
+            {{param(i), t}, st}
           end)
 
         terms = for {k, t} <- terms, t != nil, into: %{}, do: {k, t}
@@ -650,7 +664,7 @@ defmodule Vaisto.Refine.VCGen do
         env =
           case rv.t do
             nil -> env
-            r -> Enum.reduce(sig.result, env, fn {_s, ir, _b}, env -> add_fact(env, IR.subst(ir, Map.put(terms, :result, r))) end)
+            r -> Enum.reduce(sig.result, env, fn {_s, ir, _b}, env -> add_fact(env, IR.subst(ir, Map.put(terms, @result, r))) end)
           end
 
         {rv, env, st}
@@ -681,7 +695,7 @@ defmodule Vaisto.Refine.VCGen do
           |> Enum.with_index()
           |> Enum.map_reduce(st, fn {p, i}, st ->
             {t, st} = if p.sort, do: fresh(p.sort, st), else: {nil, st}
-            {{{:param, i}, t}, st}
+            {{param(i), t}, st}
           end)
 
         terms = Map.new(terms)
@@ -696,8 +710,10 @@ defmodule Vaisto.Refine.VCGen do
 
   # --- Match clauses (§10.3) -----------------------------------------------------------
 
-  # The env a clause body runs in, and the fact later clauses learn when
-  # this clause was not chosen (nil when it cannot be expressed).
+  # The env a clause body runs in, and the clause's exact match condition:
+  # pattern and guard as a predicate over the scrutinee, nil when the logic
+  # cannot state it. `earlier` holds the earlier clauses' match conditions,
+  # whose negations hold in this clause.
   defp clause_env(clause, sv, earlier, env, st) do
     {pat, guard, body} =
       case clause do
@@ -708,7 +724,7 @@ defmodule Vaisto.Refine.VCGen do
     first_fresh = st.n + 1
     {%{tests: tests, local: local, binds: binds, exact?: exact?}, st} = pattern(pat, sv, st)
 
-    env = Enum.reduce(for(n <- earlier, n != nil, do: n), env, &add_fact(&2, &1))
+    env = Enum.reduce(for(m <- earlier, m != nil, do: IR.not_(m)), env, &add_fact(&2, &1))
     env = Enum.reduce(tests ++ local, env, &add_fact(&2, &1))
     env = %{env | binds: Map.merge(env.binds, binds)}
 
@@ -721,21 +737,21 @@ defmodule Vaisto.Refine.VCGen do
 
     env = if guard_fact, do: add_fact(env, guard_fact), else: env
 
-    negation =
+    matched =
       cond do
-        not exact? -> nil
+        not exact? or mentions_fresh?(tests, first_fresh, st.n) -> nil
         guard != nil and not guard_exact? -> nil
-        guard_fact -> IR.not_(IR.and_(tests ++ [guard_fact]))
-        true -> IR.not_(IR.and_(tests))
+        guard_fact -> IR.and_(tests ++ [guard_fact])
+        true -> IR.and_(tests)
       end
 
-    {env, body, negation, st}
+    {env, body, matched, st}
   end
 
   # A guard can be negated for later clauses only if it speaks about the
   # scrutinee, never about a name this pattern made up (fresh names first..last).
   defp mentions_fresh?(preds, first, last) do
-    made_up = MapSet.new(first..last//1, &:"##{&1}")
+    made_up = MapSet.new(first..last//1, &fresh_name/1)
     Enum.any?(IR.vars(preds), fn {name, _} -> MapSet.member?(made_up, name) end)
   end
 
@@ -922,7 +938,7 @@ defmodule Vaisto.Refine.VCGen do
 
   defp bool_term(v, st), do: logic_term(v, st, :bool)
 
-  defp fresh(sort, st), do: {{:var, :"##{st.n + 1}", sort}, %{st | n: st.n + 1}}
+  defp fresh(sort, st), do: {{:var, fresh_name(st.n + 1), sort}, %{st | n: st.n + 1}}
 
   @doc false
   def sort_of(:Int), do: :int

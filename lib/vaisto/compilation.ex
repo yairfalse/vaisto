@@ -72,7 +72,7 @@ defmodule Vaisto.Compilation do
       {plain_ast, sigs} = Refine.Surface.split(ast)
 
       with {:ok, _type, typed_ast} <- typecheck(plain_ast, env, full_source, line_offset, format_errors),
-           :ok <- refine(typed_ast, sigs, plain_ast, full_source, line_offset, format_errors, opts) do
+           :ok <- refine(typed_ast, sigs, plain_ast, full_source, line_offset, format_errors, Keyword.put(opts, :env, env)) do
         Logger.debug("compile: emitting #{module_name} (backend: #{backend})")
         emit(typed_ast, module_name, backend, load: load)
       end
@@ -189,7 +189,7 @@ defmodule Vaisto.Compilation do
   end
 
   defp refine(typed_ast, sigs, plain_ast, source, line_offset, format_errors, opts) do
-    refine_opts = Keyword.take(opts, [:solver, :rlimit, :z3])
+    refine_opts = Keyword.take(opts, [:solver, :rlimit, :z3, :env])
 
     case check_refinements(typed_ast, sigs, plain_ast, source, refine_opts) do
       :ok -> :ok

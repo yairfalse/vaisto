@@ -33,15 +33,49 @@ defmodule Vaisto.Refine do
   `:locs` (definition name to `%Loc{}`), and solver options such as `:rlimit`.
   """
   @spec check(term(), %{atom() => Surface.Sig.t()}, keyword()) :: :ok | {:error, [Error.t()]}
-  def check(_typed, sigs, _opts) when map_size(sigs) == 0, do: :ok
-
   def check(typed, sigs, opts) do
+    with :ok <- imported_calls(typed, Keyword.get(opts, :env, %{}), opts) do
+      if map_size(sigs) == 0, do: :ok, else: check_refined(typed, sigs, opts)
+    end
+  end
+
+  # Interfaces do not carry refinements until Phase 1b (§8.1), so a call to an
+  # imported refined function could not be checked. It is refused, and
+  # refinements are checked within one module (§21.2, C12).
+  defp imported_calls(typed, env, opts) do
+    refined = Map.get(env, :__refined_imports__, MapSet.new())
+
+    calls =
+      if MapSet.size(refined) == 0, do: [], else: qualified_calls(typed) |> Enum.filter(&MapSet.member?(refined, &1)) |> Enum.uniq()
+
+    case calls do
+      [] ->
+        :ok
+
+      calls ->
+        {:error,
+         for call <- calls do
+           [mod, f] = call |> Atom.to_string() |> String.split(":", parts: 2)
+           Error.new("`#{mod}/#{f}` has refinements, and calls across modules are not checked yet",
+             hint: "call it from inside `#{mod}`; checking imported refinements needs refined interfaces (RFC C12)",
+             span: Keyword.get(opts, :span)
+           )
+         end}
+    end
+  end
+
+  defp qualified_calls({:qualified, mod, f}), do: [:"#{mod}:#{f}"]
+  defp qualified_calls(term) when is_tuple(term), do: term |> Tuple.to_list() |> qualified_calls()
+  defp qualified_calls(term) when is_list(term), do: Enum.flat_map(term, &qualified_calls/1)
+  defp qualified_calls(_term), do: []
+
+  defp check_refined(typed, sigs, opts) do
     {:ok, core, skipped} = Adapter.module(typed)
     refined = MapSet.new(Map.keys(sigs))
 
     with :ok <- gate_forms(typed, core, skipped, refined, opts),
          involved = involved(core, refined),
-         :ok <- gate_lint(core, involved, opts),
+         :ok <- gate_lint(core, opts),
          :ok <- commutes(core, sigs, opts),
          {:ok, lsigs} <- logic_sigs(sigs, core, opts),
          {vcs, []} <- VCGen.generate(core, lsigs, involved) do
@@ -80,16 +114,17 @@ defmodule Vaisto.Refine do
     if problems == [], do: :ok, else: {:error, Enum.map(problems, &gate_error(&1, opts))}
   end
 
-  defp gate_lint(core, involved, opts) do
+  # A1 (§4.4): Core Lint's rules hold for the program. Every definition, not
+  # only the refined ones and their callers: a value HM mistyped elsewhere
+  # (a Float typed Int, D17) reaches refined code through ordinary calls.
+  defp gate_lint(core, opts) do
     case Lint.check_module(core) do
       :ok ->
         :ok
 
       {:error, problems} ->
-        case for(%{in: f, message: m} <- problems, MapSet.member?(involved, f), do: {f, m}) do
-          [] -> :ok
-          problems -> {:error, Enum.map(Enum.uniq(problems), fn {f, m} -> gate_error({f, "refinement checking needs `#{f}` to be well typed: #{m}"}, opts) end)}
-        end
+        problems = for %{in: f, message: m} <- problems, uniq: true, do: {f, m}
+        {:error, Enum.map(problems, fn {f, m} -> gate_error({f, "refinement checking needs `#{f}` to be well typed: #{m}"}, opts) end)}
     end
   end
 
@@ -155,7 +190,10 @@ defmodule Vaisto.Refine do
   defp forms({:module, forms}), do: forms
   defp forms(form), do: [form]
 
-  defp declaration?(form) when is_tuple(form), do: elem(form, 0) in [:deftype, :extern, :ns, :import, :defclass, :instance, :instance_constrained, :defprompt]
+  # Forms without code. Classes and instances have method bodies, so they are
+  # not declarations here: the adapter does not translate them, and they must
+  # not use refined functions.
+  defp declaration?(form) when is_tuple(form), do: elem(form, 0) in [:deftype, :extern, :ns, :import, :defprompt]
   defp declaration?(_form), do: false
 
   # The name a top-level form defines, or nil for an expression. Only these
