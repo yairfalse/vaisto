@@ -1,0 +1,5 @@
+; C3: clamp0 correct (RFC §14)
+; expect: compiles
+; main: 7
+(defn clamp0 [x :int] {r :int | (>= r 0)} (if (< x 0) 0 x))
+(defn main [] :int (+ (clamp0 -5) (clamp0 7)))

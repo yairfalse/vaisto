@@ -170,19 +170,27 @@ defmodule Vaisto.TypeChecker do
 
   # Module: list of top-level forms (process, supervise, def)
   def check(forms, env) when is_list(forms) do
-    check_module(forms, env, [])
+    if Vaisto.Refine.Surface.refined?(forms) do
+      {:error, Errors.refinement_unchecked()}
+    else
+      check_module(forms, env, [])
+    end
   end
 
   # Generic location handling for all AST tuple nodes
   # Routes through check_s which threads TcCtx for substitution propagation
   def check(node, env) when is_tuple(node) do
-    ctx = TcCtx.new(env)
-    case check_s(node, ctx) do
-      {:ok, type, ast, ctx} ->
-        final_type = TcCtx.apply_subst(ctx, type)
-        final_ast = apply_subst_to_ast(ctx.subst, ast)
-        {:ok, final_type, final_ast}
-      {:error, _} = err -> err
+    if Vaisto.Refine.Surface.refined?(node) do
+      {:error, Errors.refinement_unchecked()}
+    else
+      ctx = TcCtx.new(env)
+      case check_s(node, ctx) do
+        {:ok, type, ast, ctx} ->
+          final_type = TcCtx.apply_subst(ctx, type)
+          final_ast = apply_subst_to_ast(ctx.subst, ast)
+          {:ok, final_type, final_ast}
+        {:error, _} = err -> err
+      end
     end
   end
 

@@ -1,0 +1,5 @@
+; C2: safe-div called with no fact about the divisor (RFC §14)
+; expect: errors
+; error: requirement not met | `safe-div` requires (!= n 0) for its argument `y` | n
+(defn safe-div [x :int y {d :int | (!= d 0)}] :int (div x y))
+(defn avg-bad [total :int n :int] :int (safe-div total n))

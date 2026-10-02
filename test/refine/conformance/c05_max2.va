@@ -1,0 +1,5 @@
+; C5: max2 correct (RFC §14)
+; expect: compiles
+; main: 9
+(defn max2 [x :int y :int] {v :int | (and (>= v x) (>= v y))} (if (> x y) x y))
+(defn main [] :int (max2 4 9))

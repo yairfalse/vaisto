@@ -12,14 +12,15 @@ Vaisto has three layers, each built on the one below:
    pipeline that extracts a type the prompt does not promise does not compile.
 3. **Liquid Vaisto**: a small semantic core that says what every Vaisto
    program means, with a reference evaluator, a trusted checker and a
-   differential harness. BEAM becomes one implementation of it, and
-   refinement types are the next step.
+   differential harness. BEAM becomes one implementation of it. Its first
+   refinement types, checked with the Z3 solver, work today.
 
 > Prompts are prose. Vaisto makes them structurally accountable.
 
 Vaisto is early. The language, both backends, the LSP server and the prompt
-checks work today; the semantic core has its foundation in place. Every
-known gap is listed under [Status and known gaps](#status-and-known-gaps).
+checks work today; the semantic core has its foundation and its first
+refinement types in place. Every known gap is listed under
+[Status and known gaps](#status-and-known-gaps).
 
 ## Contents
 
@@ -395,24 +396,65 @@ when this was written:
 | outside the core so far | 20 | processes, `str`, and calls across modules |
 | rejected by HM | 6 | tests that expect a type error |
 
-### What comes next
+### Refinement types
 
-The backend disagreements the harness found (D5, D11, D12) and the scoping
-bug D15 are fixed: these are the defect fixes RFC §21.1 requires before
-refinements can run on today's backends. Next comes the first refinement step,
-checked with the Z3 solver:
+A refined type is a type with a predicate, written in the type slot of a
+parameter or a result:
 
 ```scheme
-; design: not implemented yet
 (defn safe-div [x :int y {d :int | (!= d 0)}] :int (div x y))
 (defn clamp0 [x :int] {r :int | (>= r 0)} (if (< x 0) 0 x))
+
+(defn avg [total :int n :int] :int
+  (if (> n 0) (safe-div total n) 0))      ; compiles: n > 0 here
+(defn avg-bad [total :int n :int] :int
+  (safe-div total n))                     ; does not compile
 ```
 
-Calling `safe-div` with a divisor that might be zero becomes a compile error
-with a counterexample; a refined function's result is a fact its callers can
-use. Later phases bring effect rows and deterministic replay, sealed types and
-capabilities, and contracts as a library. The RFC's §21 has the order and the
-dependencies.
+```text
+error: requirement not met
+  at line 7
+      (safe-div total n))                     ; does not compile
+                      ^ `safe-div` requires (!= n 0) for its argument `y`
+  note: nothing is known about `n` here
+```
+
+The compiler proves, with the Z3 solver, that every call to a refined function
+meets its requirements and that every refined function returns what it
+promises. Inside a refined function it also proves that `div`, `rem`, `head`
+and `tail` cannot crash. Branch conditions, `and`/`or`, guards, `let`
+bindings, list patterns and the results of other refined functions all count
+as facts. Calls are checked in every function, refined or not. A program
+without refinements never starts the solver.
+
+The modules are `Vaisto.Refine` (the check and its diagnostics),
+`Vaisto.Refine.VCGen` (verification conditions over Core),
+`Vaisto.Refine.Predicate` (predicates to the solver's logic) and
+`Vaisto.Refine.SMTLIB` and `Vaisto.Refine.Solver.Z3` (the solver, reached over
+a port). The conformance programs of RFC §14 are in `test/refine/conformance/`.
+
+This is the RFC's Phase 2.1, and it is deliberately narrow:
+- refinements over `Int`, `Bool` and `List` (with `len`), on the parameters and
+  results of single-clause functions;
+- predicates use comparisons, `+ - *`, `and or not => iff`, `if` and `len`,
+  but not `div` or function calls;
+- the program still runs on today's backends, through the gated bridge of RFC
+  §21.1. Every definition that has or uses refinements must be in the Core
+  fragment and avoid constructs the backends disagree on, and every definition
+  in a module with refinements must pass Core Lint. Until the elaborator of
+  Phase 1a, that rejects some of HM's imprecise types, such as an empty list
+  literal `[]`, typed `(List Any)`. Otherwise the build fails; it never runs
+  unchecked;
+- refinements are checked within one module. A call to a refined function in
+  another module is refused until interfaces carry refinements (RFC C12).
+
+### What comes next
+
+The bidirectional elaborator that replaces HM (Phase 1a,
+[`docs/design/liquid-types.md`](docs/design/liquid-types.md)), then
+refinements over records, sums and measures (Phases 2.2 and 2.3). Later phases
+bring effect rows and deterministic replay, sealed types and capabilities, and
+contracts as a library. The RFC's §21 has the order and the dependencies.
 
 ## Architecture
 
@@ -443,7 +485,9 @@ Source (.va) -> Parser -> AST -> TypeChecker (HM) -> typed AST -+-> CoreEmitter 
 ## Getting started
 
 You need Elixir `~> 1.15` and a matching Erlang/OTP. Vaisto depends only on
-`jason` and `toml`.
+`jason` and `toml`. Programs with refinement types also need the
+[Z3](https://github.com/Z3Prover/z3) solver on your `PATH`
+(`brew install z3`, `apt install z3`).
 
 ```bash
 git clone https://github.com/yairfalse/vaisto.git
@@ -497,6 +541,7 @@ mix test --include live               # also call OpenAI (needs OPENAI_API_KEY)
 mix test test/parser_test.exs         # one file
 mix test test/parser_test.exs:12      # one test
 mix test test/liquid/                 # Liquid Core, including the soundness fuzzing and the harness
+mix test test/refine/                 # refinement types; needs z3, and fails without it
 ```
 
 Black-box tests run against the built CLI: `mix escript.build`, then
@@ -545,8 +590,12 @@ written but not used for typing imports (D9).
 match values of that type at call sites (D1, D2). Row-polymorphic field access
 on a record crashes at run time (D24).
 
+**Guards.** `match` and `receive` clauses have no guards; `[x :when g body]`
+there is a parse error (D27). Multi-clause functions take guards.
+
 **Not there yet:** receive with a timeout, binary syntax, decoding values
-from `Dyn`, refinements, effect rows, CI.
+from `Dyn`, refinements beyond `Int`, `Bool` and `List` on single-clause
+functions, effect rows, CI.
 
 ## Documentation
 

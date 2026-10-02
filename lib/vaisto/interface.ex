@@ -37,7 +37,10 @@ defmodule Vaisto.Interface do
       exports: extract_exports(type_env),
       types: types,
       classes: Map.get(type_env, :__classes__, %{}),
-      instances: Map.get(type_env, :__instances__, %{})
+      instances: Map.get(type_env, :__instances__, %{}),
+      # Functions with refinements. Until interfaces carry the refinements
+      # themselves (RFC §8.1, C12), an importer must not call them.
+      refined: Map.get(type_env, :__refined__, [])
     }
 
     path = interface_path(module_name, output_dir)
@@ -123,10 +126,16 @@ defmodule Vaisto.Interface do
       imported_instances = Map.get(interface, :instances, %{})
       existing_classes = Map.get(env, :__classes__, %{})
       existing_instances = Map.get(env, :__instances__, %{})
+      # Refined functions, under every name a call may use: the module's bare
+      # name (an interface records `Elixir.A`, a call writes `A`, D9) and its alias.
+      bare = module_name |> Atom.to_string() |> String.replace_prefix("Elixir.", "") |> String.to_atom()
+      names = Enum.uniq([bare, alias_name, Map.get(aliases, bare, bare)])
+      refined = for f <- Map.get(interface, :refined, []), name <- names, into: MapSet.new(), do: :"#{name}:#{f}"
 
       env
       |> Map.put(:__classes__, Map.merge(existing_classes, imported_classes))
       |> Map.put(:__instances__, Map.merge(existing_instances, imported_instances))
+      |> Map.update(:__refined_imports__, refined, &MapSet.union(&1, refined))
     end)
   end
 

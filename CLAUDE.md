@@ -27,7 +27,7 @@ Most of the codebase today is the language and compiler; task contracts (`defpro
 
 ```bash
 mix deps.get              # Install dependencies (also needed in every fresh git worktree)
-mix test                  # Run all tests (~1270); excludes the :live OpenAI test
+mix test                  # Run all tests (~1560); excludes the :live OpenAI test; test/refine needs z3 on PATH
 mix test --include live   # Also run the live OpenAI test (needs OPENAI_API_KEY)
 mix test test/parser_test.exs       # Run a single test file
 mix test test/parser_test.exs:12    # Run a specific test by line number
@@ -71,6 +71,7 @@ Orchestrated by `Vaisto.Compilation.compile/3`. The `Vaisto.Backend` behaviour d
 | `Vaisto.Runner` | Bridge to Elixir: `compile_and_load/3`, `run/2`, `call/3`, `spawn_process/2`. Used in e2e tests via `Runner.run(code, backend: :core)`. |
 | `Vaisto.Build` (+ `Interface`) | Multi-file builds: dependency graph, topological sort, `.vsi` interface files. `Interface` serializes module interfaces (Erlang `term_to_binary`). |
 | `Vaisto.Package.Manifest` / `Package.Namespace` | Parses `vaisto.toml`; resolves module names. Used by `Build` for multi-file compilation. |
+| `Vaisto.Refine` (+ `Surface`, `Predicate`, `VCGen`, `SMTLIB`, `Solver.Z3`) | Refinement types, RFC Phase 2.1. `Surface.split/1` takes `{v :int \| p}` out of the parsed program so HM sees base types; `Refine.check/3` adapts HM's output to Liquid Core, gates it (§21.1), generates VCs and asks `z3` over a Port. The type checker refuses a refined type that skipped this, so every compile path must call `Compilation.check_refinements/5`. |
 | `Vaisto.Lsp.Server` / `Lsp.Handler` | JSON-RPC over stdio. `Server` reads frames; `Handler` dispatches to feature modules: `Completion`, `Hover`, `SignatureHelp`, `References`, `InlayHints`. `AstAnalyzer` and `Position` are shared utilities. |
 | `Vaisto.LLM` (+ `LLM.Mock`, `LLM.OpenAI`) | Behaviour + dispatcher. `call/4` looks up provider via `Application.get_env(:vaisto, :llm, Vaisto.LLM.Mock)`. `Mock` returns canned responses for tests; `OpenAI` uses `:httpc` with structured outputs (Responses API). |
 
@@ -269,7 +270,7 @@ Typed AST shapes:
 - Multi-clause functions (`defn_multi`) hardcode arity=1
 - No receive-with-timeout, no binary/bitstring syntax
 - Record/sum annotations on `defn` parameters do not resolve at call sites: `[p :Point]` gives "expected `Point`, found `Point`". Existing tests only type-check such definitions and never call them.
-- Any call form in the return-type slot is read as a type: `(defn f [x] (println x) x)` silently drops `(println x)`.
+- `match` and `receive` clauses have no guards: `[x :when g body]` is a parse error (D27). Multi-clause `defn` takes guards.
 - Lambda parameters cannot be annotated: `(fn [x :int] x)` is a two-parameter lambda.
 - `(deftype opaque ...)` and `(deftype T p [...])` are silently misparsed as records.
 - Row-polymorphic field access type-checks but crashes at runtime on both backends when given a record.
@@ -309,7 +310,7 @@ Orienting heuristics for common change types:
 
 ## Testing
 
-About 1270 tests. `test/build/integration_test.exs:124` fails intermittently (see Multi-file changes above). Key test files:
+About 1560 tests. `test/build/integration_test.exs:124` fails intermittently (see Multi-file changes above). Key test files:
 - `typeclass_test.exs` — typeclasses, constraints, deriving, both backends
 - `type_system/infer_test.exs` — Algorithm W
 - `core_backend_parity_test.exs` — runs same code through both backends, compares results

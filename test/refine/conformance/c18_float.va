@@ -1,0 +1,4 @@
+; C18: a refinement over Float is rejected (RFC §14.2)
+; expect: errors
+; error: in `pos`: refinements on Float are not supported | | (
+(defn pos [x {v :float | (> v 0.0)}] :float x)

@@ -1,0 +1,5 @@
+; C10: div truncates toward zero, so half-up holds (RFC §14, §4.3)
+; expect: compiles
+; main: -3
+(defn half-up [x {v :int | (< v 0)}] {r :int | (>= (* 2 r) x)} (div x 2))
+(defn main [] :int (half-up -7))

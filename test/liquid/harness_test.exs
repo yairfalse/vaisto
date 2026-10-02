@@ -66,6 +66,19 @@ defmodule Vaisto.Liquid.HarnessTest do
       assert %{verdict: :agree, eval: {:ok, 1}} = Harness.run(point <> "(defn main [] :int (let [p (Point 1 2)] (. p :x)))")
     end
 
+    # D28: Core Erlang leaves the order of a cons cell's fields unspecified, and
+    # the :core backend built the tail first. Liquid Core evaluates left to right.
+    test "D28 fixed: list elements and cons evaluate left to right on both backends" do
+      empty = "(defn empty [] (List :int) (tail [1]))\n"
+
+      for main <- [
+            "(defn main [] :int (head (list (div 1 0) (head (empty)))))",
+            "(defn main [] :int (head (cons (div 1 0) (list (head (empty))))))"
+          ] do
+        assert %{verdict: :agree, eval: {:crash, :badarith}} = Harness.run(empty <> main)
+      end
+    end
+
     # P0-14 (D15): let, try and receive bindings are lexically scoped
     test "D15 fixed: a let binding does not leak into the enclosing block" do
       result = Harness.run("(defn f [x :int] :int (do (let [x 100] x) x))\n(defn main [] :int (f 1))")

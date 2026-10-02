@@ -1,0 +1,6 @@
+; C6: off-by-one caller of at (RFC §14)
+; expect: errors
+; error: requirement not met | `at` requires (< (length xs) (len xs)) for its argument `i` | (length xs)
+(defn at [xs (List :int) i {k :int | (and (>= k 0) (< k (len xs)))}] :int
+  (if (== i 0) (head xs) (at (tail xs) (- i 1))))
+(defn last-bad [xs (List :int)] :int (at xs (length xs)))

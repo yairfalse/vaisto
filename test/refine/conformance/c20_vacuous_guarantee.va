@@ -1,0 +1,4 @@
+; C20: a guarantee that can never hold verifies only by never returning (RFC §14.2, §11.3)
+; expect: errors
+; error: the declared result of `weird` can never hold | can only verify by never returning | (
+(defn weird [x :int] {v :int | (and (> v 0) (< v 0))} (weird x))
