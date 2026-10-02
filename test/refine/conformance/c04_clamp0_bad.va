@@ -1,0 +1,4 @@
+; C4: clamp0 returns x in the negative branch (RFC §14, §13.3)
+; expect: errors
+; error: result does not satisfy the declared type | must satisfy (>= r 0) | x
+(defn clamp0-bad [x :int] {r :int | (>= r 0)} (if (< x 0) x 0))

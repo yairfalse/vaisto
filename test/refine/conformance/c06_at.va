@@ -1,0 +1,8 @@
+; C6: recursive at over lists, and a caller that guards with length (RFC §14)
+; expect: compiles
+; main: 5
+(defn at [xs (List :int) i {k :int | (and (>= k 0) (< k (len xs)))}] :int
+  (if (== i 0) (head xs) (at (tail xs) (- i 1))))
+(defn first-or-zero [xs (List :int)] :int
+  (if (> (length xs) 0) (at xs 0) 0))
+(defn main [] :int (+ (first-or-zero [5 6 7]) (first-or-zero [])))

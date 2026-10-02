@@ -1,0 +1,6 @@
+; C1: safe-div called under a branch fact (RFC §14)
+; expect: compiles
+; main: 5
+(defn safe-div [x :int y {d :int | (!= d 0)}] :int (div x y))
+(defn avg [total :int n :int] :int (if (> n 0) (safe-div total n) 0))
+(defn main [] :int (+ (avg 10 2) (avg 10 0)))

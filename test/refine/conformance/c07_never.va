@@ -1,0 +1,4 @@
+; C7: contradictory precondition (RFC §14)
+; expect: errors
+; error: the requirements of `never` can never be met | no argument satisfies them all | (
+(defn never [x {v :int | (and (> v 0) (< v 0))}] :int x)

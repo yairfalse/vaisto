@@ -376,6 +376,16 @@ defmodule Vaisto.Errors do
     Error.new(message, opts)
   end
 
+  @doc "A refined type reached the type checker without the refinement checker"
+  def refinement_unchecked(opts \\ []) do
+    Error.new("refinement types are not checked on this path",
+      Keyword.merge(opts, [
+        note: "only Vaisto.Compilation checks refinements; any other entry point would drop them silently",
+        hint: "compile with Vaisto.Compilation.compile/3, or `vaistoc`"
+      ])
+    )
+  end
+
   @doc "Unknown expression type"
   def unknown_expression(expr, opts \\ []) do
     Error.new("unknown expression",

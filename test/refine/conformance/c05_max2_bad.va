@@ -1,0 +1,5 @@
+; C5: max2-bad, branches swapped, errors on both conjuncts (RFC §14)
+; expect: errors
+; error: result does not satisfy the declared type | must satisfy (>= v x) | y
+; error: result does not satisfy the declared type | must satisfy (>= v y) | x
+(defn max2-bad [x :int y :int] {v :int | (and (>= v x) (>= v y))} (if (> x y) y x))

@@ -71,10 +71,11 @@ defmodule Vaisto.Build.Compiler do
 
     with {:ok, source} <- read_source(source_path),
          full_source = prepend_prelude(source, prelude),
-         ast = Parser.parse(full_source, file: source_path),
+         {ast, sigs} = Vaisto.Refine.Surface.split(Parser.parse(full_source, file: source_path)),
          {:ok, module_name} <- resolve_module_name(ast, source_path, source_roots),
          env = build_environment(ast, import_env, search_paths, auto_import),
          {:ok, typed_ast} <- typecheck(ast, env, full_source),
+         :ok <- check_refinements(typed_ast, sigs, ast, full_source, opts),
          {:ok, bytecode} <- emit(typed_ast, module_name, backend),
          :ok <- write_outputs(module_name, bytecode, typed_ast, output_dir) do
       {:ok,
@@ -166,6 +167,13 @@ defmodule Vaisto.Build.Compiler do
       {:error, %Vaisto.Error{} = error} ->
         formatted = Vaisto.ErrorFormatter.format(error, source)
         {:error, formatted}
+    end
+  end
+
+  defp check_refinements(typed_ast, sigs, ast, source, opts) do
+    case Compilation.check_refinements(typed_ast, sigs, ast, source, Keyword.take(opts, [:solver, :rlimit, :z3])) do
+      :ok -> :ok
+      {:error, errors} -> {:error, Vaisto.ErrorFormatter.format_all(errors, source)}
     end
   end
 

@@ -1,0 +1,6 @@
+; C9: the second operand of and is checked under the first (RFC §14, §10.2)
+; expect: compiles
+; main: false
+(defn safe-div [x :int y {d :int | (!= d 0)}] :int (div x y))
+(defn ratio-over-one? [x :int y :int] :bool (and (!= y 0) (> (safe-div x y) 1)))
+(defn main [] :bool (ratio-over-one? 10 0))

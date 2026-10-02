@@ -680,6 +680,10 @@ defmodule Vaisto.Parser do
 
   defp parse_clauses(clauses, loc) do
     results = Enum.map(clauses, fn
+      # Clause guards are not implemented for match and receive. Without this,
+      # `[x :when g body]` parsed as a body that evaluates g and ignores it (D27).
+      {:bracket, [_pattern, {:atom, :when} | _]} ->
+        {:error, Errors.parse_error("guards in match and receive clauses are not supported yet", span: Error.span_from_loc(loc), hint: "use a multi-clause defn, whose clauses take :when guards, or an if in the clause body"), loc}
       {:bracket, [pattern | bodies]} when length(bodies) >= 1 ->
         body = wrap_bodies(bodies, loc)
         {:ok, {pattern, body}}
@@ -935,41 +939,11 @@ defmodule Vaisto.Parser do
         {:error, Errors.parse_error("in definition of `#{name}`: #{msg}", span: Error.span_from_loc(loc)), loc}
 
       {param_tokens, guard} ->
-        typed_params = parse_typed_params(param_tokens)
-
-        case rest do
-          # Single element is always the body - even if it looks like a type
-          # This allows (defn foo [] :int) to return the keyword :int
-          [single_body] ->
-            make_defn(name, typed_params, single_body, :any, guard, loc)
-
-          # Type annotation followed by body: (defn name [params] :type body ...)
-          [{:atom, type_atom} | bodies] when length(bodies) >= 1 ->
-            if is_type_annotation?({:atom, type_atom}) do
-              body = wrap_bodies(bodies, loc)
-              make_defn(name, typed_params, body, unwrap_type({:atom, type_atom}), guard, loc)
-            else
-              # :keyword treated as body
-              body = wrap_bodies(rest, loc)
-              make_defn(name, typed_params, body, :any, guard, loc)
-            end
-
-          # Compound type annotation (List/Tuple/etc): (defn name [params] (Type ...) body ...)
-          [{:call, _, _, _} = type_expr | bodies] when length(bodies) >= 1 ->
-            if is_type_annotation?(type_expr) do
-              body = wrap_bodies(bodies, loc)
-              make_defn(name, typed_params, body, type_expr, guard, loc)
-            else
-              body = wrap_bodies(rest, loc)
-              make_defn(name, typed_params, body, :any, guard, loc)
-            end
-
-          # Multiple body expressions (no type annotation): (defn name [params] body1 body2 ...)
-          _ ->
-            body = wrap_bodies(rest, loc)
-            make_defn(name, typed_params, body, :any, guard, loc)
-        end
+        parse_defn_params(name, param_tokens, guard, rest, loc)
     end
+  catch
+    {:parse_error, msg} ->
+      {:error, Errors.parse_error("in definition of `#{name}`: #{msg}", span: Error.span_from_loc(loc)), loc}
   end
 
   defp parse_defn_single(_name, [{:bracket, _params}], loc) do
@@ -978,6 +952,53 @@ defmodule Vaisto.Parser do
 
   defp parse_defn_single(_name, _rest, loc) do
     {:error, Errors.parse_error("Invalid defn syntax", span: Error.span_from_loc(loc)), loc}
+  end
+
+  defp parse_defn_params(name, param_tokens, guard, rest, loc) do
+    typed_params = parse_typed_params(param_tokens)
+
+    case rest do
+      # Single element is always the body - even if it looks like a type
+      # This allows (defn foo [] :int) to return the keyword :int
+      [single_body] ->
+        make_defn(name, typed_params, single_body, :any, guard, loc)
+
+      # Refined result type followed by body: (defn name [params] {r :int | (>= r 0)} body ...)
+      [{:tuple_pattern, _} = brace | bodies] when length(bodies) >= 1 ->
+        if refinement_shaped?(brace) do
+          body = wrap_bodies(bodies, loc)
+          make_defn(name, typed_params, body, parse_refinement!(brace), guard, loc)
+        else
+          body = wrap_bodies(rest, loc)
+          make_defn(name, typed_params, body, :any, guard, loc)
+        end
+
+      # Type annotation followed by body: (defn name [params] :type body ...)
+      [{:atom, type_atom} | bodies] when length(bodies) >= 1 ->
+        if is_type_annotation?({:atom, type_atom}) do
+          body = wrap_bodies(bodies, loc)
+          make_defn(name, typed_params, body, unwrap_type({:atom, type_atom}), guard, loc)
+        else
+          # :keyword treated as body
+          body = wrap_bodies(rest, loc)
+          make_defn(name, typed_params, body, :any, guard, loc)
+        end
+
+      # Compound type annotation (List/Tuple/etc): (defn name [params] (Type ...) body ...)
+      [{:call, _, _, _} = type_expr | bodies] when length(bodies) >= 1 ->
+        if is_type_annotation?(type_expr) do
+          body = wrap_bodies(bodies, loc)
+          make_defn(name, typed_params, body, type_expr, guard, loc)
+        else
+          body = wrap_bodies(rest, loc)
+          make_defn(name, typed_params, body, :any, guard, loc)
+        end
+
+      # Multiple body expressions (no type annotation): (defn name [params] body1 body2 ...)
+      _ ->
+        body = wrap_bodies(rest, loc)
+        make_defn(name, typed_params, body, :any, guard, loc)
+    end
   end
 
   defp make_defn(name, params, body, ret_type, nil, loc) do
@@ -1021,12 +1042,37 @@ defmodule Vaisto.Parser do
   # Type annotation checks for param parsing
   defp is_type_annotation?({:atom, t}) when t in [:int, :float, :num, :string, :bool, :any, :atom, :unit], do: true
   defp is_type_annotation?(t) when is_atom(t) and t in [:int, :float, :num, :string, :bool, :any, :atom, :unit], do: true
-  # Parameterized types: (List :int), (Result :int :string)
-  defp is_type_annotation?({:call, type_name, _args, _loc}) when is_atom(type_name), do: true
+  # Parameterized types: (List :int), (Result :int :string). Only a capitalized
+  # head names a type, so (defn f [x] (println x) x) keeps the call in its body (D6).
+  defp is_type_annotation?({:call, type_name, _args, _loc}) when is_atom(type_name), do: capitalized?(type_name)
   # User-defined types (capitalized atoms)
-  defp is_type_annotation?({:atom, t}) when is_atom(t), do: String.match?(Atom.to_string(t), ~r/^[A-Z]/)
-  defp is_type_annotation?(t) when is_atom(t), do: String.match?(Atom.to_string(t), ~r/^[A-Z]/)
+  defp is_type_annotation?({:atom, t}) when is_atom(t), do: capitalized?(t)
+  defp is_type_annotation?(t) when is_atom(t), do: capitalized?(t)
   defp is_type_annotation?(_), do: false
+
+  defp capitalized?(name), do: String.match?(Atom.to_string(name), ~r/^[A-Z]/)
+
+  # Refined types (RFC §4.4, Q1): {v :int | (>= v 0)} in a parameter's type slot
+  # or in the result slot → {:refine, binder, base_type, predicate}
+  defp refinement_shaped?({:tuple_pattern, [_binder, _type, :| | _]}), do: true
+  defp refinement_shaped?(_), do: false
+
+  defp parse_refinement!({:tuple_pattern, [binder, type, :|, predicate]}) do
+    cond do
+      not (is_atom(binder) and binder != :| and not capitalized?(binder)) ->
+        throw({:parse_error, "a refined type names its value first, as in {v :int | (> v 0)}"})
+
+      not is_type_annotation?(type) ->
+        throw({:parse_error, "a refined type needs a base type after its name, as in {v :int | (> v 0)}"})
+
+      true ->
+        {:refine, binder, unwrap_type(type), predicate}
+    end
+  end
+
+  defp parse_refinement!(_brace) do
+    throw({:parse_error, "a refined type is written {v :type | predicate}, with one predicate"})
+  end
 
   # Unwrap {:atom, :int} → :int for type annotations
   defp unwrap_type({:atom, t}), do: t
@@ -1047,6 +1093,17 @@ defmodule Vaisto.Parser do
   end
 
   defp parse_typed_params_acc([], acc), do: Enum.reverse(acc)
+
+  # Braces in a parameter list only ever write a refined type. Before
+  # refinements, `[y {d :int | p}]` silently parsed as two parameters (RFC §4.4).
+  defp parse_typed_params_acc([{:tuple_pattern, _} | _], _acc) do
+    throw({:parse_error, "braces in a parameter list write a refined type after a parameter name, as in [y {d :int | (!= d 0)}]"})
+  end
+
+  defp parse_typed_params_acc([name, {:tuple_pattern, _} = brace | tail], acc) do
+    parse_typed_params_acc(tail, [{name, parse_refinement!(brace)} | acc])
+  end
+
   defp parse_typed_params_acc([name | rest], acc) do
     case rest do
       [maybe_type | tail] ->

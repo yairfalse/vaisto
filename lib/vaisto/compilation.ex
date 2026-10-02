@@ -25,7 +25,7 @@ defmodule Vaisto.Compilation do
 
   require Logger
 
-  alias Vaisto.{Parser, TypeChecker, Backend, Error, Errors, ErrorFormatter}
+  alias Vaisto.{Parser, TypeChecker, Backend, Error, Errors, ErrorFormatter, Refine}
 
   @type compile_opts :: [
           prelude: String.t() | nil,
@@ -69,12 +69,26 @@ defmodule Vaisto.Compilation do
 
     with {:ok, ast} <- parse(full_source) do
       Logger.debug("compile: type checking #{module_name}")
+      {plain_ast, sigs} = Refine.Surface.split(ast)
 
-      with {:ok, _type, typed_ast} <- typecheck(ast, env, full_source, line_offset, format_errors) do
+      with {:ok, _type, typed_ast} <- typecheck(plain_ast, env, full_source, line_offset, format_errors),
+           :ok <- refine(typed_ast, sigs, plain_ast, full_source, line_offset, format_errors, opts) do
         Logger.debug("compile: emitting #{module_name} (backend: #{backend})")
         emit(typed_ast, module_name, backend, load: load)
       end
     end
+  end
+
+  @doc """
+  Checks a program's refinements (`Vaisto.Refine`), given HM's output for the
+  plain program and the signatures `Vaisto.Refine.Surface.split/1` took out of
+  it. Without refinements this does nothing, and never starts the solver.
+
+  Options are passed to `Vaisto.Refine.check/3`, such as `:solver`.
+  """
+  @spec check_refinements(term(), map(), term(), String.t(), keyword()) :: :ok | {:error, [Error.t()]}
+  def check_refinements(typed_ast, sigs, plain_ast, source, opts \\ []) do
+    Refine.check(typed_ast, sigs, Keyword.merge(opts, source: source, locs: definition_locs(plain_ast)))
   end
 
   @doc """
@@ -173,6 +187,24 @@ defmodule Vaisto.Compilation do
     # Count lines in prelude + 1 for the separator newlines
     length(String.split(prelude, "\n")) + 1
   end
+
+  defp refine(typed_ast, sigs, plain_ast, source, line_offset, format_errors, opts) do
+    refine_opts = Keyword.take(opts, [:solver, :rlimit, :z3])
+
+    case check_refinements(typed_ast, sigs, plain_ast, source, refine_opts) do
+      :ok -> :ok
+      {:error, errors} when format_errors -> {:error, ErrorFormatter.format_all(errors, source, line_offset: line_offset)}
+      {:error, errors} -> {:error, errors}
+    end
+  end
+
+  defp definition_locs(forms) when is_list(forms) do
+    for form <- forms, is_tuple(form), elem(form, 0) == :defn, into: %{} do
+      {elem(form, 1), elem(form, tuple_size(form) - 1)}
+    end
+  end
+
+  defp definition_locs(form), do: definition_locs([form])
 
   # Type check with optional error formatting
   defp typecheck(ast, env, source, line_offset, format_errors) do
