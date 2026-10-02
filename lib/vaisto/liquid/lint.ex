@@ -52,7 +52,9 @@ defmodule Vaisto.Liquid.Lint do
            concat: {[:String, :String], :String}
          })
 
-  defstruct types: %{}, delta: %{}, gamma: %{}, span: nil
+  # eff: the effect row the code being checked may perform, or :any outside
+  # every function, where the handler interprets whatever is performed.
+  defstruct types: %{}, delta: %{}, gamma: %{}, span: nil, eff: :any
 
   @type problem :: %{message: String.t(), in: atom() | nil, span: Canonical.tree() | nil}
 
@@ -79,33 +81,55 @@ defmodule Vaisto.Liquid.Lint do
   """
   @spec synth(Canonical.tree(), keyword()) :: {:ok, Canonical.tree()} | :none | {:error, [problem()]}
   def synth(term, opts \\ []) do
-    ctx = context(opts)
-
-    run(nil, fn ->
-      check_binders(ctx, term, Map.keys(ctx.gamma))
-      synth_term(ctx, term)
-    end)
+    with {:ok, ctx} <- context(opts) do
+      run(nil, fn ->
+        check_binders(ctx, term, Map.keys(ctx.gamma))
+        synth_term(ctx, term)
+      end)
+    end
   end
 
   @doc "Check a term against a type (§10.5): `:ok` or `{:error, problems}`."
   @spec check(Canonical.tree(), Canonical.tree(), keyword()) :: :ok | {:error, [problem()]}
   def check(term, type, opts \\ []) do
-    ctx = context(opts)
+    with {:ok, ctx} <- context(opts) do
+      run(nil, fn ->
+        type = norm(type)
+        wf(ctx, type)
+        check_binders(ctx, term, Map.keys(ctx.gamma))
+        check_term(ctx, term, type)
+        :ok
+      end)
+    end
+  end
 
-    run(nil, fn ->
-      type = norm(type)
-      wf(ctx, type)
-      check_binders(ctx, term, Map.keys(ctx.gamma))
-      check_term(ctx, term, type)
-      :ok
-    end)
+  @doc """
+  Whether clauses with these patterns, none guarded, match every value of
+  `type` (§10.8). The oracle for producers of Core that must decide whether a
+  match needs a final clause; Lint itself still checks what they produce.
+  Options as for `synth/2`. A pattern or type Lint cannot read is not exhaustive.
+  """
+  @spec exhaustive?([Canonical.tree()], Canonical.tree(), keyword()) :: boolean()
+  def exhaustive?(patterns, type, opts \\ []) do
+    with {:ok, ctx} <- context(opts),
+         {:ok, :covered} <- run(nil, fn -> {:ok, missing(ctx, Enum.map(patterns, &[normalize(ctx, Canonical.strip(&1), norm(type))]), [norm(type)])} end) do
+      true
+    else
+      _ -> false
+    end
+  rescue
+    _ -> false
   end
 
   defp context(opts) do
-    {types, []} = declare(Keyword.get(opts, :types, []))
-    ctx = %__MODULE__{types: types}
-    gamma = for [x, type] <- Keyword.get(opts, :bind, []), into: %{}, do: {x, norm(type)}
-    %{ctx | gamma: gamma}
+    case declare(Keyword.get(opts, :types, [])) do
+      {types, []} ->
+        gamma = for [x, type] <- Keyword.get(opts, :bind, []), into: %{}, do: {x, norm(type)}
+        {:ok, %__MODULE__{types: types, gamma: gamma}}
+
+      {_types, problems} ->
+        {:error, problems}
+    end
   end
 
   # Runs one unit of checking, turning the first problem into a result.
@@ -134,12 +158,14 @@ defmodule Vaisto.Liquid.Lint do
     {gamma, broken, sig_problems} =
       Enum.reduce(defs, {%{}, MapSet.new(), []}, fn {[:def, f, type, _fun], span}, {gamma, broken, problems} ->
         cond do
-          Map.has_key?(gamma, f) ->
+          Map.has_key?(gamma, f) or MapSet.member?(broken, f) ->
             {gamma, broken, problems ++ [%{message: "#{show(f)} is defined twice", in: f, span: span}]}
 
           true ->
+            # A definition whose type is ill-formed is not in scope: code that
+            # names it is checked against nothing, never against a bad type.
             case run(f, fn -> wf(%{ctx | span: span}, norm(type)) end) do
-              {:error, ps} -> {Map.put(gamma, f, norm(type)), MapSet.put(broken, f), problems ++ ps}
+              {:error, ps} -> {gamma, MapSet.put(broken, f), problems ++ ps}
               _ -> {Map.put(gamma, f, norm(type)), broken, problems}
             end
         end
@@ -147,8 +173,12 @@ defmodule Vaisto.Liquid.Lint do
 
     ctx = %{ctx | gamma: gamma}
 
+    # Definitions are checked only against well-formed declarations: a type
+    # that names a constructor twice has no meaning to check a match against.
+    checkable = if decl_problems == [], do: Enum.uniq_by(defs, fn {[:def, f | _], _} -> f end), else: []
+
     def_problems =
-      for {[:def, f, type, fun], span} <- Enum.uniq_by(defs, fn {[:def, f | _], _} -> f end), f not in broken do
+      for {[:def, f, type, fun], span} <- checkable, f not in broken do
         case run(f, fn ->
                ctx = %{ctx | span: span}
                unless match?([:fn | _], strip_own_meta(fun)), do: fail(ctx, "the definition of #{show(f)} is not a fn")
@@ -288,6 +318,34 @@ defmodule Vaisto.Liquid.Lint do
   end
 
   defp wf_eff(ctx, eff), do: fail(ctx, "not an effect row: #{show(eff)}")
+
+  # Code may perform the effects `performed` only when the row it runs under
+  # has every label, and an open tail only when it is that row's own: an effect
+  # variable stands for whatever the caller allows, which no one else may add.
+  defp allowed!(%{eff: :any}, _performed), do: :ok
+
+  defp allowed!(ctx, performed) do
+    {labels, tail} = row_parts(ctx, performed)
+    {allowed, own_tail} = row_parts(ctx, ctx.eff)
+
+    cond do
+      (missing = labels -- allowed) != [] ->
+        fail(ctx, "#{show(hd(missing))} is performed here, but the effect row #{show(ctx.eff)} does not allow it")
+
+      tail != :closed and tail != own_tail ->
+        fail(ctx, "code with the open effect row #{show(performed)} runs where only #{show(ctx.eff)} is allowed")
+
+      true ->
+        :ok
+    end
+  end
+
+  defp row_parts(_ctx, [:eff | items]) when items != [] do
+    {labels, [tail]} = Enum.split(items, -1)
+    {labels, tail}
+  end
+
+  defp row_parts(ctx, row), do: fail(ctx, "not an effect row: #{show(row)}")
 
   defp wf_tail(_ctx, :closed, _var, _kind), do: :ok
 
@@ -497,19 +555,23 @@ defmodule Vaisto.Liquid.Lint do
   defp synth_form(_ctx, [:atom, a]) when is_atom(a), do: {:ok, :Atom}
   defp synth_form(_ctx, [:unit]), do: {:ok, :Unit}
 
+  # A function synthesized without a type is pure: its row is closed, so its
+  # body may perform nothing but crash.
   defp synth_form(ctx, [:fn, params, body]) when is_list(params) do
     {ctx, types} = bind_params(ctx, params)
 
-    case synth_term(ctx, body) do
+    case synth_term(%{ctx | eff: [:eff, :closed]}, body) do
       {:ok, result} -> {:ok, [:->, types, [:eff, :closed], result]}
       :none -> :none
     end
   end
 
+  # Applying a function performs its effects, which the caller's row must allow.
   defp synth_form(ctx, [:app, f | args]) do
     case synth_term(ctx, f) do
-      {:ok, [:->, params, _eff, result]} when length(params) == length(args) ->
+      {:ok, [:->, params, eff, result]} when length(params) == length(args) ->
         Enum.zip(args, params) |> Enum.each(fn {a, p} -> check_term(ctx, a, p) end)
+        allowed!(ctx, eff)
         {:ok, result}
 
       {:ok, [:->, params, _eff, _result]} ->
@@ -627,6 +689,7 @@ defmodule Vaisto.Liquid.Lint do
     case Map.fetch(@sigma, op) do
       {:ok, {params, result}} when length(params) == length(es) ->
         Enum.zip(es, params) |> Enum.each(fn {e, p} -> check_term(ctx, e, p) end)
+        allowed!(ctx, [:eff, op, :closed])
         {:ok, result}
 
       {:ok, {params, _}} ->
@@ -881,13 +944,15 @@ defmodule Vaisto.Liquid.Lint do
 
   defp check_form(ctx, [:letrec, group, body], type) when is_list(group), do: check_term(check_group(ctx, group), body, type)
 
-  defp check_form(ctx, [:fn, params, body], [:->, ptypes, _eff, result] = type) when is_list(params) do
+  # A function's body performs only what its row allows (§10.16: crash is
+  # tracked from Phase 4; the other operations of §8 exist now).
+  defp check_form(ctx, [:fn, params, body], [:->, ptypes, eff, result] = type) when is_list(params) do
     {ctx, types} = bind_params(ctx, params)
 
     unless length(types) == length(ptypes) and Enum.zip(types, ptypes) |> Enum.all?(fn {a, b} -> equal?(ctx, a, b) end),
       do: fail(ctx, "a fn with parameters #{show(types)} does not have type #{show(type)}")
 
-    check_term(ctx, body, result)
+    check_term(%{ctx | eff: eff}, body, result)
   end
 
   defp check_form(ctx, e, type) do
@@ -985,6 +1050,14 @@ defmodule Vaisto.Liquid.Lint do
 
         {cctx, body, pattern, guard}
       end
+
+    # A clause no value can reach is dead code, which in elaborated Core means
+    # the elaborator put clauses in the wrong order or added one it should not.
+    Enum.reduce(Enum.with_index(branches, 1), [], fn {{cctx, _body, pattern, guard}, i}, earlier ->
+      row = [normalize(ctx, pattern, stype)]
+      unless useful?(ctx, earlier, row, [stype]), do: fail(cctx, "clause #{i} of the match can never be chosen: the clauses before it match every value it does")
+      if guard, do: earlier, else: earlier ++ [row]
+    end)
 
     unguarded = for {_, _, pattern, nil} <- branches, do: [normalize(ctx, pattern, stype)]
 
@@ -1177,6 +1250,43 @@ defmodule Vaisto.Liquid.Lint do
 
           {:missing, [head | w]}
       end
+    end
+  end
+
+  # Is the pattern vector `q` useful against `rows`: does some value match it
+  # and no row (Maranget 2007, U)?
+  defp useful?(_ctx, rows, [], []), do: rows == []
+
+  defp useful?(ctx, rows, [{:con, k, args} | qs], [type | types]) do
+    useful?(ctx, specialize(rows, k, length(args)), args ++ qs, field_types(ctx, type, k, length(args)) ++ types)
+  end
+
+  defp useful?(ctx, rows, [:wild | qs], [type | types]) do
+    heads = rows |> Enum.flat_map(fn [p | _] -> if match?({:con, _, _}, p), do: [elem(p, 1)], else: [] end) |> Enum.uniq()
+
+    case signature(ctx, type) do
+      {:finite, ctors} ->
+        if Enum.all?(ctors, fn {k, _} -> k in heads end) do
+          Enum.any?(ctors, fn {k, fts} -> useful?(ctx, specialize(rows, k, length(fts)), List.duplicate(:wild, length(fts)) ++ qs, fts ++ types) end)
+        else
+          useful?(ctx, for([:wild | rest] <- rows, do: rest), qs, types)
+        end
+
+      :infinite ->
+        useful?(ctx, for([:wild | rest] <- rows, do: rest), qs, types)
+    end
+  end
+
+  defp field_types(ctx, type, k, n) do
+    case signature(ctx, type) do
+      {:finite, ctors} ->
+        case List.keyfind(ctors, k, 0) do
+          {^k, fts} -> fts
+          nil -> List.duplicate(:Dyn, n)
+        end
+
+      :infinite ->
+        List.duplicate(:Dyn, n)
     end
   end
 

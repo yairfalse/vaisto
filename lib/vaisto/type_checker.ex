@@ -1457,7 +1457,18 @@ defmodule Vaisto.TypeChecker do
 
   # Parse type expressions from extern declarations and type annotations
   # Atom-wrapped type from parser: {:atom, :int} → :int
-  defp parse_type_expr({:atom, t}) when is_atom(t), do: t
+  defp parse_type_expr({:atom, t}) when is_atom(t), do: parse_type_expr(t)
+  # A type variable in a signature, such as :a. HM has no named type variables,
+  # so it reads one as it reads an unannotated parameter. The Phase 1a
+  # elaborator (Vaisto.Elab) gives them their meaning.
+  defp parse_type_expr(t) when is_atom(t) and t not in [:any, :int, :float, :num, :string, :bool, :atom, :unit] and t != nil do
+    if String.match?(Atom.to_string(t), ~r/^[a-z]/), do: :any, else: t
+  end
+  # Function type: (Fn :int :int :bool) takes two Ints and returns a Bool.
+  defp parse_type_expr({:call, :Fn, [_ | _] = types, _loc}) do
+    {params, [result]} = Enum.split(types, -1)
+    {:fn, Enum.map(params, &parse_type_expr/1), parse_type_expr(result)}
+  end
   # Simple types: :int, :any, :string
   defp parse_type_expr(t) when is_atom(t), do: t
   # List type: {:call, :List, [elem_type]} → {:list, elem_type}

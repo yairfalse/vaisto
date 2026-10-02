@@ -1045,8 +1045,9 @@ defmodule Vaisto.Parser do
   # Parameterized types: (List :int), (Result :int :string). Only a capitalized
   # head names a type, so (defn f [x] (println x) x) keeps the call in its body (D6).
   defp is_type_annotation?({:call, type_name, _args, _loc}) when is_atom(type_name), do: capitalized?(type_name)
-  # User-defined types (capitalized atoms)
-  defp is_type_annotation?({:atom, t}) when is_atom(t), do: capitalized?(t)
+  # User-defined types (capitalized atoms), and type variables (any other
+  # lowercase keyword, as in defclass): [x :a] is one parameter of type a.
+  defp is_type_annotation?({:atom, t}) when is_atom(t), do: capitalized?(t) or String.match?(Atom.to_string(t), ~r/^[a-z]/)
   defp is_type_annotation?(t) when is_atom(t), do: capitalized?(t)
   defp is_type_annotation?(_), do: false
 

@@ -30,57 +30,6 @@ defmodule Vaisto.Liquid.Adapter do
 
   @type skipped :: [{atom(), String.t()}]
 
-  # Today's higher-order builtins, written in Core: library code, not
-  # primitives. Each mirrors the `lists` function both backends call: `map`,
-  # `filter` and `flatmap`, and `foldl` with the function taking (acc, elem).
-  # A program gets the ones it uses.
-  @prelude Vaisto.Liquid.Canonical.parse!(
-             """
-             ((def prelude.map
-                (forall ((a Type) (b Type)) (-> ((-> ((tvar a)) (eff closed) (tvar b)) (List (tvar a))) (eff closed) (List (tvar b))))
-                (fn ((f (-> ((tvar a)) (eff closed) (tvar b))) (xs (List (tvar a))))
-                  (match xs
-                    ((inj (List (tvar a)) Nil) (inj (List (tvar b)) Nil))
-                    ((inj (List (tvar a)) Cons h t)
-                     (let ((y (tvar b) (app f h)))
-                       (inj (List (tvar b)) Cons y (app (inst prelude.map (tvar a) (tvar b)) f t)))))))
-              (def prelude.filter
-                (forall ((a Type)) (-> ((-> ((tvar a)) (eff closed) (Bool)) (List (tvar a))) (eff closed) (List (tvar a))))
-                (fn ((p (-> ((tvar a)) (eff closed) (Bool))) (xs (List (tvar a))))
-                  (match xs
-                    ((inj (List (tvar a)) Nil) (inj (List (tvar a)) Nil))
-                    ((inj (List (tvar a)) Cons h t)
-                     (if (app p h)
-                         (inj (List (tvar a)) Cons h (app (inst prelude.filter (tvar a)) p t))
-                         (app (inst prelude.filter (tvar a)) p t))))))
-              (def prelude.fold
-                (forall ((a Type) (b Type)) (-> ((-> ((tvar b) (tvar a)) (eff closed) (tvar b)) (tvar b) (List (tvar a))) (eff closed) (tvar b)))
-                (fn ((f (-> ((tvar b) (tvar a)) (eff closed) (tvar b))) (acc (tvar b)) (xs (List (tvar a))))
-                  (match xs
-                    ((inj (List (tvar a)) Nil) acc)
-                    ((inj (List (tvar a)) Cons h t) (app (inst prelude.fold (tvar a) (tvar b)) f (app f acc h) t)))))
-              (def prelude.append
-                (forall ((a Type)) (-> ((List (tvar a)) (List (tvar a))) (eff closed) (List (tvar a))))
-                (fn ((xs (List (tvar a))) (ys (List (tvar a))))
-                  (match xs
-                    ((inj (List (tvar a)) Nil) ys)
-                    ((inj (List (tvar a)) Cons h t) (inj (List (tvar a)) Cons h (app (inst prelude.append (tvar a)) t ys))))))
-              (def prelude.flat_map
-                (forall ((a Type) (b Type)) (-> ((-> ((tvar a)) (eff closed) (List (tvar b))) (List (tvar a))) (eff closed) (List (tvar b))))
-                (fn ((f (-> ((tvar a)) (eff closed) (List (tvar b)))) (xs (List (tvar a))))
-                  (match xs
-                    ((inj (List (tvar a)) Nil) (inj (List (tvar b)) Nil))
-                    ((inj (List (tvar a)) Cons h t)
-                     (let ((ys (List (tvar b)) (app f h)))
-                       (app (inst prelude.append (tvar b)) ys (app (inst prelude.flat_map (tvar a) (tvar b)) f t))))))))
-             """,
-             atoms: :create
-           )
-           |> Map.new(fn [:def, name | _] = def -> {name, def} end)
-
-  # What each prelude definition needs besides itself.
-  @prelude_needs %{"prelude.flat_map": [:"prelude.append"]}
-
   # Builtins that are Core primitives over Int, and their Float versions.
   @int_ops %{:+ => :add, :- => :sub, :* => :mul}
   @float_ops %{:+ => :fadd, :- => :fsub, :* => :fmul}
@@ -115,17 +64,16 @@ defmodule Vaisto.Liquid.Adapter do
       end
 
     {items, skipped} = drop_dependents(items, skipped)
-    {:ok, [:module, name, [:"core-version", 0] | types ++ prelude() ++ items], skipped}
+    {:ok, [:module, name, [:"core-version", 0] | types ++ prelude(Map.keys(ctx.defs)) ++ items], skipped}
   end
 
   # `defn` (5 elements, or 6 with a guard) and `defn_multi`.
   defp definition?(form) when is_tuple(form) and tuple_size(form) in [5, 6], do: elem(form, 0) in [:defn, :defn_multi]
   defp definition?(_form), do: false
 
-  defp prelude do
-    used = Process.get(:vaisto_liquid_adapter_prelude, MapSet.new())
-    needed = used |> Enum.flat_map(&[&1 | Map.get(@prelude_needs, &1, [])]) |> Enum.uniq() |> Enum.sort()
-    Enum.map(needed, &Map.fetch!(@prelude, &1))
+  # The builtins the program used, written in Core (Vaisto.Liquid.Prelude).
+  defp prelude(avoid) do
+    Vaisto.Liquid.Prelude.defs(Process.get(:vaisto_liquid_adapter_prelude, MapSet.new()), avoid)
   end
 
   defp use_prelude(name) do
@@ -361,7 +309,7 @@ defmodule Vaisto.Liquid.Adapter do
   defp let_term(ctx, [{pattern, e, _type} | rest], body) when not is_atom(pattern) do
     {core, binds} = pat(ctx, pattern, hm_type(e))
     rest_term = let_term(%{ctx | env: Map.merge(ctx.env, binds)}, rest, body)
-    [:match, tm(ctx, e), [core, rest_term], [:_, [:perform, :crash, [:inj, [:Reason], :no_match]]]]
+    [:match, tm(ctx, e), [core, rest_term] | fallback(ctx, hm_type(e), [core])]
   end
 
   defp let_term(ctx, [{x, e, type} | rest], body) do
@@ -546,9 +494,21 @@ defmodule Vaisto.Liquid.Adapter do
         end
       end
 
-    total? = match?([p, _] when p == :_ or (is_atom(p) and p not in [true, false, nil]), List.last(core_clauses))
-    fallback = if total?, do: [], else: [[:_, [:perform, :crash, [:inj, [:Reason], :no_match]]]]
-    [:match, scrutinee | core_clauses ++ fallback]
+    [:match, scrutinee | core_clauses ++ fallback(ctx, stype, for([p, _body] <- core_clauses, do: p))]
+  end
+
+  # A final clause that crashes with no_match, as a failed match does today,
+  # unless the unguarded clauses already cover the type: then it could never
+  # be chosen, and Core Lint rejects a clause that can never be chosen.
+  defp fallback(ctx, stype, unguarded) do
+    covered? =
+      try do
+        Vaisto.Liquid.Lint.exhaustive?(unguarded, ty(ctx, stype), types: for(t <- Map.keys(ctx.decls), do: core_decl(ctx, t)))
+      catch
+        {:unsupported, _} -> false
+      end
+
+    if covered?, do: [], else: [[:_, [:perform, :crash, [:inj, [:Reason], :no_match]]]]
   end
 
   # A pattern, typed against the scrutinee's HM type, and the names it binds.

@@ -448,10 +448,38 @@ This is the RFC's Phase 2.1, and it is deliberately narrow:
 - refinements are checked within one module. A call to a refined function in
   another module is refused until interfaces carry refinements (RFC C12).
 
+### The elaborator that replaces HM (Phase 1a, in progress)
+
+`Vaisto.Elab` turns the parser's output directly into Liquid Core, following
+[`docs/design/liquid-types.md`](docs/design/liquid-types.md):
+- introductions are checked against the expected type, and eliminations
+  synthesize one;
+- inference is local unification inside one definition;
+- every top-level definition carries a signature, and there is no `:any`;
+- nothing is implicit: no type is chosen by default, Int and Float never mix,
+  every `match` is exhaustive and every `let` pattern irrefutable.
+
+```scheme
+(defn twice [f (Fn :a :a) x :a] :a (f (f x)))     ; :a is a type variable
+(defn main [] :int (twice (fn [n] (+ n 1)) 5))   ; n is an Int: no annotation needed
+
+(let [r (the (Result :int :string) (Ok 42))] ...) ; (the τ e) states a type
+```
+
+It removes D1, D17, D20 and D22 by construction, and its errors point at the
+source. It runs in shadow mode for now: HM still compiles programs. Over the
+test suite's programs, with HM's inferred types suggested as signatures where
+one is missing, the elaborator agrees with both backends on 75. Core Lint
+accepts everything it produces. The rest are:
+- HM's mistakes, which it rejects;
+- programs that relied on an implicit coercion, default or partial match;
+- forms it does not cover yet: processes, type classes, `str` and imports.
+
 ### What comes next
 
-The bidirectional elaborator that replaces HM (Phase 1a,
-[`docs/design/liquid-types.md`](docs/design/liquid-types.md)), then
+The rest of Phase 1a: type classes, processes and externs in the elaborator,
+`Dyn` with `decode`, brands and row evidence, then the switch from HM, with a
+tool that writes HM's inferred signatures into existing code. After that,
 refinements over records, sums and measures (Phases 2.2 and 2.3). Later phases
 bring effect rows and deterministic replay, sealed types and capabilities, and
 contracts as a library. The RFC's §21 has the order and the dependencies.
