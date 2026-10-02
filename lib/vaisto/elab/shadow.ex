@@ -11,6 +11,8 @@ defmodule Vaisto.Elab.Shadow do
 
     * `:agree` - the elaborated Core means what the backends run;
     * `{:disagree, backends}` - it does not;
+    * `{:backend_error, backends}` - a backend cannot compile the program:
+      a backend bug, not a difference in meaning;
     * `{:elab_rejects, message}` - HM accepts the program and the elaborator
       does not: an HM hole such as D17 or D22, where the suggested signature
       fails to check, or something the elaborator cannot do yet;
@@ -69,8 +71,17 @@ defmodule Vaisto.Elab.Shadow do
               :ok ->
                 eval = Harness.evaluate(core)
                 beam = Harness.beam_outcomes(source)
-                differing = for {backend, outcome} <- beam, not Harness.agrees?(eval, outcome), do: backend
-                %{verdict: if(differing == [], do: :agree, else: {:disagree, differing}), core: core, eval: eval, beam: beam}
+                broken = for {backend, {:compile_error, _}} <- beam, do: backend
+                differing = for {backend, outcome} <- beam, backend not in broken, not Harness.agrees?(eval, outcome), do: backend
+
+                verdict =
+                  cond do
+                    differing != [] -> {:disagree, differing}
+                    broken != [] -> {:backend_error, broken}
+                    true -> :agree
+                  end
+
+                %{verdict: verdict, core: core, eval: eval, beam: beam}
             end
         end
     end

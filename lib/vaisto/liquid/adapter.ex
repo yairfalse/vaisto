@@ -64,7 +64,7 @@ defmodule Vaisto.Liquid.Adapter do
       end
 
     {items, skipped} = drop_dependents(items, skipped)
-    {:ok, [:module, name, [:"core-version", 0] | types ++ prelude() ++ items], skipped}
+    {:ok, [:module, name, [:"core-version", 0] | types ++ prelude(Map.keys(ctx.defs)) ++ items], skipped}
   end
 
   # `defn` (5 elements, or 6 with a guard) and `defn_multi`.
@@ -72,8 +72,8 @@ defmodule Vaisto.Liquid.Adapter do
   defp definition?(_form), do: false
 
   # The builtins the program used, written in Core (Vaisto.Liquid.Prelude).
-  defp prelude do
-    Vaisto.Liquid.Prelude.defs(Process.get(:vaisto_liquid_adapter_prelude, MapSet.new()))
+  defp prelude(avoid) do
+    Vaisto.Liquid.Prelude.defs(Process.get(:vaisto_liquid_adapter_prelude, MapSet.new()), avoid)
   end
 
   defp use_prelude(name) do

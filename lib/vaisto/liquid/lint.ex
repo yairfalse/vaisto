@@ -147,8 +147,12 @@ defmodule Vaisto.Liquid.Lint do
 
     ctx = %{ctx | gamma: gamma}
 
+    # Definitions are checked only against well-formed declarations: a type
+    # that names a constructor twice has no meaning to check a match against.
+    checkable = if decl_problems == [], do: Enum.uniq_by(defs, fn {[:def, f | _], _} -> f end), else: []
+
     def_problems =
-      for {[:def, f, type, fun], span} <- Enum.uniq_by(defs, fn {[:def, f | _], _} -> f end), f not in broken do
+      for {[:def, f, type, fun], span} <- checkable, f not in broken do
         case run(f, fn ->
                ctx = %{ctx | span: span}
                unless match?([:fn | _], strip_own_meta(fun)), do: fail(ctx, "the definition of #{show(f)} is not a fn")

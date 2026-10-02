@@ -22,6 +22,8 @@ defmodule Vaisto.Elab.ShadowTest do
     assert disagreeing == [], "the elaborated Core disagrees with the backends:\n#{inspect(disagreeing, pretty: true)}"
 
     agreeing = Enum.count(results, &match?({_, _, :agree}, &1))
-    assert agreeing >= 82, "only #{agreeing} programs agree"
+    # 75 since the elaborator became pure: no Int-Float coercion, no default
+    # for an undetermined type, exhaustive matches and irrefutable lets.
+    assert agreeing >= 75, "only #{agreeing} programs agree"
   end
 end

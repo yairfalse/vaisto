@@ -131,6 +131,10 @@ defmodule Vaisto.Elab.Types do
   end
 
   defp go({:meta, n}, {:meta, n}, s), do: s
+  # The older metavariable stays the representative, so an undetermined type
+  # is reported where it first arose.
+  defp go({:meta, n}, {:meta, m}, s) when n < m, do: bind(m, {:meta, n}, s)
+  defp go({:meta, n}, {:meta, m}, s), do: bind(n, {:meta, m}, s)
   defp go({:meta, n}, t, s), do: bind(n, t, s)
   defp go(t, {:meta, n}, s), do: bind(n, t, s)
   defp go(a, a, s) when is_atom(a), do: s

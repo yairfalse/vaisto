@@ -333,14 +333,21 @@ The only inference that remains is choosing the arguments at an elimination site
 - **Lambdas need no annotations** where they are checked against a known arrow. Checking pushes the expected type inward. In `(map (fn [x] (* x 2)) xs)`, the signature of `map` and the type of `xs` determine the lambda's parameter type before the lambda is checked. That removes the fallback lambda (RFC §15.4) by construction.
 - **Class constraints are resolved at the elimination site**, like type arguments. The dictionary is the evidence, chosen by deterministic instance lookup with no overlapping instances. Row evidence (RFC §4.1) works the same way.
 - **There is no `:any`.** Where local inference cannot determine a type, the result is an error at that place. Its message may *suggest* a type computed by the old engine, but the old engine never decides.
-- **Undetermined is not unconstrained.** Two cases arise at the end of a definition, and they differ in whether a choice matters:
-  - an Int/Float operator (`+`, `<`, unary `-`) whose operands' type is still open, as in `(let [f (fn [a b] (+ a b))] (f 3 4))`, is chosen once the definition's other constraints have solved it. If nothing solves it, that is an error, because Int and Float mean different programs;
-  - a type that nothing constrains, such as the error type of `(Ok 42)` when only the `Ok` branch is used, is chosen as `Unit`. By parametricity no choice can change what the program does, so this is not a type that inference failed to find. The surface has no syntax for annotating a `let`, so requiring an annotation would leave the program unwritable.
+  No type is ever chosen by default. The error type of `(Ok 42)`, when nothing else fixes it, is undetermined, and the program says which type it means with an ascription (below).
+- **No coercion.** Arithmetic and comparison work on Int or on Float, never on a mix, and `/` divides Floats. The primitive is chosen once the operands' type is known, as a class instance is chosen at the elimination site. That can be later in the same definition, as in `(let [f (fn [a b] (+ a b))] (f 3 4))`. An operator whose type nothing determines is an error, because Int and Float mean different programs.
+- **No hidden partiality.**
+  - A `match` must be exhaustive over its unguarded clauses (`liquid-core.md` §10.8), and the error names a missing case.
+  - A `let` pattern must be irrefutable.
+  - A guard must be guard-safe (§6.6).
+  - The only partiality is the one a program writes: a guard on a definition, under which the call fails when the guard is false.
+- **Arguments are checked in two passes:** first-order arguments first, then functions. The type arguments a lambda argument is checked against are then known (Pierce and Turner, "Local type inference", 2000). The order changes only which unification runs first, never the verdict.
 
 **Surface syntax (implemented, slice 1).**
 - A signature annotates every parameter and the result: `(defn f [x :int ys (List :a)] :a ...)`.
 - A lowercase keyword that is not a primitive type is a type variable, quantified over the signature, as `defclass` already reads it (owner decision, 2026-10-03).
 - A function type is `(Fn :a :b :c)`: two parameters of types `a` and `b`, and a result of type `c`.
+- **Type ascription** is `(the τ e)`: it checks `e` against `τ` (owner decision, 2026-10-03). This is the rule that switches synthesis to checking, and it is how a program states a type inference cannot determine: `(the (Result :int :string) (Ok 42))`. Its type variables must be those of the enclosing signature.
+- A lambda's parameters may be annotated as a definition's are: `(fn [x :int] ...)` (D20).
 - Multi-clause definitions have no syntax for a signature yet.
 
 ## 10. Later: one semiring for usage and cost

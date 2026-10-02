@@ -455,19 +455,25 @@ This is the RFC's Phase 2.1, and it is deliberately narrow:
 - introductions are checked against the expected type, and eliminations
   synthesize one;
 - inference is local unification inside one definition;
-- every top-level definition carries a signature, and there is no `:any`.
+- every top-level definition carries a signature, and there is no `:any`;
+- nothing is implicit: no type is chosen by default, Int and Float never mix,
+  every `match` is exhaustive and every `let` pattern irrefutable.
 
 ```scheme
 (defn twice [f (Fn :a :a) x :a] :a (f (f x)))     ; :a is a type variable
 (defn main [] :int (twice (fn [n] (+ n 1)) 5))   ; n is an Int: no annotation needed
+
+(let [r (the (Result :int :string) (Ok 42))] ...) ; (the τ e) states a type
 ```
 
-It removes D1, D17 and D22 by construction, and its errors point at the
+It removes D1, D17, D20 and D22 by construction, and its errors point at the
 source. It runs in shadow mode for now: HM still compiles programs. Over the
 test suite's programs, with HM's inferred types suggested as signatures where
-one is missing, the elaborator agrees with both backends on 82. Core Lint
-accepts everything it produces. The rest are HM's mistakes, which it rejects,
-or forms it does not cover yet: processes, type classes, `str` and imports.
+one is missing, the elaborator agrees with both backends on 75. Core Lint
+accepts everything it produces. The rest are:
+- HM's mistakes, which it rejects;
+- programs that relied on an implicit coercion, default or partial match;
+- forms it does not cover yet: processes, type classes, `str` and imports.
 
 ### What comes next
 

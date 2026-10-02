@@ -83,11 +83,67 @@ defmodule Vaisto.ElabTest do
       assert error("(defn main [] :int (let [f (fn [a b] (+ a b))] 0))").message =~ "cannot tell whether `+` works on Int or Float"
     end
 
-    test "a type nothing constrains cannot change the program, and is chosen as Unit" do
-      source = "(deftype Result (Ok v) (Err e))\n(defn main [] :int (let [r (Ok 42)] (match r [(Ok v) v] [(Err _) 0])))"
-      assert {:ok, core} = elab(source)
-      assert inspect(core) =~ "[:Result, :Int, :Unit]"
-      assert {:ok, 42} = Eval.run(core, :main, [])
+    test "a type inference cannot determine is an error where it arises, and (the τ e) states it" do
+      untyped = "(deftype Result (Ok v) (Err e))\n(defn main [] :int (let [r (Ok 42)] (match r [(Ok v) v] [(Err _) 0])))"
+      e = error(untyped)
+      assert e.message == "the type arguments of `Ok` cannot be determined"
+      assert e.hint =~ "(the"
+
+      typed = "(deftype Result (Ok v) (Err e))\n(defn main [] :int (let [r (the (Result :int :string) (Ok 42))] (match r [(Ok v) v] [(Err _) 0])))"
+      assert {:ok, 42} = run(typed)
+    end
+
+    test "an ascription may use only its definition's type variables" do
+      assert {:ok, _} = elab("(defn f [x :a] :a (the :a x))")
+      assert error("(defn f [x :a] :a (the :b x))").message == "the type variable `b` is not in scope here"
+    end
+  end
+
+  describe "no coercion (§8.1: no subsumption but refinement)" do
+    test "arithmetic and comparison take operands of one numeric type" do
+      assert error("(defn f [] :float (+ 1 2.5))").note == "expected Int, found Float"
+      assert error("(defn f [] :bool (< 2.5 1))").note == "expected Float, found Int"
+      assert {:ok, 3.5} = run("(defn main [] :float (+ 1.0 2.5))")
+    end
+
+    test "/ divides Floats" do
+      assert error("(defn f [] :float (/ 7 2))").note == "expected Float, found Int"
+      assert {:ok, 3.5} = run("(defn main [] :float (/ 7.0 2.0))")
+    end
+
+    test "whether an operand is checked first or second does not change the verdict" do
+      a = "(defn apply-first [fs (List (Fn :a :a)) x :a] :a ((head fs) x))\n(defn main [] :float (apply-first [(fn [y] (+ y 1))] 2.5))"
+      b = "(defn apply-first [x :a fs (List (Fn :a :a))] :a ((head fs) x))\n(defn main [] :float (apply-first 2.5 [(fn [y] (+ y 1))]))"
+      assert {:error, _} = elab(a)
+      assert {:error, _} = elab(b)
+    end
+  end
+
+  describe "no hidden partiality (liquid-core.md §6.6, §10.8)" do
+    test "a match must be exhaustive, and the error names a missing case" do
+      e = error("(deftype C (R) (G))\n(defn f [c :C] :int (match c [(R) 1]))")
+      assert e.message == "this match is not exhaustive"
+      assert e.note == "no clause matches (G)"
+
+      assert error("(defn f [n :int] :int (match n [0 1]))").note == "no clause matches _"
+      assert error("(defn f [xs (List :int)] :int (match xs [[] 0]))").note == "no clause matches [_ | _]"
+      assert {:ok, _} = elab("(defn f [b :bool] :int (match b [true 1] [false 0]))")
+    end
+
+    test "a guarded clause does not count towards exhaustiveness" do
+      assert error("(defn f [n :int] :int (match n [0 1]))").message == "this match is not exhaustive"
+    end
+
+    test "a let pattern must be irrefutable" do
+      e = error("(deftype R (Ok :int) (Err :string))\n(defn f [r :R] :int (let [(Ok v) r] v))")
+      assert e.message == "this pattern can fail to match"
+      assert {:ok, 3} = run("(deftype P [x :int y :int])\n(defn main [] :int (let [(P a b) (P 1 2)] (+ a b)))")
+    end
+
+    test "a guard must be guard-safe" do
+      e = error("(defn pos [x :int] :bool (> x 0))\n(defn f [x :int :when (pos x)] :int x)")
+      assert e.message == "a guard cannot call a function"
+      assert {:ok, _} = elab("(defn f [x :int :when (and (> x 0) (< x 10))] :int x)")
     end
   end
 
@@ -109,7 +165,7 @@ defmodule Vaisto.ElabTest do
     end
 
     test "a signature's type variable is rigid in its body: D17 is an error, not a generalization" do
-      assert error("(defn double [x :a] :a (* x 2))").message =~ "`*` works on Int or Float, not a"
+      assert error("(defn double [x :a] :a (* x 2))").note == "expected a, found Int"
     end
 
     test "a suggested signature is verified, and one HM got wrong fails (§13)" do
@@ -139,14 +195,14 @@ defmodule Vaisto.ElabTest do
     end
 
     test "== needs a ground type: values of a type variable need an Eq dictionary" do
-      assert error("(defn same [x :a y :a] :bool (== x y))").message =~ "`==` needs a type without type variables"
+      assert error("(defn same [x :a y :a] :bool (== x y))").message =~ "`==` compares ground data, but this is a"
       assert {:ok, _} = elab("(defn same [x :int y :int] :bool (== x y))")
     end
   end
 
   test "errors point at the source" do
     e = error("(defn f [x :int] :int\n  (+ x \"one\"))")
-    assert e.message =~ "`+` works on Int or Float"
+    assert e.note == "expected Int, found String"
     assert e.primary_span.line == 2
   end
 
@@ -154,6 +210,56 @@ defmodule Vaisto.ElabTest do
     assert {:outside, reason} = elab("(process counter 0 :inc (+ state 1))")
     assert reason =~ "process"
     assert {:outside, _} = elab("(defn f [] :string (str 1))")
+  end
+
+  # Each from a program an adversarial review found accepted with Core that
+  # Lint rejects, or meaning something else than the backends.
+  describe "review findings" do
+    test "== compares ground data, through declared types too" do
+      assert error("(deftype F [g (Fn :int :int)])\n(defn same [a :F b :F] :bool (== a b))").message =~ "`==` compares ground data"
+    end
+
+    test "a pattern binds each name once: a repeated name is not an equality test" do
+      assert error("(defn f [x :int x :int] :int x)").message == "the parameter `x` appears twice"
+      assert error("(defn f [p (Tuple :int :int)] :int (match p [{x x} x]))").message == "`x` is bound twice in this pattern"
+    end
+
+    test "duplicate definitions, fields and constructors, and built-in type names" do
+      assert error("(defn f [] :int 1)\n(defn f [] :int 2)").message == "`f` is defined twice"
+      assert error("(deftype R [x :int x :int])").message =~ "names a field twice"
+      assert error("(deftype S (A) (A :int))").message =~ "names a constructor twice"
+      assert error("(deftype S (A))\n(deftype T (A :int))").message =~ "the constructor `A` is already defined"
+      assert error("(deftype List [x :int])").message =~ "built-in type"
+    end
+
+    test "_ binds nothing" do
+      assert error("(defn f [_ :int] :int _)").message =~ "cannot be used as a value"
+    end
+
+    test "a binder may be named like a prelude definition" do
+      assert {:ok, _} = elab("(defn main [] :int (let [prelude.map 1] (head (map (fn [x] x) [prelude.map]))))")
+    end
+
+    test "the empty tuple pattern is unit" do
+      assert {:ok, _} = elab("(defn f [u :unit] :int (match u [{} 1]))")
+    end
+
+    test "a catch binder is a name" do
+      assert error("(deftype R (Ok v) (Err e))\n(defn f [] :int (try (div 1 0) [catch [:error (Ok x) 1]]))").message =~ "binds the reason to a name"
+    end
+
+    test "a lambda parameter may be annotated, as a defn's is (D20)" do
+      assert {:ok, 6} = run("(defn main [] :int (let [f (fn [x :int] (* x 2))] (f 3)))")
+      assert error("(defn f [] :int ((fn [[a b]] a) [1 2]))").message =~ "a lambda parameter is a name"
+    end
+
+    test "a constructor is a function where a function is expected" do
+      assert {:ok, _} = elab("(deftype Opt (Some :int) (None))\n(defn f [xs (List :int)] (List :Opt) (map Some xs))")
+    end
+
+    test "a parse error is an error, not something outside the fragment" do
+      assert {:error, [_]} = elab("(defn f [] :int (match 5))")
+    end
   end
 
   test "D23-like misparse: [x :a] is one parameter of type a, not two parameters" do

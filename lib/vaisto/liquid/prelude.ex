@@ -55,6 +55,10 @@ defmodule Vaisto.Liquid.Prelude do
   # What each prelude definition needs besides itself.
   @needs %{"prelude.flat_map": [:"prelude.append"]}
 
+  @doc "The names of every prelude definition."
+  @spec names() :: [atom()]
+  def names, do: Map.keys(@prelude)
+
   @doc "The Core type of a prelude definition, such as `:\"prelude.map\"`."
   @spec type(atom()) :: Vaisto.Liquid.Canonical.tree()
   def type(name) do
@@ -62,13 +66,46 @@ defmodule Vaisto.Liquid.Prelude do
     type
   end
 
-  @doc "The definitions a program that uses `names` needs, in a fixed order."
-  @spec defs(Enumerable.t()) :: [Vaisto.Liquid.Canonical.tree()]
-  def defs(names) do
+  @doc """
+  The definitions a program that uses `names` needs, in a fixed order.
+
+  A binder may not share a name with any definition of the module
+  (liquid-core.md §10.12), so a prelude binder that would, such as `f` in a
+  program that defines `f`, is renamed apart from `avoid`.
+  """
+  @spec defs(Enumerable.t(), Enumerable.t()) :: [Vaisto.Liquid.Canonical.tree()]
+  def defs(names, avoid \\ []) do
+    avoid = MapSet.new(avoid)
+
     names
     |> Enum.flat_map(&[&1 | Map.get(@needs, &1, [])])
     |> Enum.uniq()
     |> Enum.sort()
-    |> Enum.map(&Map.fetch!(@prelude, &1))
+    |> Enum.map(&hygienic(Map.fetch!(@prelude, &1), avoid))
   end
+
+  defp hygienic([:def, name, type, fun] = def, avoid) do
+    case fun |> binders() |> Enum.filter(&MapSet.member?(avoid, &1)) do
+      [] -> def
+      clashes -> [:def, name, type, rename(fun, Map.new(clashes, &{&1, fresh(&1, avoid)}))]
+    end
+  end
+
+  defp fresh(x, avoid), do: Stream.iterate(2, &(&1 + 1)) |> Stream.map(&:"#{x}'#{&1}") |> Enum.find(&(not MapSet.member?(avoid, &1)))
+
+  # The names a prelude definition binds: parameters, let binders, and pattern
+  # variables. None of them is also used as a symbol of the Core syntax.
+  defp binders([:fn, params, body]), do: Enum.map(params, &hd/1) ++ binders(body)
+  defp binders([:let, [[x, _type, e]], body]), do: [x | binders(e) ++ binders(body)]
+  defp binders([:match, s | clauses]), do: binders(s) ++ Enum.flat_map(clauses, fn [p | rest] -> pattern_vars(p) ++ Enum.flat_map(rest, &binders/1) end)
+  defp binders(list) when is_list(list), do: Enum.flat_map(list, &binders/1)
+  defp binders(_), do: []
+
+  defp pattern_vars(x) when is_atom(x) and x != :_, do: [x]
+  defp pattern_vars([:inj, _type, _ctor | ps]), do: Enum.flat_map(ps, &pattern_vars/1)
+  defp pattern_vars(_), do: []
+
+  defp rename(x, map) when is_atom(x), do: Map.get(map, x, x)
+  defp rename(list, map) when is_list(list), do: Enum.map(list, &rename(&1, map))
+  defp rename(t, _map), do: t
 end
