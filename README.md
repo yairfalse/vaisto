@@ -186,10 +186,26 @@ Fields can also be read with `(. p :x)`.
 (defn main [] :int
   (fold + 0 (map (fn [x] (* x x)) (filter (fn [x] (> x 2)) [1 2 3 4]))))   ; 25
 
-(defn len
+; A multi-clause function: its signature, then one clause per case.
+; The signature's arity is how many patterns each clause has.
+(defn len (Fn (List :a) :int)
   [[] 0]
   [[h | t] (+ 1 (len t))])
+
+(defn add (Fn :int :int :int)
+  [0 y y]
+  [x y (+ x y)])
+
+; A clause may have a guard, in match as in a multi-clause function.
+(defn sign [n :int] :atom
+  (match n
+    [x :when (< x 0) :negative]
+    [0 :zero]
+    [_ :positive]))
 ```
+
+The older form without a signature, `(defn len [[] 0] [[h | t] ...])`, still
+compiles, typed `Any -> Any`, and takes one argument.
 
 ### Type classes
 
@@ -609,7 +625,7 @@ the defect IDs of the [Liquid Vaisto RFC](docs/design/liquid-vaisto-rfc.md)
   (D22);
 - `:any` unifies with everything;
 - unknown qualified calls are typed `Any`;
-- multi-clause functions are typed `Any -> Any`.
+- a multi-clause function without a signature is typed `Any -> Any`.
 
 **Modules.** Cross-module calls are not type-checked yet. `.vsi` interfaces are
 written but not used for typing imports (D9).
@@ -618,8 +634,8 @@ written but not used for typing imports (D9).
 match values of that type at call sites (D1, D2). Row-polymorphic field access
 on a record crashes at run time (D24).
 
-**Guards.** `match` and `receive` clauses have no guards; `[x :when g body]`
-there is a parse error (D27). Multi-clause functions take guards.
+**Guards.** `receive` clauses have no guards yet; `[x :when g body]` there is
+a parse error (D27). `match` clauses and multi-clause functions take them.
 
 **Not there yet:** receive with a timeout, binary syntax, decoding values
 from `Dyn`, refinements beyond `Int`, `Bool` and `List` on single-clause

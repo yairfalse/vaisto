@@ -52,9 +52,12 @@ defmodule Vaisto.Refine.SurfaceTest do
       assert {:defn, :g, [], {:list, [], _}, {:call, :List, _, _}} = strip(Parser.parse("(defn g [] (List :int) (list))"))
     end
 
-    test "D27: a match clause with :when is refused, not silently ignored" do
-      assert {:error, error, _} = Parser.parse("(match n [x :when (> x 0) 1] [_ 0])")
-      assert error.message == "guards in match and receive clauses are not supported yet"
+    test "D27: a match clause's guard is a guard, never a body that ignores it" do
+      assert {:match, :n, [{:x, {:call, :>, _, _}, 1}, {:_, 0}]} = strip(Parser.parse("(match n [x :when (> x 0) 1] [_ 0])"))
+
+      # receive clauses have no guards yet, so :when there is still refused
+      assert {:error, error, _} = Parser.parse("(receive [x :when (> x 0) 1])")
+      assert error.message == "guards in receive clauses are not supported yet"
     end
   end
 

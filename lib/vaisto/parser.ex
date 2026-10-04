@@ -665,8 +665,9 @@ defmodule Vaisto.Parser do
 
   # (match expr [pattern1 body1] [pattern2 body2] ...) → {:match, expr, [{pattern, body}, ...], loc}
   # (match expr [pattern body] ...) or (match expr [pattern body1 body2 ...] ...)
+  # A guarded clause, [pattern :when guard body ...], is {pattern, guard, body} (D27).
   defp parse_match([expr | clauses], loc) when clauses != [] do
-    case parse_clauses(clauses, loc) do
+    case parse_clauses(clauses, loc, :match) do
       {:ok, parsed_clauses} -> {:match, expr, parsed_clauses, loc}
       {:error, _, _} = err -> err
     end
@@ -678,12 +679,16 @@ defmodule Vaisto.Parser do
     {:error, Errors.parse_error("match requires expression and clauses: (match expr [pattern body] ...)", span: Error.span_from_loc(loc)), loc}
   end
 
-  defp parse_clauses(clauses, loc) do
+  defp parse_clauses(clauses, loc, form) do
     results = Enum.map(clauses, fn
-      # Clause guards are not implemented for match and receive. Without this,
-      # `[x :when g body]` parsed as a body that evaluates g and ignores it (D27).
+      {:bracket, [pattern, {:atom, :when}, guard | bodies]} when form == :match and bodies != [] ->
+        {:ok, {pattern, guard, wrap_bodies(bodies, loc)}}
+      {:bracket, [_pattern, {:atom, :when} | _]} when form == :match ->
+        {:error, Errors.parse_error("a guarded clause is written [pattern :when guard body]", span: Error.span_from_loc(loc)), loc}
+      # Guards in receive clauses are not implemented. Without this, `[x :when
+      # g body]` parsed as a body that evaluates g and ignores it (D27).
       {:bracket, [_pattern, {:atom, :when} | _]} ->
-        {:error, Errors.parse_error("guards in match and receive clauses are not supported yet", span: Error.span_from_loc(loc), hint: "use a multi-clause defn, whose clauses take :when guards, or an if in the clause body"), loc}
+        {:error, Errors.parse_error("guards in receive clauses are not supported yet", span: Error.span_from_loc(loc), hint: "match on the message in the clause body"), loc}
       {:bracket, [pattern | bodies]} when length(bodies) >= 1 ->
         body = wrap_bodies(bodies, loc)
         {:ok, {pattern, body}}
@@ -702,7 +707,7 @@ defmodule Vaisto.Parser do
   # (receive [pattern1 body1] [pattern2 body2] ...) → {:receive, [{pattern, body}, ...], loc}
   # Blocks until a message matching one of the patterns arrives
   defp parse_receive(clauses, loc) when clauses != [] do
-    case parse_clauses(clauses, loc) do
+    case parse_clauses(clauses, loc, :receive) do
       {:ok, parsed_clauses} -> {:receive, parsed_clauses, loc}
       {:error, _, _} = err -> err
     end
@@ -904,6 +909,53 @@ defmodule Vaisto.Parser do
     {:error, Errors.parse_error("generate requires syntax: (generate :prompt PROMPT_NAME :extract TYPE)", span: Error.span_from_loc(loc)), loc}
   end
 
+  # A multi-clause function with a signature (owner decision, 2026-10-04):
+  #
+  #   (defn len (Fn (List :a) :int)       (defn add (Fn :int :int :int)
+  #     [[] 0]                              [0 y y]
+  #     [[h | t] (+ 1 (len t))])            [x y (+ x y)])
+  #
+  # The signature's arity says how many patterns each clause has; a clause is
+  # [p1 ... pn body ...] or [p1 ... pn :when guard body ...]. It is a single-clause
+  # defn whose body matches on its parameters, or on a tuple of them, so every
+  # later stage reads it as such. The parameters are named `arg 1`, `arg 2` ...,
+  # which no program can write, so they capture nothing.
+  defp parse_defn([name, {:call, :Fn, [_ | _] = types, _} | clauses], loc) when clauses != [] do
+    {param_types, [result]} = Enum.split(types, -1)
+    arity = length(param_types)
+
+    cond do
+      arity == 0 ->
+        {:error, Errors.parse_error("in definition of `#{name}`: a multi-clause function takes at least one argument", span: Error.span_from_loc(loc)), loc}
+
+      not Enum.all?(clauses, &match?({:bracket, _}, &1)) ->
+        {:error, Errors.parse_error("in definition of `#{name}`: after its signature, a multi-clause function has only clauses, each [patterns ... body]", span: Error.span_from_loc(loc)), loc}
+
+      true ->
+        params = for i <- 1..arity, do: :"arg #{i}"
+
+        scrutinee =
+          case params do
+            [p] -> p
+            ps -> {:tuple, ps, loc}
+          end
+
+        match_clauses =
+          Enum.map(clauses, fn {:bracket, content} ->
+            case Enum.split(content, arity) do
+              {patterns, [{:atom, :when}, guard | bodies]} when length(patterns) == arity and bodies != [] -> {clause_pattern(patterns), guard, wrap_bodies(bodies, loc)}
+              {patterns, [_ | _] = bodies} when length(patterns) == arity -> {clause_pattern(patterns), wrap_bodies(bodies, loc)}
+              _ -> throw({:parse_error, "each clause of `#{name}` has #{arity} pattern#{if arity == 1, do: "", else: "s"} and a body, as its signature says"})
+            end
+          end)
+
+        typed_params = Enum.zip(params, Enum.map(param_types, &unwrap_type/1))
+        make_defn(name, typed_params, {:match, scrutinee, match_clauses, loc}, unwrap_type(result), nil, loc)
+    end
+  catch
+    {:parse_error, msg} -> {:error, Errors.parse_error("in definition of `#{name}`: #{msg}", span: Error.span_from_loc(loc)), loc}
+  end
+
   # Multi-clause function definition
   # (defn len
   #   [[] 0]
@@ -1038,6 +1090,10 @@ defmodule Vaisto.Parser do
     body = wrap_bodies(bodies, %Vaisto.Parser.Loc{file: "defn_multi", line: 0, col: 0, length: 0})
     {pattern, nil, body}
   end
+
+  # One argument is matched by its pattern; several, by a tuple of patterns.
+  defp clause_pattern([pattern]), do: pattern
+  defp clause_pattern(patterns), do: {:tuple_pattern, patterns}
 
   # Type annotation checks for param parsing
   defp is_type_annotation?({:atom, t}) when t in [:int, :float, :num, :string, :bool, :any, :atom, :unit], do: true

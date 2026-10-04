@@ -431,7 +431,7 @@ defmodule Vaisto.Elab do
 
   defp check_({:match, s, clauses, _loc}, type, ctx) do
     {s, stype, ctx} = synth(s, ctx)
-    match_clauses(s, stype, Enum.map(clauses, fn {p, b} -> {p, nil, b} end), type, ctx)
+    match_clauses(s, stype, Enum.map(clauses, fn {p, b} -> {p, nil, b}; {p, g, b} -> {p, g, b} end), type, ctx)
   end
 
   defp check_({:list, elems, _loc}, type, ctx), do: check_({:bracket, elems}, type, ctx)

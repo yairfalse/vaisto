@@ -1,0 +1,9 @@
+; C19: a guard that crashes counts as false, so the third clause runs at n = 0 (RFC §14.2, §10.3)
+; expect: errors
+; error: requirement not met | `safe-div` requires (!= n 0) for its argument `y` | n
+(defn safe-div [x :int y {d :int | (!= d 0)}] :int (div x y))
+(defn c19 [n :int] :int
+  (match n
+    [x :when (> (div 10 x) 1) 1]
+    [x :when (< (div 10 x) 2) 2]
+    [_ (safe-div 1 n)]))

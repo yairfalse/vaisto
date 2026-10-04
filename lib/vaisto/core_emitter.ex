@@ -585,13 +585,21 @@ defmodule Vaisto.CoreEmitter do
   # Match expression → Core Erlang case
   defp to_core_expr({:match, expr, clauses, _type}, user_fns, local_vars) do
     expr_core = to_core_expr(expr, user_fns, local_vars)
-    clause_cores = Enum.map(clauses, fn {pattern, body, _body_type} ->
+    clause_cores = Enum.map(clauses, fn clause ->
+      {pattern, guard, body} =
+        case clause do
+          {pattern, body, _body_type} -> {pattern, nil, body}
+          {pattern, guard, body, _body_type} -> {pattern, guard, body}
+        end
+
       pattern_core = to_core_pattern(pattern)
       # Track pattern variables in the clause body
       pattern_vars = Shared.extract_pattern_vars(pattern)
       clause_local_vars = MapSet.union(local_vars, MapSet.new(pattern_vars))
       body_core = to_core_expr(body, user_fns, clause_local_vars)
-      :cerl.c_clause([pattern_core], :cerl.c_atom(true), body_core)
+      # A clause guard, so a guard that crashes counts as false (liquid-core.md §6.6).
+      guard_core = if guard, do: to_core_expr(guard, user_fns, clause_local_vars), else: :cerl.c_atom(true)
+      :cerl.c_clause([pattern_core], guard_core, body_core)
     end)
     :cerl.c_case(expr_core, clause_cores)
   end

@@ -84,10 +84,13 @@ defmodule Vaisto.Emitter do
   # Match expression → Elixir case
   def to_elixir({:match, expr, clauses, _type}) do
     expr_ast = to_elixir(expr)
-    clause_asts = Enum.map(clauses, fn {pattern, body, _body_type} ->
-      pattern_ast = emit_pattern(pattern)
-      body_ast = to_elixir(body)
-      {:->, [], [[pattern_ast], body_ast]}
+    clause_asts = Enum.map(clauses, fn
+      {pattern, body, _body_type} ->
+        {:->, [], [[emit_pattern(pattern)], to_elixir(body)]}
+
+      # A guarded clause: a guard that crashes counts as false, as in Elixir.
+      {pattern, guard, body, _body_type} ->
+        {:->, [], [[{:when, [], [emit_pattern(pattern), to_elixir(guard)]}], to_elixir(body)]}
     end)
 
     {:case, [], [expr_ast, [do: clause_asts]]}

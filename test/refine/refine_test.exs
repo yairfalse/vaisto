@@ -113,9 +113,8 @@ defmodule Vaisto.Refine.RefineTest do
     end
   end
 
-  # C19 (§14.2, §10.3). Clause guards are written in Core here: match and
-  # receive have no surface guards yet (D27), and multi-clause functions are
-  # typed Any -> Any, so the rule cannot be reached from surface syntax today.
+  # C19 (§14.2, §10.3), at the level of Core; test/refine/conformance/c19_guard_definedness.va
+  # states it in surface syntax, now that match clauses take guards (D27).
   describe "C19: negating an earlier clause's guard includes its definedness" do
     @describetag :z3
 

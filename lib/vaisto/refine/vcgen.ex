@@ -729,7 +729,7 @@ defmodule Vaisto.Refine.VCGen do
     env = %{env | binds: Map.merge(env.binds, binds)}
 
     {guard_fact, guard_exact?} =
-      case guard && guard(guard, env.binds) do
+      case if(is_nil(guard), do: nil, else: guard(guard, env.binds)) do
         nil -> {nil, true}
         :unsupported -> {nil, false}
         {:ok, d, p} -> {IR.and_([d, p]), not mentions_fresh?([d, p], first_fresh, st.n)}

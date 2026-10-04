@@ -348,7 +348,7 @@ The only inference that remains is choosing the arguments at an elimination site
 - A function type is `(Fn :a :b :c)`: two parameters of types `a` and `b`, and a result of type `c`.
 - **Type ascription** is `(the τ e)`: it checks `e` against `τ` (owner decision, 2026-10-03). This is the rule that switches synthesis to checking, and it is how a program states a type inference cannot determine: `(the (Result :int :string) (Ok 42))`. Its type variables must be those of the enclosing signature.
 - A lambda's parameters may be annotated as a definition's are: `(fn [x :int] ...)` (D20).
-- Multi-clause definitions have no syntax for a signature yet.
+- A multi-clause definition writes its signature as a function type after its name, `(defn len (Fn (List :a) :int) [[] 0] [[h | t] ...])` (owner decision, 2026-10-04). The arity says how many patterns each clause has, and the parser turns the definition into a single-clause one that matches on its parameters, or on a tuple of them.
 
 ## 10. Later: one semiring for usage and cost
 

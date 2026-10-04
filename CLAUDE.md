@@ -197,10 +197,16 @@ Typed AST shapes:
 (defn add [x :int y :int] :int (+ x y))
 (defn take [n :int xs] ...)          ; n is :int, xs is :any
 
-; Multi-clause functions (pattern matching) — currently arity-1 only
-(defn len
+; Multi-clause functions: the (Fn ...) signature, then one clause per case. The
+; parser turns this into a defn with params `arg 1`.. and a match on them.
+(defn len (Fn (List :a) :int)
   [[] 0]
   [[h | t] (+ 1 (len t))])
+(defn add (Fn :int :int :int) [0 y y] [x y (+ x y)])   ; arity from the signature
+; Without a signature, (defn len [[] 0] ...) is defn_multi: arity 1, Any -> Any.
+
+; Guards in match clauses (D27): a guard that crashes counts as false
+(match n [x :when (< x 0) :neg] [_ :non-neg])
 
 ; Algebraic data types
 (deftype Result (Ok v) (Err e))
@@ -268,10 +274,10 @@ Typed AST shapes:
 - `:any` unifies with everything — acts as escape hatch that bypasses type safety
 - Extern argument types are best-effort checked (fall back to declared ret_type on mismatch)
 - Unknown qualified calls silently return `:any` instead of erroring
-- Multi-clause functions (`defn_multi`) hardcode arity=1
+- Multi-clause functions without a signature (`defn_multi`) hardcode arity=1 and are typed Any -> Any; with an `(Fn ...)` signature they take any arity
 - No receive-with-timeout, no binary/bitstring syntax
 - Record/sum annotations on `defn` parameters do not resolve at call sites: `[p :Point]` gives "expected `Point`, found `Point`". Existing tests only type-check such definitions and never call them.
-- `match` and `receive` clauses have no guards: `[x :when g body]` is a parse error (D27). Multi-clause `defn` takes guards.
+- `receive` clauses have no guards: `[x :when g body]` there is a parse error (D27). `match` clauses and multi-clause `defn` take guards.
 - Lambda parameters cannot be annotated: `(fn [x :int] x)` is a two-parameter lambda.
 - `(deftype opaque ...)` and `(deftype T p [...])` are silently misparsed as records.
 - Row-polymorphic field access type-checks but crashes at runtime on both backends when given a record.

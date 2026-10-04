@@ -54,6 +54,13 @@ defmodule Vaisto.Liquid.HarnessTest do
       assert %{verdict: :agree, eval: {:ok, 7}} = result
     end
 
+    # D27: match clauses take guards, which count as false when they crash
+    test "D27 fixed: a guarded match clause means the same on the evaluator and both backends" do
+      classify = "(defn classify [n :int] :atom (match n [x :when (< x 0) :negative] [0 :zero] [_ :positive]))\n"
+      assert %{verdict: :agree, eval: {:ok, :negative}} = Harness.run(classify <> "(defn main [] :atom (classify -1))")
+      assert %{verdict: :agree, eval: {:ok, 2}} = Harness.run("(defn f [n :int] :int (match n [x :when (> (div 10 x) 1) 1] [_ 2]))\n(defn main [] :int (f 0))")
+    end
+
     # P0-10 (D12): field access on the Elixir backend
     test "D12 fixed: field access runs on both backends" do
       result = Harness.run("(deftype Point [x :int y :int])\n(defn main [] :int (. (Point 1 2) :y))")

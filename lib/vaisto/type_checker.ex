@@ -2724,8 +2724,14 @@ defmodule Vaisto.TypeChecker do
   # Context-threaded check_match_clauses
   defp check_match_clauses_s(clauses, expr_type, ctx) do
     # Thread ctx through clauses sequentially for deterministic tvar generation
-    result = Enum.reduce_while(clauses, {:ok, [], ctx}, fn {pattern, body}, {:ok, acc, ctx} ->
-      case check_match_clause_s(pattern, body, expr_type, ctx) do
+    result = Enum.reduce_while(clauses, {:ok, [], ctx}, fn clause, {:ok, acc, ctx} ->
+      {pattern, guard, body} =
+        case clause do
+          {pattern, body} -> {pattern, nil, body}
+          {pattern, guard, body} -> {pattern, guard, body}
+        end
+
+      case check_match_clause_s(pattern, guard, body, expr_type, ctx) do
         {:ok, clause, ctx} -> {:cont, {:ok, [clause | acc], ctx}}
         {:error, _} = err -> {:halt, err}
       end
@@ -2735,9 +2741,10 @@ defmodule Vaisto.TypeChecker do
       {:error, _} = err -> err
       {:ok, rev_typed_clauses, ctx} ->
         typed_clauses = Enum.reverse(rev_typed_clauses)
-        [{_pattern, _body, first_type} | rest_clauses] = typed_clauses
+        # A typed clause is {pattern, body, type}, or {pattern, guard, body, type}.
+        [first_type | rest_types] = Enum.map(typed_clauses, &elem(&1, tuple_size(&1) - 1))
 
-        unified_result = Enum.reduce_while(rest_clauses, {:ok, first_type, ctx}, fn {_, _, body_type}, {:ok, acc_type, ctx} ->
+        unified_result = Enum.reduce_while(rest_types, {:ok, first_type, ctx}, fn body_type, {:ok, acc_type, ctx} ->
           case unify_types_s(acc_type, body_type, ctx) do
             {:ok, unified, ctx} -> {:cont, {:ok, unified, ctx}}
             {:error, _} = err -> {:halt, err}
@@ -2747,7 +2754,8 @@ defmodule Vaisto.TypeChecker do
         case unified_result do
           {:error, _} = err -> err
           {:ok, result_type, ctx} ->
-            case check_exhaustiveness(clauses, expr_type) do
+            # A guarded clause does not count: its guard may be false.
+            case check_exhaustiveness(for({_pattern, _body} = c <- clauses, do: c), expr_type) do
               :ok -> {:ok, result_type, typed_clauses, ctx}
               {:error, _} = err -> err
             end
@@ -2755,7 +2763,7 @@ defmodule Vaisto.TypeChecker do
     end
   end
 
-  defp check_match_clause_s(pattern, body, expr_type, ctx) do
+  defp check_match_clause_s(pattern, guard, body, expr_type, ctx) do
     {instantiated_type, ctx} = instantiate_sum_tvars_s(expr_type, ctx)
     bindings = extract_pattern_bindings(pattern, instantiated_type, ctx.env)
     extended_ctx = %{ctx | env: Enum.reduce(bindings, ctx.env, fn {name, type}, acc ->
@@ -2763,13 +2771,32 @@ defmodule Vaisto.TypeChecker do
     end)}
     typed_pattern = type_pattern(pattern, instantiated_type, ctx.env)
 
-    case check_s(body, extended_ctx) do
-      {:ok, body_type, typed_body, clause_ctx} ->
-        # Propagate substitution updates but restore the outer env
-        # (pattern-bound variables must not leak out of match clauses)
-        restored_ctx = %{clause_ctx | env: ctx.env}
-        {:ok, {typed_pattern, typed_body, body_type}, restored_ctx}
-      error -> error
+    # A guard is a Bool in the scope of the pattern's bindings (D27).
+    guard_result =
+      case if(is_nil(guard), do: nil, else: check_s(guard, extended_ctx)) do
+        nil ->
+          {:ok, nil, extended_ctx}
+
+        {:ok, guard_type, typed_guard, gctx} ->
+          case unify_types_s(:bool, guard_type, gctx) do
+            {:ok, _, gctx} -> {:ok, typed_guard, gctx}
+            {:error, _} -> {:error, Errors.type_mismatch(:bool, guard_type, note: "a guard must be a Bool")}
+          end
+
+        {:error, _} = err ->
+          err
+      end
+
+    with {:ok, typed_guard, extended_ctx} <- guard_result,
+         {:ok, body_type, typed_body, clause_ctx} <- check_s(body, extended_ctx) do
+      # Propagate substitution updates but restore the outer env
+      # (pattern-bound variables must not leak out of match clauses)
+      restored_ctx = %{clause_ctx | env: ctx.env}
+
+      typed_clause =
+        if guard, do: {typed_pattern, typed_guard, typed_body, body_type}, else: {typed_pattern, typed_body, body_type}
+
+      {:ok, typed_clause, restored_ctx}
     end
   end
 

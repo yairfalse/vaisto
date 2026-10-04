@@ -768,6 +768,11 @@ defmodule Vaisto.TypeSystem.Infer do
     {:ok, Enum.reverse(acc), ctx}
   end
 
+  # Guarded clauses are typed by the main checker, which this falls back to.
+  defp infer_match_clauses([{_pattern, _guard, _body} = clause | _rest], _scrutinee_type, _result_tvar, _ctx, _acc) do
+    {:error, Errors.unknown_expression(clause, hint: "inference not implemented for guarded clauses")}
+  end
+
   defp infer_match_clauses([{pattern, body} | rest], scrutinee_type, result_tvar, ctx, acc) do
     saved_env = ctx.env
 

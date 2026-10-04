@@ -366,7 +366,8 @@ defmodule Vaisto.LSP.Hover do
   defp find_var_type({:match, expr, clauses, _type}, name) do
     case find_var_type(expr, name) do
       {:ok, _} = found -> found
-      :not_found -> Enum.find_value(clauses, :not_found, fn {pat, body, _} ->
+      :not_found -> Enum.find_value(clauses, :not_found, fn clause ->
+        {pat, body} = {elem(clause, 0), elem(clause, tuple_size(clause) - 2)}
         case find_var_type(pat, name) do {:ok, _} = f -> f; _ -> find_var_type(body, name) end
       end)
     end
