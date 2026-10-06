@@ -302,15 +302,16 @@ defmodule Vaisto.Liquid.Eval do
 
   defp match_clauses(_v, [], _env, _types), do: crash(:no_match)
   defp match_clauses(v, [clause | rest], env, types) do
+    # The clause's shape says whether it has a guard.
     {pattern, guard, body} =
       case clause do
-        [p, [:when, g], body] -> {p, g, body}
-        [p, body] -> {p, nil, body}
+        [p, [:when, g], body] -> {p, {:guarded, g}, body}
+        [p, body] -> {p, :unguarded, body}
       end
 
     with {:ok, binds} <- match(pattern, v, types),
          env = Map.merge(env, binds),
-         true <- guard == nil or guard_holds?(guard, env, types) do
+         true <- guard == :unguarded or guard_holds?(elem(guard, 1), env, types) do
       ev(body, env, types)
     else
       _ -> match_clauses(v, rest, env, types)

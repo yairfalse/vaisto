@@ -96,6 +96,28 @@ defmodule Vaisto.LSP.SignatureHelpTest do
       assert nil == result
     end
 
+    test "shows a signed multi-clause function by its types, not its generated parameter names" do
+      text = "(defn add (Fn :int :int :int) [0 y y] [x y (+ x y)])\n(defn main [] :int (add 1 2))"
+      assert %{"signatures" => [sig]} = SignatureHelp.get_signature_help(text, 2, 25)
+      assert sig["label"] == "(add :int :int) → :int"
+    end
+
+    test "finds a function defined after a sum type, and a guarded one" do
+      text = "(deftype C (R :int) (G))\n(defn f (Fn C :int) [(R n) n] [(G) 0])\n(defn main [] :int (f (G)))"
+      assert %{"signatures" => [sig]} = SignatureHelp.get_signature_help(text, 3, 22)
+      assert sig["label"] == "(f C) → :int"
+
+      guarded = "(defn g [x :int :when (> x 0)] :int x)\n(defn main [] :int (g 1))"
+      assert %{"signatures" => [sig]} = SignatureHelp.get_signature_help(guarded, 2, 22)
+      assert sig["label"] == "(g x :int) → :int"
+    end
+
+    test "shows compound parameter types as written" do
+      text = "(defn total [xs (List :int)] :int (fold + 0 xs))\n(defn main [] :int (total [1 2]))"
+      assert %{"signatures" => [sig]} = SignatureHelp.get_signature_help(text, 2, 27)
+      assert sig["label"] == "(total xs (List :int)) → :int"
+    end
+
     test "returns builtin signature even in incomplete user function" do
       # Test that builtins still work inside function bodies
       text = "(defn add [x :int y :int] :int (+ "

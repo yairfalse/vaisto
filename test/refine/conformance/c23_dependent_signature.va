@@ -1,0 +1,6 @@
+; C23: a refinement in a signature names an earlier argument by its binder (RFC §4.4)
+; expect: compiles
+; main: 2
+(defn gap (Fn {a :int | (> a 0)} {b :int | (> b a)} {r :int | (> r 0)})
+  [x y (- y x)])
+(defn main [] :int (gap 3 5))

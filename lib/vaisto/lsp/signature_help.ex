@@ -537,22 +537,26 @@ defmodule Vaisto.LSP.SignatureHelp do
     build_user_signature(to_string(name), params, ret_type)
   end
 
+  defp find_function_params({:defn, name, params, _body, ret_type, _guard, _loc}, name) do
+    build_user_signature(to_string(name), params, ret_type)
+  end
+
   defp find_function_params(_, _), do: nil
 
   defp build_user_signature(name, params, ret_type) do
     param_strs = Enum.map(params, fn
-      {param_name, type} -> "#{param_name} :#{type}"
+      {param_name, type} -> param_label(param_name, type)
       {:var, param_name, _} -> to_string(param_name)
       param_name when is_atom(param_name) -> to_string(param_name)
       other -> inspect(other)
     end)
 
-    ret_str = if ret_type, do: " → :#{ret_type}", else: ""
+    ret_str = if ret_type, do: " → #{show_annotation(ret_type)}", else: ""
     label = "(#{name} #{Enum.join(param_strs, " ")})#{ret_str}"
 
     param_docs = Enum.map(params, fn
       {param_name, type} ->
-        %{label: to_string(param_name), doc: "Type: :#{type}"}
+        %{label: param_label(param_name, type), doc: "Type: #{show_annotation(type)}"}
       {:var, param_name, type} ->
         %{label: to_string(param_name), doc: "Type: #{format_type(type)}"}
       param_name when is_atom(param_name) ->
@@ -567,6 +571,26 @@ defmodule Vaisto.LSP.SignatureHelp do
       params: param_docs
     }
   end
+
+  # A parameter as written, or only its type when the parser named it: a signed
+  # multi-clause function's parameters are `arg 1`, `arg 2` ..., which no
+  # program can write.
+  defp param_label(param_name, type) do
+    case to_string(param_name) do
+      "arg " <> _ -> show_annotation(type)
+      name -> "#{name} #{show_annotation(type)}"
+    end
+  end
+
+  # A type annotation as the source writes it.
+  defp show_annotation({:atom, t}), do: show_annotation(t)
+  defp show_annotation(t) when is_atom(t), do: if(String.match?(Atom.to_string(t), ~r/^[A-Z]/), do: to_string(t), else: ":#{t}")
+  defp show_annotation({:call, head, args, _loc}) when is_atom(head), do: "(#{Enum.map_join([head | args], " ", &show_annotation_part/1)})"
+  defp show_annotation({:refine, binder, base, _predicate}), do: "{#{binder} #{show_annotation(base)} | ...}"
+  defp show_annotation(other), do: inspect(other)
+
+  defp show_annotation_part(head) when is_atom(head), do: if(String.match?(Atom.to_string(head), ~r/^[A-Z]/), do: to_string(head), else: show_annotation(head))
+  defp show_annotation_part(t), do: show_annotation(t)
 
   defp format_type(type), do: TypeFormatter.format(type)
 

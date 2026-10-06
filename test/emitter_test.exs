@@ -307,7 +307,8 @@ defmodule Vaisto.EmitterTest do
       code = "(list)"
 
       ast = Vaisto.Parser.parse(code)
-      {:ok, {:list, :any}, typed_ast} = Vaisto.TypeChecker.check(ast)
+      # The empty list's element type is whatever its use makes it.
+      {:ok, {:list, _}, typed_ast} = Vaisto.TypeChecker.check(ast)
       {:ok, EmptyListE2E, _} = Emitter.compile(typed_ast, EmptyListE2E)
 
       assert EmptyListE2E.main() == []

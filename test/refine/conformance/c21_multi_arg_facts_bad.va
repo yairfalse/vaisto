@@ -1,0 +1,7 @@
+; C21: an earlier clause that does not rule out y = 0 is no fact about y (RFC §10.3)
+; expect: errors
+; error: requirement not met | (!= y 0) | y
+(defn safe-div [x :int y {d :int | (!= d 0)}] :int (div x y))
+(defn quot (Fn :int :int :int)
+  [_ 1 0]
+  [x y (safe-div x y)])

@@ -1032,10 +1032,11 @@ defmodule Vaisto.Liquid.Lint do
       for clause <- clauses do
         {clause, cctx} = enter(ctx, clause)
 
+        # The clause's shape says whether it has a guard.
         {pattern, guard, body} =
           case clause do
-            [p, [:when, g], body] -> {p, g, body}
-            [p, body] -> {p, nil, body}
+            [p, [:when, g], body] -> {p, {:guarded, g}, body}
+            [p, body] -> {p, :unguarded, body}
             _ -> fail(cctx, "malformed clause #{show(clause)}")
           end
 
@@ -1043,9 +1044,9 @@ defmodule Vaisto.Liquid.Lint do
         binds = pattern_binds(cctx, pattern, stype, %{})
         cctx = %{cctx | gamma: Map.merge(cctx.gamma, binds)}
 
-        if guard do
-          unless guard_safe?(guard), do: fail(cctx, "guard #{show(Canonical.strip(guard))} is not guard-safe")
-          check_term(cctx, guard, @bool)
+        with {:guarded, g} <- guard do
+          unless guard_safe?(g), do: fail(cctx, "guard #{show(Canonical.strip(g))} is not guard-safe")
+          check_term(cctx, g, @bool)
         end
 
         {cctx, body, pattern, guard}
@@ -1056,10 +1057,10 @@ defmodule Vaisto.Liquid.Lint do
     Enum.reduce(Enum.with_index(branches, 1), [], fn {{cctx, _body, pattern, guard}, i}, earlier ->
       row = [normalize(ctx, pattern, stype)]
       unless useful?(ctx, earlier, row, [stype]), do: fail(cctx, "clause #{i} of the match can never be chosen: the clauses before it match every value it does")
-      if guard, do: earlier, else: earlier ++ [row]
+      if guard == :unguarded, do: earlier ++ [row], else: earlier
     end)
 
-    unguarded = for {_, _, pattern, nil} <- branches, do: [normalize(ctx, pattern, stype)]
+    unguarded = for {_, _, pattern, :unguarded} <- branches, do: [normalize(ctx, pattern, stype)]
 
     case missing(ctx, unguarded, [stype]) do
       :covered -> :ok
@@ -1071,17 +1072,23 @@ defmodule Vaisto.Liquid.Lint do
 
   @guard_prims (Map.keys(@prims) ++ [:eq, :ne, :length, :empty?, :head, :tail]) -- [:concat]
 
-  defp guard_safe?(g) do
+  defp guard_safe?(g), do: guard_unsafe(g) == nil
+
+  @doc """
+  The first subterm of the guard `g` that §6.6 does not allow in a guard, or nil
+  when `g` is guard-safe. The elaborator asks this, so the two agree.
+  """
+  def guard_unsafe(g) do
     case strip_own_meta(g) do
-      x when is_atom(x) or is_integer(x) or is_float(x) or is_binary(x) -> true
-      [:atom, _] -> true
-      [:unit] -> true
-      [:select, e, _l] -> guard_safe?(e)
-      [:tuple | es] -> Enum.all?(es, &guard_safe?/1)
-      [:inj, _type, _c | es] -> Enum.all?(es, &guard_safe?/1)
-      [:if, c, a, b] -> guard_safe?(c) and guard_safe?(a) and guard_safe?(b)
-      [:prim, op | es] -> op in @guard_prims and Enum.all?(es, &guard_safe?/1)
-      _ -> false
+      x when is_atom(x) or is_integer(x) or is_float(x) or is_binary(x) -> nil
+      [:atom, _] -> nil
+      [:unit] -> nil
+      [:select, e, _l] -> guard_unsafe(e)
+      [:tuple | es] -> Enum.find_value(es, &guard_unsafe/1)
+      [:inj, _type, _c | es] -> Enum.find_value(es, &guard_unsafe/1)
+      [:if, c, a, b] -> Enum.find_value([c, a, b], &guard_unsafe/1)
+      [:prim, op | es] -> if op in @guard_prims, do: Enum.find_value(es, &guard_unsafe/1), else: g
+      _ -> g
     end
   end
 

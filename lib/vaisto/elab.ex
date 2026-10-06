@@ -47,7 +47,7 @@ defmodule Vaisto.Elab do
 
   alias Vaisto.Error
   alias Vaisto.Elab.{Exhaustive, Types}
-  alias Vaisto.Liquid.Prelude
+  alias Vaisto.Liquid.{Lint, Prelude}
   alias Vaisto.Parser.Loc
 
   @higher_order %{map: :"prelude.map", filter: :"prelude.filter", fold: :"prelude.fold", flat_map: :"prelude.flat_map"}
@@ -237,7 +237,7 @@ defmodule Vaisto.Elab do
   defp multi_signature(f, loc, suggest, form, acc) do
     case Map.fetch(suggest, f) do
       {:ok, type} -> add_signature(f, type, loc, form, acc)
-      :error -> add_error(acc, Error.new("`#{f}` needs a signature", span: span(loc), note: "a multi-clause function has no syntax for one yet"))
+      :error -> add_error(acc, Error.new("`#{f}` needs a signature", span: span(loc), note: "a multi-clause function's signature is a function type after its name", hint: "as in (defn #{f} (Fn (List :a) :int) [[] 0] [[h | t] ...])"))
     end
   end
 
@@ -431,7 +431,7 @@ defmodule Vaisto.Elab do
 
   defp check_({:match, s, clauses, _loc}, type, ctx) do
     {s, stype, ctx} = synth(s, ctx)
-    match_clauses(s, stype, Enum.map(clauses, fn {p, b} -> {p, nil, b}; {p, g, b} -> {p, g, b} end), type, ctx)
+    match_clauses(s, stype, clauses, type, ctx)
   end
 
   defp check_({:list, elems, _loc}, type, ctx), do: check_({:bracket, elems}, type, ctx)
@@ -846,16 +846,19 @@ defmodule Vaisto.Elab do
     loc = ctx.loc
 
     {cores, ctx} =
-      Enum.map_reduce(clauses, ctx, fn {pat, guard, body}, ctx ->
+      Enum.map_reduce(clauses, ctx, fn clause, ctx ->
+        {pat, body} = {elem(clause, 0), elem(clause, tuple_size(clause) - 1)}
         {p, binds, ctx} = pattern(pat, stype, ctx)
 
         in_scope(%{ctx | env: Map.merge(ctx.env, binds)}, fn ctx ->
-          case guard do
-            nil ->
+          # The clause's shape says whether it has a guard: nil and false are
+          # guards like any other expression.
+          case clause do
+            {_pat, _body} ->
               {b, ctx} = check(body, type, ctx)
               {[p, b], ctx}
 
-            g ->
+            {_pat, g, _body} ->
               {g, ctx} = guard(g, ctx)
               {b, ctx} = check(body, type, ctx)
               {[p, [:when, g], b], ctx}
@@ -867,26 +870,27 @@ defmodule Vaisto.Elab do
     {[:match, s | cores], %{ctx | matches: [{clauses, stype, :match, loc} | ctx.matches]}}
   end
 
-  # A guard is guard-safe Core (liquid-core.md §6.6): no application, perform,
-  # match or handle-crash, and no concat.
+  # A guard is guard-safe Core (liquid-core.md §6.6), by the rule Core Lint
+  # applies, so the two cannot disagree.
   defp guard(g, ctx) do
     {core, ctx} = check(g, [:Bool], ctx)
 
-    case unsafe(core) do
+    case Lint.guard_unsafe(core) do
       nil -> {core, ctx}
-      what -> fail(ctx, "a guard cannot #{what}", note: "a guard may use variables, literals, comparisons, arithmetic, `and`, `or`, `not`, fields and constructors")
+      bad -> fail(ctx, "a guard may not contain #{guard_form(bad)}", note: "a guard may use only variables, literals, field access, tuples, lists, constructors of sum types, if, and the primitives other than ++ (liquid-core.md §6.6)")
     end
   end
 
-  defp unsafe([:app | _]), do: "call a function"
-  defp unsafe([:perform | _]), do: "perform an effect"
-  defp unsafe([:match | _]), do: "match"
-  defp unsafe([:let | _]), do: "bind a name"
-  defp unsafe([:"handle-crash" | _]), do: "catch a crash"
-  defp unsafe([:fn | _]), do: "build a function"
-  defp unsafe([:prim, :concat | _]), do: "concatenate strings"
-  defp unsafe(list) when is_list(list), do: Enum.find_value(list, &unsafe/1)
-  defp unsafe(_), do: nil
+  defp guard_form([:app | _]), do: "a function call"
+  defp guard_form([:record | _]), do: "the construction of a record"
+  defp guard_form([:prim, :concat | _]), do: "concatenation"
+  defp guard_form([:perform | _]), do: "an effect"
+  defp guard_form([:match | _]), do: "a match"
+  defp guard_form([:let | _]), do: "a let"
+  defp guard_form([:letrec | _]), do: "a local definition"
+  defp guard_form([:"handle-crash" | _]), do: "a try"
+  defp guard_form([:fn | _]), do: "a lambda"
+  defp guard_form(_), do: "this form"
 
   # pattern(p, τ, ctx) -> {core pattern, %{source name => {core name, type}}, ctx}
   defp pattern(p, type, ctx), do: at(p, ctx, &pattern_(&1, type, &2))

@@ -916,20 +916,36 @@ defmodule Vaisto.Parser do
   #     [[h | t] (+ 1 (len t))])            [x y (+ x y)])
   #
   # The signature's arity says how many patterns each clause has; a clause is
-  # [p1 ... pn body ...] or [p1 ... pn :when guard body ...]. It is a single-clause
-  # defn whose body matches on its parameters, or on a tuple of them, so every
-  # later stage reads it as such. The parameters are named `arg 1`, `arg 2` ...,
-  # which no program can write, so they capture nothing.
-  defp parse_defn([name, {:call, :Fn, [_ | _] = types, _} | clauses], loc) when clauses != [] do
-    {param_types, [result]} = Enum.split(types, -1)
+  # [p1 ... pn body] or [p1 ... pn :when guard body], so the signature fixes how
+  # many items a clause has and a wrong count is an error, not a longer body. It
+  # is a single-clause defn whose body matches on its parameters, or on a tuple
+  # of them, so every later stage reads it as such. The parameters are named
+  # `arg 1`, `arg 2` ..., which no program can write, so they capture nothing.
+  defp parse_defn([], loc) do
+    {:error, Errors.parse_error("a definition names a function, then its parameters and body, as in (defn add [x y] (+ x y))", span: Error.span_from_loc(loc)), loc}
+  end
+
+  defp parse_defn([name | _], loc) when not is_atom(name) or is_boolean(name) or is_nil(name) do
+    {:error, Errors.parse_error("a definition is named by a plain name, as in (defn add [x y] ...)", span: Error.span_from_loc(node_loc(name) || loc)), loc}
+  end
+
+  defp parse_defn([name], loc) do
+    {:error, Errors.parse_error("in definition of `#{name}`: a definition has parameters and a body, as in (defn #{name} [x] x)", span: Error.span_from_loc(loc)), loc}
+  end
+
+  defp parse_defn([name, {:call, :Fn, types, fn_loc} | clauses], loc) do
+    {param_types, result} = Enum.split(types, -1)
     arity = length(param_types)
 
     cond do
-      arity == 0 ->
-        {:error, Errors.parse_error("in definition of `#{name}`: a multi-clause function takes at least one argument", span: Error.span_from_loc(loc)), loc}
+      result == [] or arity == 0 ->
+        throw({:parse_error, "a multi-clause function's signature names at least one argument type and the result type, as in (Fn :int :int)"})
+
+      clauses == [] ->
+        throw({:parse_error, "a signature is followed by the function's clauses, each [patterns ... body]"})
 
       not Enum.all?(clauses, &match?({:bracket, _}, &1)) ->
-        {:error, Errors.parse_error("in definition of `#{name}`: after its signature, a multi-clause function has only clauses, each [patterns ... body]", span: Error.span_from_loc(loc)), loc}
+        throw({:parse_error, "after its signature, a multi-clause function has only clauses, each [patterns ... body]"})
 
       true ->
         params = for i <- 1..arity, do: :"arg #{i}"
@@ -940,20 +956,15 @@ defmodule Vaisto.Parser do
             ps -> {:tuple, ps, loc}
           end
 
-        match_clauses =
-          Enum.map(clauses, fn {:bracket, content} ->
-            case Enum.split(content, arity) do
-              {patterns, [{:atom, :when}, guard | bodies]} when length(patterns) == arity and bodies != [] -> {clause_pattern(patterns), guard, wrap_bodies(bodies, loc)}
-              {patterns, [_ | _] = bodies} when length(patterns) == arity -> {clause_pattern(patterns), wrap_bodies(bodies, loc)}
-              _ -> throw({:parse_error, "each clause of `#{name}` has #{arity} pattern#{if arity == 1, do: "", else: "s"} and a body, as its signature says"})
-            end
-          end)
-
-        typed_params = Enum.zip(params, Enum.map(param_types, &unwrap_type/1))
-        make_defn(name, typed_params, {:match, scrutinee, match_clauses, loc}, unwrap_type(result), nil, loc)
+        match_clauses = Enum.map(clauses, fn {:bracket, content} -> signed_clause(content, arity, loc) end)
+        types = Enum.map(param_types, &signature_type(&1, fn_loc))
+        typed_params = Enum.zip(params, dependent_refinements(types, params))
+        [result_type] = dependent_refinements(types ++ [signature_type(hd(result), fn_loc)], params) |> Enum.take(-1)
+        make_defn(name, typed_params, {:match, scrutinee, match_clauses, loc}, result_type, :unguarded, loc)
     end
   catch
     {:parse_error, msg} -> {:error, Errors.parse_error("in definition of `#{name}`: #{msg}", span: Error.span_from_loc(loc)), loc}
+    {:parse_error, msg, at} -> {:error, Errors.parse_error("in definition of `#{name}`: #{msg}", span: Error.span_from_loc(at || loc)), loc}
   end
 
   # Multi-clause function definition
@@ -969,7 +980,7 @@ defmodule Vaisto.Parser do
       _ -> false
     end)
 
-    if all_brackets? do
+    if all_brackets? and not single_clause_shape?(clauses) do
       # Multi-clause function - each clause is [pattern body]
       parsed_clauses = Enum.map(clauses, fn {:bracket, clause_content} ->
         extract_pattern_body(clause_content)
@@ -979,7 +990,25 @@ defmodule Vaisto.Parser do
       # Not multi-clause - fall through to single-clause patterns
       parse_defn_single(name, clauses, loc)
     end
+  catch
+    {:parse_error, msg} ->
+      {:error, Errors.parse_error("in definition of `#{name}`: #{msg}", span: Error.span_from_loc(loc)), loc}
   end
+
+  # Brackets only, but read as a single-clause defn: a lone bracket too short to
+  # be a clause, (defn f []) or (defn f [x]), which has no body; and a parameter
+  # vector with a guard, [x :int :when g], whose body is a list. A clause's guard
+  # follows its one pattern, so :when anywhere else marks a parameter vector.
+  defp single_clause_shape?([{:bracket, content}]) when length(content) < 2, do: true
+
+  defp single_clause_shape?([{:bracket, content}, _ | _]) do
+    case Enum.find_index(content, &(&1 == {:atom, :when})) do
+      nil -> false
+      i -> i != 1 and i == length(content) - 2
+    end
+  end
+
+  defp single_clause_shape?(_clauses), do: false
 
   # Helper for single-clause defn to avoid pattern match conflicts
   # (defn name [params] :ret_type body) or (defn name [params] :ret_type body1 body2 ...)
@@ -1009,6 +1038,14 @@ defmodule Vaisto.Parser do
   defp parse_defn_params(name, param_tokens, guard, rest, loc) do
     typed_params = parse_typed_params(param_tokens)
 
+    # A guard after the parameter vector, or after the result type, would be
+    # read as body: say where it goes.
+    case rest do
+      [{:atom, :when}, _ | _] -> throw({:parse_error, "a guard goes inside the parameter vector, as in [x :int :when (> x 0)]"})
+      [result, {:atom, :when}, _ | _] -> if result_type?(result), do: throw({:parse_error, "a guard goes inside the parameter vector, as in [x :int :when (> x 0)]"})
+      _ -> :ok
+    end
+
     case rest do
       # Single element is always the body - even if it looks like a type
       # This allows (defn foo [] :int) to return the keyword :int
@@ -1036,6 +1073,14 @@ defmodule Vaisto.Parser do
           make_defn(name, typed_params, body, :any, guard, loc)
         end
 
+      # A declared type's bare name: (defn name [params] Point body ...)
+      [type_name | bodies] when is_atom(type_name) and bodies != [] and type_name not in [nil, true, false] ->
+        if capitalized?(type_name) do
+          make_defn(name, typed_params, wrap_bodies(bodies, loc), type_name, guard, loc)
+        else
+          make_defn(name, typed_params, wrap_bodies(rest, loc), :any, guard, loc)
+        end
+
       # Compound type annotation (List/Tuple/etc): (defn name [params] (Type ...) body ...)
       [{:call, _, _, _} = type_expr | bodies] when length(bodies) >= 1 ->
         if is_type_annotation?(type_expr) do
@@ -1053,14 +1098,20 @@ defmodule Vaisto.Parser do
     end
   end
 
-  defp make_defn(name, params, body, ret_type, nil, loc) do
+  defp make_defn(name, params, body, ret_type, :unguarded, loc) do
     {:defn, name, params, body, ret_type, loc}
   end
-  defp make_defn(name, params, body, ret_type, guard, loc) do
+  defp make_defn(name, params, body, ret_type, {:guarded, guard}, loc) do
     {:defn, name, params, body, ret_type, guard, loc}
   end
 
-  # Split params tokens at :when — returns {param_tokens, guard_ast | nil}
+  # A result type in a definition: a keyword, a declared type's name, a
+  # parameterized type, or a refined type.
+  defp result_type?({:tuple_pattern, _} = brace), do: refinement_shaped?(brace)
+  defp result_type?(t), do: is_type_annotation?(t)
+
+  # Split params tokens at :when — returns {param_tokens, :unguarded | {:guarded, guard}};
+  # nil and false are guards like any other expression.
   defp split_params_at_when(tokens) do
     {before_when, after_when} = Enum.split_while(tokens, fn
       {:atom, :when} -> false
@@ -1068,10 +1119,10 @@ defmodule Vaisto.Parser do
     end)
 
     case after_when do
-      [{:atom, :when}, guard] -> {before_when, guard}
+      [{:atom, :when}, guard] -> {before_when, {:guarded, guard}}
       [{:atom, :when}] -> {:error, "guard expression required after :when"}
       [{:atom, :when} | _] -> {:error, "guard must be a single expression after :when"}
-      [] -> {tokens, nil}
+      [] -> {tokens, :unguarded}
     end
   end
 
@@ -1079,17 +1130,128 @@ defmodule Vaisto.Parser do
   defp wrap_bodies([single], _loc), do: single
   defp wrap_bodies(multiple, loc), do: {:do, multiple, loc}
 
-  # Extract pattern, optional guard, and body from a clause
-  # Clause content is [pattern, body] or [pattern, :when, guard, body...]
+  # Extract pattern, optional guard, and body from a clause: {pattern, body}, or
+  # {pattern, guard, body}. Clause content is [pattern body ...] or
+  # [pattern :when guard body ...]; after the pattern, :when always begins a guard.
   defp extract_pattern_body([pattern, {:atom, :when}, guard | bodies]) when bodies != [] do
     body = wrap_bodies(bodies, %Vaisto.Parser.Loc{file: "defn_multi", line: 0, col: 0, length: 0})
     {pattern, guard, body}
   end
-  defp extract_pattern_body([pattern, body]), do: {pattern, nil, body}
+  defp extract_pattern_body([_pattern, {:atom, :when} | _]), do: throw({:parse_error, "a guarded clause is written [pattern :when guard body]"})
+  defp extract_pattern_body([pattern, body]), do: {pattern, body}
   defp extract_pattern_body([pattern | bodies]) when length(bodies) > 1 do
     body = wrap_bodies(bodies, %Vaisto.Parser.Loc{file: "defn_multi", line: 0, col: 0, length: 0})
-    {pattern, nil, body}
+    {pattern, body}
   end
+  defp extract_pattern_body(_), do: throw({:parse_error, "each clause is [pattern body]"})
+
+  # A clause of a signed multi-clause function: `arity` patterns, then a body or
+  # :when, a guard and a body. After the patterns, :when always begins a guard.
+  defp signed_clause(content, arity, loc) do
+    at = Enum.find_value(content, &node_loc/1) || loc
+
+    case Enum.split(content, arity) do
+      {patterns, [{:atom, :when}, guard, body]} when length(patterns) == arity ->
+        {clause_pattern(patterns), guard, body}
+
+      {patterns, [{:atom, :when} | _]} when length(patterns) == arity ->
+        throw({:parse_error, "a guarded clause is written [#{pattern_slots(arity)} :when guard body]", at})
+
+      {patterns, [body]} when length(patterns) == arity ->
+        {clause_pattern(patterns), body}
+
+      _ ->
+        throw({:parse_error, "this clause has #{length(content)} item#{if length(content) == 1, do: "", else: "s"}, but the signature takes #{arity} argument#{if arity == 1, do: "", else: "s"}: a clause is [#{pattern_slots(arity)} body], and several expressions go in (do ...)", at})
+    end
+  end
+
+  # A refinement in a signature names an earlier argument by that argument's
+  # binder, as in (Fn {a :int | (> a 0)} {b :int | (> b a)} :int); the
+  # parameters are named `arg 1`, `arg 2` ..., so the binder becomes the name.
+  # The result's refinement may name every argument. A refinement's own binder
+  # shadows an earlier one of the same name.
+  defp dependent_refinements(types, params) do
+    {types, _scope} =
+      Enum.map_reduce(Enum.with_index(types), %{}, fn {type, i}, scope ->
+        type =
+          case type do
+            {:refine, binder, base, predicate} -> {:refine, binder, base, rename_names(predicate, Map.delete(scope, binder))}
+            other -> other
+          end
+
+        scope =
+          case {type, Enum.at(params, i)} do
+            {{:refine, binder, _, _}, param} when param != nil -> Map.put(scope, binder, param)
+            _ -> scope
+          end
+
+        {type, scope}
+      end)
+
+    types
+  end
+
+  # The names a predicate uses as variables; a node's tag and a call's head are
+  # not variables, whatever a binder is called.
+  defp rename_names(name, renames) when is_atom(name), do: Map.get(renames, name, name)
+  defp rename_names({:atom, _} = keyword, _renames), do: keyword
+  defp rename_names({:string, _} = string, _renames), do: string
+  defp rename_names(%Vaisto.Parser.Loc{} = loc, _renames), do: loc
+  defp rename_names({:call, head, args, loc}, renames) when is_list(args), do: {:call, head, Enum.map(args, &rename_names(&1, renames)), loc}
+
+  defp rename_names(t, renames) when is_tuple(t) and tuple_size(t) > 0 and is_atom(elem(t, 0)) do
+    [tag | parts] = Tuple.to_list(t)
+    List.to_tuple([tag | Enum.map(parts, &rename_names(&1, renames))])
+  end
+
+  defp rename_names(l, renames) when is_list(l), do: Enum.map(l, &rename_names(&1, renames))
+  defp rename_names(other, _renames), do: other
+
+  defp pattern_slots(1), do: "pattern"
+  defp pattern_slots(arity), do: Enum.map_join(1..arity, " ", &"pattern#{&1}")
+
+  # A type in a signature: a type, or a refined type {v :type | predicate}.
+  defp signature_type({:tuple_pattern, _} = brace, fn_loc) do
+    if refinement_shaped?(brace), do: parse_refinement!(brace), else: throw({:parse_error, "{...} in a signature is a refined type, written {v :type | predicate}", node_loc(brace) || fn_loc})
+  end
+
+  defp signature_type(type, fn_loc) do
+    check_signature_type!(type, fn_loc)
+    unwrap_type(type)
+  end
+
+  # A type, through its arguments: (List 5) is no type, and a refined type is a
+  # whole argument or result, not part of one.
+  defp check_signature_type!({:tuple_pattern, _} = brace, fn_loc),
+    do: throw({:parse_error, "a refined type is a whole argument or result type, not part of one", node_loc(brace) || fn_loc})
+
+  # A Pid or a Process is applied to a process's name, not to a type.
+  defp check_signature_type!({:call, head, _args, _loc}, _fn_loc) when head in [:Pid, :Process], do: :ok
+
+  defp check_signature_type!({:call, head, args, loc} = type, fn_loc) when is_atom(head) and is_list(args) do
+    if capitalized?(head),
+      do: Enum.each(args, &check_signature_type!(&1, loc)),
+      else: throw({:parse_error, "#{signature_item(type)} is not a type: a signature lists types, as in (Fn :int (List :a) :bool)", loc || fn_loc})
+  end
+
+  defp check_signature_type!(type, fn_loc) do
+    unless is_type_annotation?(type),
+      do: throw({:parse_error, "#{signature_item(type)} is not a type: a signature lists types, as in (Fn :int (List :a) :bool)", node_loc(type) || fn_loc})
+  end
+
+  defp signature_item(x) when is_atom(x), do: "`#{x}`"
+  defp signature_item(x) when is_integer(x) or is_float(x), do: "`#{x}`"
+  defp signature_item({:string, s}), do: inspect(s)
+  defp signature_item(_), do: "this"
+
+  defp node_loc(node) when is_tuple(node) and tuple_size(node) > 0 do
+    case elem(node, tuple_size(node) - 1) do
+      %Vaisto.Parser.Loc{} = loc -> loc
+      _ -> nil
+    end
+  end
+
+  defp node_loc(_), do: nil
 
   # One argument is matched by its pattern; several, by a tuple of patterns.
   defp clause_pattern([pattern]), do: pattern

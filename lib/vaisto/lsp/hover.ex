@@ -362,23 +362,19 @@ defmodule Vaisto.LSP.Hover do
     find_var_type(body, search_name)
   end
 
+  # Guarded defn: search the guard, then the body
+  defp find_var_type({:defn, _name, _params, body, _type, guard}, search_name) do
+    find_in_list([guard, body], search_name)
+  end
+
   # Match expression
   defp find_var_type({:match, expr, clauses, _type}, name) do
-    case find_var_type(expr, name) do
-      {:ok, _} = found -> found
-      :not_found -> Enum.find_value(clauses, :not_found, fn clause ->
-        {pat, body} = {elem(clause, 0), elem(clause, tuple_size(clause) - 2)}
-        case find_var_type(pat, name) do {:ok, _} = f -> f; _ -> find_var_type(body, name) end
-      end)
-    end
+    find_in_list([expr | clause_parts(clauses)], name)
   end
 
   # Multi-clause defn
   defp find_var_type({:defn_multi, _name, _arity, clauses, _type}, search_name) do
-    Enum.find_value(clauses, :not_found, fn clause ->
-      body = elem(clause, tuple_size(clause) - 2)
-      find_var_type(body, search_name)
-    end)
+    find_in_list(clause_parts(clauses), search_name)
   end
 
   # List literal
@@ -398,6 +394,13 @@ defmodule Vaisto.LSP.Hover do
 
   # Literals and other nodes: not found
   defp find_var_type(_, _), do: :not_found
+
+  # A typed clause is {pattern, body, type} or {pattern, guard, body, type}: every
+  # part but the type, of every clause in order. A defn_multi clause with no
+  # guard has nil for it, which finds nothing.
+  defp clause_parts(clauses) do
+    Enum.flat_map(clauses, fn clause -> clause |> Tuple.to_list() |> Enum.drop(-1) end)
+  end
 
   defp find_in_list([], _name), do: :not_found
   defp find_in_list([head | tail], name) do
@@ -429,6 +432,16 @@ defmodule Vaisto.LSP.Hover do
     Map.put(env, name, %{type: func_type, loc: nil, kind: :function})
   end
 
+  # Guarded typed defn: {:defn, name, params, body, func_type, guard}
+  defp extract_definition({:defn, name, _params, _body, {:fn, _, _} = func_type, _guard}, env) do
+    Map.put(env, name, %{type: func_type, loc: nil, kind: :function})
+  end
+
+  # Typed multi-clause defn: {:defn_multi, name, arity, clauses, func_type}
+  defp extract_definition({:defn_multi, name, _arity, _clauses, {:fn, _, _} = func_type}, env) do
+    Map.put(env, name, %{type: func_type, loc: nil, kind: :function})
+  end
+
   # Function definition with location (from tests): {:defn, name, params, body, ret_type, loc}
   defp extract_definition({:defn, name, params, _body, ret_type, %Parser.Loc{} = loc}, env) do
     param_types = Enum.map(params, fn
@@ -445,11 +458,8 @@ defmodule Vaisto.LSP.Hover do
   end
 
   defp extract_definition({:defn_multi, name, clauses, %Parser.Loc{} = loc}, env) when is_list(clauses) do
-    # Infer arity from first clause
-    {first_pattern, _} = hd(clauses)
-    arity = if is_list(first_pattern), do: length(first_pattern), else: 1
-    param_types = List.duplicate(:any, arity)
-    func_type = {:fn, param_types, :any}
+    # Each clause has one pattern for the one argument
+    func_type = {:fn, [:any], :any}
     Map.put(env, name, %{type: func_type, loc: loc, kind: :function})
   end
 

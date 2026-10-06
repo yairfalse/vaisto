@@ -99,6 +99,12 @@ defmodule Vaisto.TypeChecker do
   # Note: head, tail, cons, map, filter, fold are handled specially for list types
   @primitives TypeEnv.primitives()
 
+  # The names of the built-in types, as a type annotation writes them
+  @primitive_type_names [:any, :int, :float, :num, :string, :bool, :atom, :unit]
+
+  # Built-in type constructors HM does not resolve: a process name's Pid, and Map
+  @opaque_type_names [:Pid, :Process, :Map]
+
   @doc """
   Return the built-in primitives type environment.
   """
@@ -252,6 +258,11 @@ defmodule Vaisto.TypeChecker do
   # Tuple nodes: strip loc, dispatch to check_impl_s
   defp check_s(node, ctx) when is_tuple(node) do
     case Vaisto.LocationStripper.strip_node(node) do
+      # A local name shadows a builtin's: (let [head (fn [xs] 7)] (head ys))
+      # applies the local, so it skips the builtins' clauses.
+      {{:call, func, args}, nil} when is_atom(func) and is_list(args) ->
+        if is_local_var?(func, ctx.env), do: check_named_call_s(func, args, ctx), else: check_impl_s(node, ctx)
+
       {^node, nil} ->
         check_impl_s(node, ctx)
       {stripped, %Vaisto.Parser.Loc{} = loc} ->
@@ -268,7 +279,21 @@ defmodule Vaisto.TypeChecker do
   defp check_s(true, ctx), do: {:ok, :bool, {:lit, :bool, true}, ctx}
   defp check_s(false, ctx), do: {:ok, :bool, {:lit, :bool, false}, ctx}
 
-  # Atoms
+  # Atoms. A name bound to a polymorphic scheme is instantiated in this
+  # context, so that its fresh type variables are fresh here: (let [e []]
+  # ...) can then use e at two element types.
+  defp check_s(a, ctx) when is_atom(a) and is_map_key(ctx.env, a) and elem(:erlang.map_get(a, ctx.env), 0) == :forall do
+    {type, ctx} = TcCtx.instantiate(ctx, Map.fetch!(ctx.env, a))
+
+    ast =
+      case type do
+        {:fn, params, _ret} -> if is_local_var?(a, ctx.env), do: {:var, a, type}, else: {:fn_ref, a, length(params), type}
+        _ -> {:var, a, type}
+      end
+
+    {:ok, type, ast, ctx}
+  end
+
   defp check_s(a, ctx) when is_atom(a) do
     case check(a, ctx.env) do
       {:ok, type, ast} -> {:ok, type, ast, ctx}
@@ -313,7 +338,8 @@ defmodule Vaisto.TypeChecker do
   end
 
   # Bracket expressions
-  defp check_impl_s({:bracket, []}, ctx), do: {:ok, {:list, :any}, {:list, [], {:list, :any}}, ctx}
+  # The empty list's element type is whatever its use makes it (#20).
+  defp check_impl_s({:bracket, []}, ctx), do: check_impl_s({:list, []}, ctx)
 
   defp check_impl_s({:bracket, {:cons, head, tail}}, ctx) do
     with {:ok, head_type, typed_head, ctx} <- check_s(head, ctx),
@@ -347,7 +373,10 @@ defmodule Vaisto.TypeChecker do
   defp check_impl_s({:unit}, ctx), do: {:ok, :unit, {:lit, :unit, nil}, ctx}
 
   # List literal
-  defp check_impl_s({:list, []}, ctx), do: {:ok, {:list, :any}, {:list, [], {:list, :any}}, ctx}
+  defp check_impl_s({:list, []}, ctx) do
+    {elem_type, ctx} = TcCtx.fresh_var(ctx)
+    {:ok, {:list, elem_type}, {:list, [], {:list, elem_type}}, ctx}
+  end
 
   defp check_impl_s({:list, elements}, ctx) do
     case check_args_s(elements, ctx) do
@@ -399,6 +428,7 @@ defmodule Vaisto.TypeChecker do
         {:record, _name, fields} ->
           case List.keyfind(fields, field, 0) do
             {^field, field_type} ->
+              field_type = unroll(field_type, record_type)
               {:ok, field_type, {:field_access, typed_record, field, field_type}, ctx}
             nil ->
               {:error, Errors.type_mismatch(
@@ -494,11 +524,16 @@ defmodule Vaisto.TypeChecker do
           result_type = {:list, elem_type}
           {:ok, result_type, {:call, :cons, [typed_elem, typed_list], result_type}, ctx}
         {:list, list_elem_type} ->
-          if types_unifiable?(elem_type, list_elem_type) do
-            result_type = {:list, list_elem_type}
-            {:ok, result_type, {:call, :cons, [typed_elem, typed_list], result_type}, ctx}
-          else
-            {:error, Errors.cons_type_mismatch(elem_type, list_type)}
+          # Unify, so that consing onto an empty list gives the list its type,
+          # exactly: a Float is no Int, though HM's numeric fallback says so.
+          case Vaisto.TypeSystem.Unify.unify(list_elem_type, elem_type, ctx.subst, ctx.row_counter) do
+            {:ok, subst, row_counter} ->
+              ctx = %{ctx | subst: subst, row_counter: row_counter}
+              result_type = {:list, Vaisto.TypeSystem.Core.apply_subst(ctx.subst, list_elem_type)}
+              {:ok, result_type, {:call, :cons, [typed_elem, typed_list], result_type}, ctx}
+
+            {:error, _} ->
+              {:error, Errors.cons_type_mismatch(elem_type, list_type)}
           end
         {:tvar, _} ->
           result_type = {:list, elem_type}
@@ -677,8 +712,20 @@ defmodule Vaisto.TypeChecker do
 
   # match expression
   defp check_impl_s({:match, expr, clauses}, ctx) do
+    # The result-tag heuristic guesses at a value whose shape it cannot see. A
+    # tuple written at the match, as a multi-clause function's arguments are,
+    # has a shape it can see, so the heuristic does not apply to it.
+    # What is matched: a value, a tuple written at the match, or a signed
+    # multi-clause function's arguments, which are such a tuple.
+    scrutinee =
+      cond do
+        match?({:tuple, [:"arg 1" | _], _}, expr) -> :arguments
+        match?({:tuple, _, _}, expr) or match?({:tuple, _}, expr) -> :written_tuple
+        true -> :value
+      end
+
     with {:ok, expr_type, typed_expr, ctx} <- check_s(expr, ctx),
-         {:ok, result_type, typed_clauses, ctx} <- check_match_clauses_s(clauses, expr_type, ctx) do
+         {:ok, result_type, typed_clauses, ctx} <- check_match_clauses_s(clauses, expr_type, scrutinee, ctx) do
       {:ok, result_type, {:match, typed_expr, typed_clauses, result_type}, ctx}
     end
   end
@@ -818,7 +865,27 @@ defmodule Vaisto.TypeChecker do
   end
 
   # Function call (atom) — full ctx threading with unify_call_s
-  defp check_impl_s({:call, func, args}, ctx) when is_atom(func) do
+  defp check_impl_s({:call, func, args}, ctx) when is_atom(func), do: check_named_call_s(func, args, ctx)
+
+  # Equality is exact equality of representations, which a function does not
+  # have (liquid-core.md §7: eq on "two values of one type, not a function type").
+  defp check_comparable(op, [type | _], ctx) when op in [:==, :!=] do
+    type = Vaisto.TypeSystem.Core.apply_subst(ctx.subst, type)
+
+    if contains_function?(type),
+      do: {:error, Errors.type_mismatch(:comparable, type, note: "functions cannot be compared with #{op}, nor values that hold them")},
+      else: :ok
+  end
+
+  defp contains_function?({:fn, _, _}), do: true
+  defp contains_function?({:forall, _, _}), do: true
+  defp contains_function?(t) when is_tuple(t), do: t |> Tuple.to_list() |> Enum.any?(&contains_function?/1)
+  defp contains_function?(l) when is_list(l), do: Enum.any?(l, &contains_function?/1)
+  defp contains_function?(_), do: false
+
+  defp check_comparable(_op, _arg_types, _ctx), do: :ok
+
+  defp check_named_call_s(func, args, ctx) do
     with {:ok, func_type, ctx} <- lookup_function_s(func, ctx) do
       case func_type do
         {:constrained_method, vars, constraints, fn_type, method_name} ->
@@ -829,7 +896,8 @@ defmodule Vaisto.TypeChecker do
 
           with {:ok, arg_types, typed_args, ctx} <- check_args_s(args, ctx),
                {:ok, ret_type, ctx} <- unify_call_s(inst_fn_type, arg_types, ctx, args, func),
-               {:ok, ctx} <- verify_builtin_constraints(ctx) do
+               {:ok, ctx} <- verify_builtin_constraints(ctx),
+               :ok <- check_comparable(func, arg_types, ctx) do
             if is_local_var?(func, ctx.env) do
               {:ok, ret_type, {:apply, {:var, func, inst_fn_type}, typed_args, ret_type}, ctx}
             else
@@ -878,31 +946,69 @@ defmodule Vaisto.TypeChecker do
   end
 
   # Product type (record)
+  # A record's fields have their declared types (P0-1). A record cannot contain
+  # itself: it would have no finite value.
   defp check_impl_s({:deftype, name, {:product, fields}}, ctx) do
     normalized_fields = Enum.map(fields, fn {field_name, type} ->
-      {field_name, parse_type_expr(type)}
+      if self_field?(type, name), do: throw({:type_error, Errors.record_contains_itself(name, field_name)})
+      {field_name, record_field_type(type, name, ctx.env)}
     end)
     record_type = {:record, name, normalized_fields}
     {:ok, record_type, {:deftype, name, {:product, normalized_fields}, record_type}, ctx}
+  catch
+    {:type_error, error} -> {:error, error}
   end
 
   # Sum type (ADT)
   defp check_impl_s({:deftype, name, {:sum, variants}}, ctx) do
-    all_params = variants
-      |> Enum.flat_map(fn {_ctor, params} -> params end)
-      |> Enum.uniq()
-    param_map = all_params
-      |> Enum.with_index()
-      |> Map.new(fn {param, idx} -> {param, {:tvar, idx}} end)
-    normalized_variants = Enum.map(variants, fn {ctor_name, type_params} ->
-      field_types = Enum.map(type_params, fn param ->
-        Map.get(param_map, param, :any)
-      end)
-      {ctor_name, field_types}
-    end)
-    sum_type = {:sum, name, normalized_variants}
-    {:ok, sum_type, {:deftype, name, {:sum, normalized_variants}, sum_type}, ctx}
+    with {:ok, normalized_variants} <- catch_type_error(fn -> sum_variants(name, variants, ctx.env) end) do
+      sum_type = {:sum, name, normalized_variants}
+      {:ok, sum_type, {:deftype, name, {:sum, normalized_variants}, sum_type}, ctx}
+    end
   end
+
+  # A top-level definition's result may have type variables its parameters do
+  # not, as (defn empty [] []) does: nothing outside the definition constrains
+  # them, so they are quantified too, unless a class constraint holds them.
+  defp with_result_tvars(eligible, {:fn, _params, result}, ctx) do
+    result
+    |> then(&Vaisto.TypeSystem.Core.apply_subst(ctx.subst, &1))
+    |> declared_tvars()
+    |> Enum.reject(&Map.has_key?(ctx.constrained_tvars, &1))
+    |> MapSet.new()
+    |> MapSet.union(eligible)
+  end
+
+  defp catch_type_error(fun) do
+    {:ok, fun.()}
+  catch
+    {:type_error, error} -> {:error, error}
+  end
+
+  # A field of the record's own type, directly: no value of the record could
+  # be finite. Under List, Fn or a sum it is fine, as in [kids (List Rose)].
+  defp self_field?({:atom, t}, name), do: t == name
+  defp self_field?(t, name), do: t == name
+
+  # A record field's type, with the declared types it names resolved, and the
+  # record's own name, under a List or a Fn, the record itself: {:rec, name}.
+  defp record_field_type(type, name, env) do
+    type |> parse_type_expr() |> mark_self(name) |> resolve_declared(env)
+  end
+
+  defp record_field_type_or_raw(type, name, env) do
+    record_field_type(type, name, env)
+  catch
+    {:type_error, _} -> parse_type_expr(type)
+  end
+
+  defp mark_self(name, name), do: {:rec, name}
+  defp mark_self({:atom, name}, name), do: {:rec, name}
+  defp mark_self({:rec, _} = rec, _name), do: rec
+  defp mark_self(%Vaisto.Parser.Loc{} = loc, _name), do: loc
+  defp mark_self(t, name) when is_tuple(t), do: t |> Tuple.to_list() |> Enum.map(&mark_self(&1, name)) |> List.to_tuple()
+  defp mark_self(l, name) when is_list(l), do: Enum.map(l, &mark_self(&1, name))
+  defp mark_self(other, _name), do: other
 
   # Legacy deftype
   defp check_impl_s({:deftype, name, fields}, ctx) when is_list(fields) do
@@ -943,8 +1049,8 @@ defmodule Vaisto.TypeChecker do
   # Guarded function definition: (defn name [params :when guard] :ret body)
   defp check_impl_s({:defn, name, params, body, raw_ret_type, guard}, ctx) do
     param_names = Enum.map(params, fn {n, _t} -> n end)
-    param_types = Enum.map(params, fn {_n, t} -> parse_type_expr(t) end)
-    declared_ret_type = parse_type_expr(raw_ret_type)
+    param_types = Enum.map(params, fn {_n, t} -> resolve_annotation(t, ctx.env) end)
+    declared_ret_type = resolve_annotation(raw_ret_type, ctx.env)
 
     {fresh_param_types, ctx} = freshen_any_params(param_types, ctx)
     eligible_tvars = fresh_param_types
@@ -961,9 +1067,7 @@ defmodule Vaisto.TypeChecker do
     saved_constrained = ctx.constrained_tvars
     extended_ctx = %{ctx | env: extended_env, constrained_tvars: %{}}
 
-    # Check guard returns bool
-    with {:ok, guard_type, typed_guard, ctx} <- check_s(guard, extended_ctx),
-         {:ok, ctx} <- expect_bool_s(guard_type, ctx) do
+    with {:ok, {:guarded, typed_guard}, ctx} <- check_guard_s({:guarded, guard}, extended_ctx) do
       case check_s(body, ctx) do
         {:ok, inferred_ret_type, typed_body, body_ctx} ->
           if declared_ret_type != :any and not types_unifiable?(declared_ret_type, inferred_ret_type) do
@@ -971,6 +1075,7 @@ defmodule Vaisto.TypeChecker do
           else
             final_ret_type = if declared_ret_type != :any, do: declared_ret_type, else: inferred_ret_type
             mono_type = {:fn, fresh_param_types, final_ret_type}
+            eligible_tvars = with_result_tvars(eligible_tvars, mono_type, body_ctx)
             scheme = TcCtx.generalize_conservative(body_ctx, mono_type, eligible_tvars)
             ast_type = pin_constrained_tvars(mono_type, body_ctx, eligible_tvars)
             ctx_out = %{body_ctx | constrained_tvars: saved_constrained}
@@ -979,13 +1084,15 @@ defmodule Vaisto.TypeChecker do
         error -> error
       end
     end
+  catch
+    {:type_error, error} -> {:error, error}
   end
 
   # Function definition with return type
   defp check_impl_s({:defn, name, params, body, raw_ret_type}, ctx) do
     param_names = Enum.map(params, fn {n, _t} -> n end)
-    param_types = Enum.map(params, fn {_n, t} -> parse_type_expr(t) end)
-    declared_ret_type = parse_type_expr(raw_ret_type)
+    param_types = Enum.map(params, fn {_n, t} -> resolve_annotation(t, ctx.env) end)
+    declared_ret_type = resolve_annotation(raw_ret_type, ctx.env)
 
     # Freshen :any params with tvars for polymorphic inference
     {fresh_param_types, ctx} = freshen_any_params(param_types, ctx)
@@ -1013,7 +1120,8 @@ defmodule Vaisto.TypeChecker do
           mono_type = {:fn, fresh_param_types, final_ret_type}
 
           # Only quantify tvars we created for params (eligible_tvars)
-          scheme = TcCtx.generalize_conservative(body_ctx, mono_type, eligible_tvars)
+          eligible_tvars = with_result_tvars(eligible_tvars, mono_type, body_ctx)
+            scheme = TcCtx.generalize_conservative(body_ctx, mono_type, eligible_tvars)
 
           # Typed AST uses monotype with constrained tvars pinned to :any
           ast_type = pin_constrained_tvars(mono_type, body_ctx, eligible_tvars)
@@ -1022,6 +1130,8 @@ defmodule Vaisto.TypeChecker do
         end
       error -> error
     end
+  catch
+    {:type_error, error} -> {:error, error}
   end
 
   # Legacy defn without return type
@@ -1035,6 +1145,15 @@ defmodule Vaisto.TypeChecker do
       {:ok, val_type, typed_value, ctx} ->
         {:ok, val_type, {:defval, name, typed_value, val_type}, ctx}
       error -> error
+    end
+  end
+
+  # A top-level value's type, quantified over its type variables: the value is
+  # closed, so nothing else constrains them, as with (def e []).
+  defp generalize_closed(type) do
+    case type |> declared_tvars() |> Enum.uniq() do
+      [] -> type
+      ids -> {:forall, ids, type}
     end
   end
 
@@ -1064,10 +1183,11 @@ defmodule Vaisto.TypeChecker do
 
   # Multi-clause function definition (supports both 2-tuple and 3-tuple clauses)
   defp check_impl_s({:defn_multi, name, clauses}, ctx) do
-    # Normalize clauses to 3-tuples {pattern, guard_or_nil, body}
+    # Normalize clauses to 3-tuples {pattern, guard, body}. The clause's shape
+    # says whether it has a guard: nil and false are guards to be checked.
     clauses = Enum.map(clauses, fn
-      {p, g, b} -> {p, g, b}
-      {p, b} -> {p, nil, b}
+      {p, g, b} -> {p, {:guarded, g}, b}
+      {p, b} -> {p, :unguarded, b}
     end)
 
     # Multi-clause functions always take exactly 1 argument —
@@ -1099,23 +1219,19 @@ defmodule Vaisto.TypeChecker do
           counter: running_ctx.counter,
           row_counter: running_ctx.row_counter,
           env: Enum.reduce(bindings, extended_ctx.env, fn {var, type}, e ->
-            Map.put(e, var, type)
+            e |> Map.put(var, type) |> add_local_var(var)
           end)
         }
 
-        # Check guard if present — use expect_bool_s to track constraints
-        guard_result = if guard do
-          case check_s(guard, clause_ctx) do
-            {:ok, guard_type, typed_guard, guard_ctx} ->
-              case expect_bool_s(guard_type, guard_ctx) do
-                {:ok, guard_ctx} -> {:ok, typed_guard, guard_ctx}
-                {:error, _} = err -> err
-              end
-            error -> error
+        # The typed clause keeps nil for "no guard": a typed guard is never nil.
+        guard_result =
+          with :ok <- check_pattern_linear(bindings),
+               {:ok, typed_guard, clause_ctx} <- check_guard_s(guard, clause_ctx) do
+            case typed_guard do
+              :unguarded -> {:ok, nil, clause_ctx}
+              {:guarded, typed_guard} -> {:ok, typed_guard, clause_ctx}
+            end
           end
-        else
-          {:ok, nil, clause_ctx}
-        end
 
         case guard_result do
           {:ok, typed_guard, clause_ctx} ->
@@ -1143,6 +1259,7 @@ defmodule Vaisto.TypeChecker do
         unified_ret_type = join_types_list(ret_types)
         mono_type = {:fn, fresh_param_types, unified_ret_type}
 
+        eligible_tvars = with_result_tvars(eligible_tvars, mono_type, final_ctx)
         scheme = TcCtx.generalize_conservative(final_ctx, mono_type, eligible_tvars)
         ast_type = pin_constrained_tvars(mono_type, final_ctx, eligible_tvars)
         ctx_out = %{final_ctx | constrained_tvars: saved_constrained}
@@ -1222,19 +1339,20 @@ defmodule Vaisto.TypeChecker do
         bindings = extract_pattern_bindings(pattern, :any, ctx.env)
         typed_pattern = type_pattern(pattern, :any, ctx.env)
         {typed_pattern, bindings ++ acc}
-      var, acc when is_atom(var) and var not in [:_, true, false] ->
+      var, acc when is_atom(var) and var not in [:_, true, false, nil] ->
         {{:var, var, :any}, [{var, :any} | acc]}
       other, acc ->
         {other, acc}
     end)
 
     param_types = Enum.map(params, fn _ -> :any end)
-    extended_ctx = %{ctx | env: Map.merge(ctx.env, Map.new(param_bindings))}
+    # A lambda's parameters are local: they shadow builtins and definitions.
+    env = Enum.reduce(param_bindings, ctx.env, fn {name, type}, env -> env |> Map.put(name, type) |> add_local_var(name) end)
 
-    case check_s(body, extended_ctx) do
-      {:ok, ret_type, typed_body, ctx} ->
+    case check_s(body, %{ctx | env: env}) do
+      {:ok, ret_type, typed_body, body_ctx} ->
         func_type = {:fn, param_types, ret_type}
-        {:ok, func_type, {:fn, typed_params, typed_body, func_type}, ctx}
+        {:ok, func_type, {:fn, typed_params, typed_body, func_type}, %{body_ctx | env: ctx.env}}
       error -> error
     end
   end
@@ -1504,6 +1622,83 @@ defmodule Vaisto.TypeChecker do
 
   defp resolve_named_type(other, _env), do: other
 
+  # --- Declared types in annotations (P0-1) -----------------------------------
+
+  # A parameter's or result's annotation, with the types it names resolved: C is
+  # the sum or record type declared as C, and (Maybe :int) is Maybe with Int for
+  # its parameter. Named without arguments, a declared type has :any for its
+  # parameters, as an unannotated parameter has; named with arguments, it takes
+  # exactly as many as it has parameters. Throws {:type_error, error}.
+  defp resolve_annotation(type, env), do: type |> parse_type_expr() |> resolve_declared(env)
+
+  # The same for the first pass, which cannot report an error: the second does.
+  defp resolve_annotation_or_raw(type, env) do
+    resolve_annotation(type, env)
+  catch
+    {:type_error, _} -> parse_type_expr(type)
+  end
+
+  defp resolve_declared({:list, t}, env), do: {:list, resolve_declared(t, env)}
+  defp resolve_declared({:tuple, ts}, env) when is_list(ts), do: {:tuple, Enum.map(ts, &resolve_declared(&1, env))}
+  defp resolve_declared({:fn, ps, r}, env) when is_list(ps), do: {:fn, Enum.map(ps, &resolve_declared(&1, env)), resolve_declared(r, env)}
+  defp resolve_declared({:call, name, args, %Vaisto.Parser.Loc{}}, env), do: resolve_declared({:call, name, args}, env)
+
+  defp resolve_declared({:call, name, args} = type, env) when is_atom(name) and is_list(args) do
+    case declared_type(env, name) do
+      {:sum, ^name, _} = sum -> apply_declared(sum, Enum.map(args, &resolve_annotation(&1, env)))
+      {:record, ^name, _} -> throw({:type_error, Errors.type_arity(name, 0, length(args))})
+      nil when name in @opaque_type_names -> type
+      nil -> throw({:type_error, Errors.not_a_type(name)})
+    end
+  end
+
+  defp resolve_declared(name, env) when is_atom(name) and name not in [:any, :int, :float, :num, :string, :bool, :atom, :unit] do
+    case declared_type(env, name) do
+      {:sum, ^name, _} = sum -> fill_sum_tvars(sum, List.duplicate(:any, length(declared_params(sum))))
+      {:record, ^name, _} = record -> record
+      nil -> name
+    end
+  end
+
+  defp resolve_declared(other, _env), do: other
+
+  # A declared sum applied to as many types as it has parameters.
+  defp apply_declared({:sum, name, _} = sum, args) do
+    arity = length(declared_params(sum))
+    if length(args) != arity, do: throw({:type_error, Errors.type_arity(name, arity, length(args))})
+    fill_sum_tvars(sum, args)
+  end
+
+  # A declared sum's parameters are the type variables of its fields, 0 .. n-1.
+  defp declared_params(type), do: type |> declared_tvars() |> Enum.uniq()
+
+  defp declared_tvars({:tvar, id}), do: [id]
+  defp declared_tvars(t) when is_tuple(t), do: t |> Tuple.to_list() |> Enum.flat_map(&declared_tvars/1)
+  defp declared_tvars(l) when is_list(l), do: Enum.flat_map(l, &declared_tvars/1)
+  defp declared_tvars(_), do: []
+
+  # The sum with its parameter i replaced by args[i], wherever it occurs.
+  defp fill_sum_tvars({:sum, name, variants}, args) do
+    given = args |> Enum.with_index() |> Map.new(fn {t, i} -> {i, t} end)
+    {:sum, name, Enum.map(variants, fn {ctor, fields} -> {ctor, Enum.map(fields, &fill_tvars(&1, given))} end)}
+  end
+
+  defp fill_tvars({:tvar, i}, given), do: Map.fetch!(given, i)
+  defp fill_tvars(t, given) when is_tuple(t), do: t |> Tuple.to_list() |> Enum.map(&fill_tvars(&1, given)) |> List.to_tuple()
+  defp fill_tvars(l, given) when is_list(l), do: Enum.map(l, &fill_tvars(&1, given))
+  defp fill_tvars(other, _given), do: other
+
+  # A field that names its own type, {:rec, T}, is the type of the value it is
+  # in: unrolled once, where that value is taken apart or built.
+  defp unroll(type, {tag, name, _} = declared) when tag in [:sum, :record], do: replace_rec(type, name, declared)
+
+  defp replace_rec({:rec, name}, name, sum), do: sum
+  # A nested instance of the same type has its own {:rec}: they name it, not the outer one.
+  defp replace_rec({tag, name, _} = nested, name, _sum) when tag in [:sum, :record], do: nested
+  defp replace_rec(t, name, sum) when is_tuple(t), do: t |> Tuple.to_list() |> Enum.map(&replace_rec(&1, name, sum)) |> List.to_tuple()
+  defp replace_rec(l, name, sum) when is_list(l), do: Enum.map(l, &replace_rec(&1, name, sum))
+  defp replace_rec(other, _name, _sum), do: other
+
   defp lookup_prompt(name, env) do
     prompts = Map.get(env, :__prompts__, %{})
 
@@ -1574,6 +1769,9 @@ defmodule Vaisto.TypeChecker do
 
   # Structured error - add location info if not already present
   # Multi-error list from defn_multi error recovery
+  # A node without a location (a literal) leaves the error to the enclosing form's.
+  defp with_loc(result, nil), do: result
+
   defp with_loc({:error, errors}, %Vaisto.Parser.Loc{} = loc) when is_list(errors) do
     {:error, Enum.map(errors, fn err -> elem(with_loc({:error, err}, loc), 1) end)}
   end
@@ -1766,12 +1964,62 @@ defmodule Vaisto.TypeChecker do
   # Extract type param bindings by looking at the typed arguments of the call.
   # For `(show (Just 42))`, the typed_arg is `{:call, :Just, [{:lit, :int, 42}], sum_type}`.
   # We match only the relevant constructor variant to avoid index collisions.
-  defp extract_type_param_bindings({:sum, _, p_variants}, _concrete_type, type_params, typed_args) do
+  defp extract_type_param_bindings({:sum, name, p_variants}, concrete_type, type_params, typed_args) do
     tvar_ids = p_variants
       |> Enum.flat_map(fn {_, types} -> collect_tvar_ids(types) end)
       |> Enum.uniq()
     tvar_to_param = Enum.zip(tvar_ids, type_params) |> Map.new()
 
+    # The argument's type, when it is an instance of the sum, says what each
+    # parameter is: match the declaration against it constructor by
+    # constructor, field by field, at any depth. Matching by field index across
+    # constructors would bind a parameter to another one's type.
+    instance =
+      case {concrete_type, typed_args} do
+        {{:sum, ^name, _} = sum, _} -> sum
+        {_, [arg | _]} -> typed_ast_type(arg)
+        _ -> nil
+      end
+
+    case instance do
+      {:sum, ^name, c_variants} ->
+        Enum.reduce(p_variants, %{}, fn {ctor, decl_fields}, acc ->
+          case List.keyfind(c_variants, ctor, 0) do
+            {^ctor, fields} when length(fields) == length(decl_fields) ->
+              Enum.zip(decl_fields, fields) |> Enum.reduce(acc, fn {d, c}, acc -> bind_type_params(d, c, tvar_to_param, acc) end)
+
+            _ ->
+              acc
+          end
+        end)
+
+      _ ->
+        extract_type_param_bindings_by_constructor(p_variants, tvar_to_param, typed_args)
+    end
+  end
+  defp extract_type_param_bindings(_param, _concrete, _type_params, _typed_args), do: %{}
+
+  # A parameter is bound to the concrete type in its place; a type variable or
+  # :any there says nothing about it.
+  defp bind_type_params({:tvar, id}, concrete, tvar_to_param, acc) do
+    case {Map.get(tvar_to_param, id), concrete} do
+      {nil, _} -> acc
+      {_, {:tvar, _}} -> acc
+      {_, :any} -> acc
+      {param, concrete} -> Map.put_new(acc, param, concrete)
+    end
+  end
+
+  defp bind_type_params(d, c, tvar_to_param, acc) when is_tuple(d) and is_tuple(c) and tuple_size(d) == tuple_size(c) and elem(d, 0) == elem(c, 0),
+    do: bind_type_params(Tuple.to_list(d), Tuple.to_list(c), tvar_to_param, acc)
+
+  defp bind_type_params(d, c, tvar_to_param, acc) when is_list(d) and is_list(c) and length(d) == length(c),
+    do: Enum.zip(d, c) |> Enum.reduce(acc, fn {d, c}, acc -> bind_type_params(d, c, tvar_to_param, acc) end)
+
+  defp bind_type_params(_d, _c, _tvar_to_param, acc), do: acc
+
+  # Without the argument's type: the constructor the argument is built with.
+  defp extract_type_param_bindings_by_constructor(p_variants, tvar_to_param, typed_args) do
     # Extract the constructor name and inner types from the first typed arg
     {ctor_name, inner_types} = extract_inner_types_from_args(typed_args)
 
@@ -1798,7 +2046,6 @@ defmodule Vaisto.TypeChecker do
       end
     end)
   end
-  defp extract_type_param_bindings(_param, _concrete, _type_params, _typed_args), do: %{}
 
   # Extract constructor name and inner types from typed constructor args
   # (Just 42) → {:Just, %{0 => :int}}
@@ -2091,37 +2338,21 @@ defmodule Vaisto.TypeChecker do
   end
 
   # As-pattern: (x @ inner_pattern) — parses as {:call, x, [:@, inner], loc}
-  defp extract_pattern_bindings({:call, var, [:@, inner_pattern]}, type, env) when is_atom(var) and var not in [:_, true, false] do
+  defp extract_pattern_bindings({:call, var, [:@, inner_pattern]}, type, env) when is_atom(var) and var not in [:_, true, false, nil] do
     [{var, type} | extract_pattern_bindings(inner_pattern, type, env)]
   end
 
-  defp extract_pattern_bindings({:call, record_name, args}, {:record, record_name, fields}, env) do
+  defp extract_pattern_bindings({:call, record_name, args}, {:record, record_name, fields} = record, env) do
     Enum.zip(args, fields)
-    |> Enum.flat_map(fn
-      {var, {_fname, ftype}} when is_atom(var) and var not in [:_, true, false] ->
-        [{var, ftype}]
-      {{:call, _, _, _} = nested, {_fname, ftype}} ->
-        extract_pattern_bindings(nested, ftype, env)
-      {{:call, _, _} = nested, {_fname, ftype}} ->
-        extract_pattern_bindings(nested, ftype, env)
-      _ -> []
-    end)
+    |> Enum.flat_map(fn {sub, {_fname, ftype}} -> extract_pattern_bindings(sub, unroll(ftype, record), env) end)
   end
 
   # Variant pattern against sum type
-  defp extract_pattern_bindings({:call, ctor_name, args}, {:sum, _sum_name, variants}, env) do
+  defp extract_pattern_bindings({:call, ctor_name, args}, {:sum, _sum_name, variants} = sum, env) do
     case List.keyfind(variants, ctor_name, 0) do
       {^ctor_name, field_types} ->
-        Enum.zip(args, field_types)
-        |> Enum.flat_map(fn
-          {var, ftype} when is_atom(var) and var not in [:_, true, false] ->
-            [{var, ftype}]
-          {{:call, _, _, _} = nested, ftype} ->
-            extract_pattern_bindings(nested, ftype, env)
-          {{:call, _, _} = nested, ftype} ->
-            extract_pattern_bindings(nested, ftype, env)
-          _ -> []
-        end)
+        Enum.zip(args, unroll(field_types, sum))
+        |> Enum.flat_map(fn {sub, ftype} -> extract_pattern_bindings(sub, ftype, env) end)
       nil ->
         []
     end
@@ -2160,7 +2391,7 @@ defmodule Vaisto.TypeChecker do
       _ ->
         # Can't find record type, fall back to :any for all vars
         Enum.flat_map(args, fn
-          var when is_atom(var) and var not in [:_, true, false] -> [{var, :any}]
+          var when is_atom(var) and var not in [:_, true, false, nil] -> [{var, :any}]
           {:call, _, _, _} = nested -> extract_pattern_bindings(nested, :any, env)
           {:call, _, _} = nested -> extract_pattern_bindings(nested, :any, env)
           _ -> []
@@ -2168,7 +2399,7 @@ defmodule Vaisto.TypeChecker do
     end
   end
 
-  defp extract_pattern_bindings(var, type, _env) when is_atom(var) and var not in [:_, true, false] do
+  defp extract_pattern_bindings(var, type, _env) when is_atom(var) and var not in [:_, true, false, nil] do
     [{var, type}]
   end
 
@@ -2193,8 +2424,8 @@ defmodule Vaisto.TypeChecker do
   end
 
   # Cons pattern: {:cons, head, tail} - extract bindings from head and tail
-  defp extract_pattern_bindings({:cons, head, tail}, _type, env) do
-    extract_pattern_bindings(head, :any, env) ++ extract_pattern_bindings(tail, :any, env)
+  defp extract_pattern_bindings({:cons, head, tail}, type, env) do
+    extract_pattern_bindings(head, list_element(type), env) ++ extract_pattern_bindings(tail, list_type(type), env)
   end
 
   # Bracket pattern (list inside pattern): {:bracket, elements}
@@ -2202,8 +2433,8 @@ defmodule Vaisto.TypeChecker do
   defp extract_pattern_bindings({:bracket, {:cons, _, _} = cons}, type, env) do
     extract_pattern_bindings(cons, type, env)
   end
-  defp extract_pattern_bindings({:bracket, elements}, _type, env) when is_list(elements) do
-    Enum.flat_map(elements, fn el -> extract_pattern_bindings(el, :any, env) end)
+  defp extract_pattern_bindings({:bracket, elements}, type, env) when is_list(elements) do
+    Enum.flat_map(elements, fn el -> extract_pattern_bindings(el, list_element(type), env) end)
   end
 
   # Empty list pattern
@@ -2307,6 +2538,88 @@ defmodule Vaisto.TypeChecker do
 
   defp check_exhaustiveness(_clauses, _expr_type), do: :ok
 
+  # --- Coverage (Maranget, "Warnings for pattern matching", 2007) --------------
+
+  # The unguarded clauses cover every value of the finite structure of the
+  # scrutinee's type: Bool, sums, tuples and records, at any depth. A value of
+  # any other type (Int, String, a list, a type not known) is not enumerated:
+  # HM accepts any pattern on it as covering it, as it always has.
+  @doc false
+  # The coverage check, for Infer's matches in lambdas.
+  def coverage(patterns, type, env), do: check_coverage(patterns, type, :value, env)
+
+  defp check_coverage(patterns, type, scrutinee, env) do
+    case uncovered(Enum.map(patterns, &[coverage_pattern(&1, env)]), [type], env) do
+      nil -> :ok
+      [{:con, :tuple, args}] when scrutinee == :arguments -> {:error, Errors.non_exhaustive_match("the arguments " <> Enum.map_join(args, " ", &show_witness/1))}
+      [witness] -> {:error, Errors.non_exhaustive_match(show_witness(witness))}
+    end
+  end
+
+  # A pattern as {:con, name, sub-patterns} or :wild.
+  defp coverage_pattern(p, env) do
+    case Vaisto.LocationStripper.strip_node(p) |> elem(0) do
+      b when is_boolean(b) -> {:con, b, []}
+      {:call, x, [:@, inner]} when is_atom(x) -> coverage_pattern(inner, env)
+      {:call, c, args} when is_atom(c) and is_list(args) -> {:con, c, Enum.map(args, &coverage_pattern(&1, env))}
+      {:tuple_pattern, ps} -> {:con, :tuple, Enum.map(ps, &coverage_pattern(&1, env))}
+      {:tuple, ps} when is_list(ps) -> {:con, :tuple, Enum.map(ps, &coverage_pattern(&1, env))}
+      _ -> :wild
+    end
+  end
+
+  # A vector of patterns that no row matches, of the given types, or nil.
+  defp uncovered([], types, _env), do: Enum.map(types, fn _ -> :wild end)
+  defp uncovered(_rows, [], _env), do: nil
+
+  defp uncovered(rows, [type | types], env) do
+    case constructors(type, env) do
+      nil ->
+        # Not enumerated: every pattern covers it.
+        with ws when is_list(ws) <- uncovered(Enum.map(rows, &tl/1), types, env), do: [:wild | ws]
+
+      ctors ->
+        used = for [{:con, c, _} | _] <- rows, uniq: true, do: c
+
+        if Enum.all?(ctors, fn {c, _} -> c in used end) do
+          Enum.find_value(ctors, fn {c, fields} ->
+            with ws when is_list(ws) <- uncovered(specialize(rows, c, length(fields)), fields ++ types, env) do
+              {args, rest} = Enum.split(ws, length(fields))
+              [{:con, c, args} | rest]
+            end
+          end)
+        else
+          defaults = for [:wild | rest] <- rows, do: rest
+
+          with ws when is_list(ws) <- uncovered(defaults, types, env) do
+            {missing, fields} = Enum.find(ctors, fn {c, _} -> c not in used end)
+            [{:con, missing, Enum.map(fields, fn _ -> :wild end)} | ws]
+          end
+        end
+    end
+  end
+
+  defp specialize(rows, c, arity) do
+    for [first | rest] <- rows, row = specialize_row(first, c, arity), row != nil, do: row ++ rest
+  end
+
+  defp specialize_row({:con, c, args}, c, arity) when length(args) == arity, do: args
+  defp specialize_row(:wild, _c, arity), do: List.duplicate(:wild, arity)
+  defp specialize_row(_pattern, _c, _arity), do: nil
+
+  # The constructors of a finite type, each with its fields' types, or nil.
+  defp constructors(:bool, _env), do: [{true, []}, {false, []}]
+  defp constructors({:sum, _, variants} = sum, _env), do: Enum.map(variants, fn {c, fields} -> {c, unroll(fields, sum)} end)
+  defp constructors({:tuple, ts}, _env) when is_list(ts), do: [{:tuple, ts}]
+  defp constructors({:record, name, fields} = record, _env), do: [{name, Enum.map(fields, &unroll(elem(&1, 1), record))}]
+  defp constructors(_type, _env), do: nil
+
+  defp show_witness(:wild), do: "_"
+  defp show_witness({:con, b, []}) when is_boolean(b), do: to_string(b)
+  defp show_witness({:con, :tuple, args}), do: "(tuple " <> Enum.map_join(args, " ", &show_witness/1) <> ")"
+  defp show_witness({:con, c, []}), do: "(#{c})"
+  defp show_witness({:con, c, args}), do: "(#{c} " <> Enum.map_join(args, " ", &show_witness/1) <> ")"
+
   defp extract_bool_literal(true), do: true
   defp extract_bool_literal(false), do: false
   defp extract_bool_literal({:lit, :bool, v}), do: v
@@ -2328,9 +2641,11 @@ defmodule Vaisto.TypeChecker do
   defp extract_tuple_tag({:tuple_pattern, [tag | _]}) when is_atom(tag), do: tag
   defp extract_tuple_tag(_), do: nil
 
-  defp is_catch_all_pattern?(:_), do: true
-  defp is_catch_all_pattern?(name) when is_atom(name) and name != :_, do: true
+  defp is_catch_all_pattern?(b) when is_boolean(b) or is_nil(b), do: false
+  defp is_catch_all_pattern?(name) when is_atom(name), do: true
   defp is_catch_all_pattern?({:var, _, _}), do: true
+  defp is_catch_all_pattern?({:tuple_pattern, ps}), do: Enum.all?(ps, &is_catch_all_pattern?/1)
+  defp is_catch_all_pattern?({:tuple, ps, %Vaisto.Parser.Loc{}}), do: Enum.all?(ps, &is_catch_all_pattern?/1)
   defp is_catch_all_pattern?(_), do: false
 
   # Type a pattern for the typed AST
@@ -2340,46 +2655,24 @@ defmodule Vaisto.TypeChecker do
   end
 
   # As-pattern: (x @ inner_pattern) — parses as {:call, x, [:@, inner], loc}
-  defp type_pattern({:call, var, [:@, inner_pattern]}, type, env) when is_atom(var) and var not in [:_, true, false] do
+  defp type_pattern({:call, var, [:@, inner_pattern]}, type, env) when is_atom(var) and var not in [:_, true, false, nil] do
     typed_inner = type_pattern(inner_pattern, type, env)
     {:as_pattern, {:var, var, type}, typed_inner, type}
   end
 
   # Uses field types from the record definition
-  defp type_pattern({:call, record_name, args}, {:record, record_name, fields}, env) do
-    typed_args = Enum.zip(args, fields)
-    |> Enum.map(fn
-      {var, {_field_name, field_type}} when is_atom(var) and var not in [:_, true, false] ->
-        {:var, var, field_type}
-      {{:call, _, _, _} = nested, {_field_name, field_type}} ->
-        type_pattern(nested, field_type, env)
-      {{:call, _, _} = nested, {_field_name, field_type}} ->
-        type_pattern(nested, field_type, env)
-      {lit, _field} ->
-        lit
-    end)
+  defp type_pattern({:call, record_name, args}, {:record, record_name, fields} = record, env) do
+    typed_args = Enum.zip_with(args, fields, fn sub, {_field_name, field_type} -> type_pattern(sub, unroll(field_type, record), env) end)
     {:pattern, record_name, typed_args, {:record, record_name, fields}}
   end
 
   # Variant pattern against sum type: (Ok v) matched against Result
-  defp type_pattern({:call, ctor_name, args}, {:sum, sum_name, variants}, env) do
+  defp type_pattern({:call, ctor_name, args}, {:sum, sum_name, variants} = sum, env) do
     # Find the variant in the sum type
     case List.keyfind(variants, ctor_name, 0) do
       {^ctor_name, field_types} ->
         # Type the args according to the variant's field types
-        typed_args = Enum.zip(args, field_types)
-        |> Enum.map(fn
-          {var, field_type} when is_atom(var) and var not in [:_, true, false] ->
-            {:var, var, field_type}
-          {{:call, _, _, _} = nested, field_type} ->
-            type_pattern(nested, field_type, env)
-          {{:call, _, _} = nested, field_type} ->
-            type_pattern(nested, field_type, env)
-          {lit, _field_type} when is_integer(lit) or is_float(lit) ->
-            lit
-          {:_, _field_type} ->
-            :_
-        end)
+        typed_args = Enum.zip_with(args, unroll(field_types, sum), &type_pattern(&1, &2, env))
         {:pattern, ctor_name, typed_args, {:sum, sum_name, variants}}
       nil ->
         # Unknown variant - this shouldn't happen if type checking is correct
@@ -2408,6 +2701,12 @@ defmodule Vaisto.TypeChecker do
     end
   end
 
+  # A constructor pattern against a type that has none (an error reported
+  # elsewhere): its parts are typed as against :any.
+  defp type_pattern({:call, name, args}, type, env) when type in [:int, :float, :string, :bool, :atom, :unit] and is_list(args) do
+    type_pattern({:call, name, args}, :any, env)
+  end
+
   # Record pattern against :any type - try to look up the record in env
   defp type_pattern({:call, record_name, args}, :any, env) do
     case Map.get(env, record_name) do
@@ -2420,7 +2719,7 @@ defmodule Vaisto.TypeChecker do
       _ ->
         # Can't find record type, fall back to :any for all vars
         typed_args = Enum.map(args, fn
-          var when is_atom(var) and var not in [:_, true, false] -> {:var, var, :any}
+          var when is_atom(var) and var not in [:_, true, false, nil] -> {:var, var, :any}
           {:call, _, _} = nested -> type_pattern(nested, :any, env)
           lit -> lit
         end)
@@ -2465,10 +2764,10 @@ defmodule Vaisto.TypeChecker do
   end
 
   # Cons pattern: {:cons, head, tail} → {:cons_pattern, typed_head, typed_tail, :any}
-  defp type_pattern({:cons, head, tail}, _type, env) do
-    typed_head = type_pattern(head, :any, env)
-    typed_tail = type_pattern(tail, :any, env)
-    {:cons_pattern, typed_head, typed_tail, :any}
+  defp type_pattern({:cons, head, tail}, type, env) do
+    typed_head = type_pattern(head, list_element(type), env)
+    typed_tail = type_pattern(tail, list_type(type), env)
+    {:cons_pattern, typed_head, typed_tail, list_type(type)}
   end
 
   # Bracket pattern (list inside pattern): {:bracket, elements} → list pattern
@@ -2476,12 +2775,18 @@ defmodule Vaisto.TypeChecker do
   defp type_pattern({:bracket, {:cons, _, _} = cons}, type, env) do
     type_pattern(cons, type, env)
   end
-  defp type_pattern({:bracket, elements}, _type, env) when is_list(elements) do
-    typed_elements = Enum.map(elements, fn el -> type_pattern(el, :any, env) end)
-    {:list_pattern, typed_elements, :any}
+  defp type_pattern({:bracket, elements}, type, env) when is_list(elements) do
+    typed_elements = Enum.map(elements, fn el -> type_pattern(el, list_element(type), env) end)
+    {:list_pattern, typed_elements, list_type(type)}
   end
 
-  defp type_pattern(var, type, _env) when is_atom(var) and var not in [:_, true, false] do
+  # A list pattern's elements have the matched list's element type.
+  defp list_element({:list, t}), do: t
+  defp list_element(_type), do: :any
+  defp list_type({:list, _} = type), do: type
+  defp list_type(_type), do: :any
+
+  defp type_pattern(var, type, _env) when is_atom(var) and var not in [:_, true, false, nil] do
     {:var, var, type}
   end
 
@@ -2499,10 +2804,10 @@ defmodule Vaisto.TypeChecker do
   # Extract bindings from patterns in multi-clause functions
   # Empty list pattern: []
   # As-pattern in multi-clause: (x @ pattern) parses as {:call, x, [:@, inner], loc}
-  defp extract_multi_pattern_bindings({:call, var, [:@, inner], %Vaisto.Parser.Loc{}}) when is_atom(var) and var not in [:_, true, false] do
+  defp extract_multi_pattern_bindings({:call, var, [:@, inner], %Vaisto.Parser.Loc{}}) when is_atom(var) and var not in [:_, true, false, nil] do
     [{var, :any} | extract_multi_pattern_bindings(inner)]
   end
-  defp extract_multi_pattern_bindings({:call, var, [:@, inner]}) when is_atom(var) and var not in [:_, true, false] do
+  defp extract_multi_pattern_bindings({:call, var, [:@, inner]}) when is_atom(var) and var not in [:_, true, false, nil] do
     [{var, :any} | extract_multi_pattern_bindings(inner)]
   end
   defp extract_multi_pattern_bindings([]), do: []
@@ -2534,9 +2839,11 @@ defmodule Vaisto.TypeChecker do
   defp extract_multi_pattern_bindings({:call, _name, args}) do
     Enum.flat_map(args, &extract_multi_pattern_bindings/1)
   end
-  defp extract_multi_pattern_bindings(var) when is_atom(var) and var not in [:_, true, false] do
+  defp extract_multi_pattern_bindings(var) when is_atom(var) and var not in [:_, true, false, nil] do
     [{var, :any}]
   end
+  defp extract_multi_pattern_bindings({:tuple_pattern, elements}), do: Enum.flat_map(elements, &extract_multi_pattern_bindings/1)
+  defp extract_multi_pattern_bindings({:tuple, elements, %Vaisto.Parser.Loc{}}), do: Enum.flat_map(elements, &extract_multi_pattern_bindings/1)
   defp extract_multi_pattern_bindings(_), do: []
 
   # Type a pattern for multi-clause function
@@ -2576,10 +2883,10 @@ defmodule Vaisto.TypeChecker do
     {:cons, typed_head, typed_tail, {:list, :any}}
   end
   # As-pattern in multi-clause: (x @ pattern) parses as {:call, x, [:@, inner], loc}
-  defp type_multi_pattern({:call, var, [:@, inner], %Vaisto.Parser.Loc{}}, env) when is_atom(var) and var not in [:_, true, false] do
+  defp type_multi_pattern({:call, var, [:@, inner], %Vaisto.Parser.Loc{}}, env) when is_atom(var) and var not in [:_, true, false, nil] do
     type_multi_pattern({:call, var, [:@, inner]}, env)
   end
-  defp type_multi_pattern({:call, var, [:@, inner]}, env) when is_atom(var) and var not in [:_, true, false] do
+  defp type_multi_pattern({:call, var, [:@, inner]}, env) when is_atom(var) and var not in [:_, true, false, nil] do
     typed_inner = type_multi_pattern(inner, env)
     {:as_pattern, {:var, var, :any}, typed_inner, :any}
   end
@@ -2590,12 +2897,17 @@ defmodule Vaisto.TypeChecker do
     typed_args = Enum.map(args, &type_multi_pattern(&1, env))
     {:pattern, name, typed_args, :any}
   end
-  defp type_multi_pattern(var, _env) when is_atom(var) and var not in [:_, true, false] do
+  defp type_multi_pattern(var, _env) when is_atom(var) and var not in [:_, true, false, nil] do
     {:var, var, :any}
   end
   defp type_multi_pattern(:_, _env), do: :_
   defp type_multi_pattern(lit, _env) when is_integer(lit), do: {:lit, :int, lit}
+  defp type_multi_pattern(lit, _env) when is_float(lit), do: {:lit, :float, lit}
   defp type_multi_pattern(lit, _env) when is_atom(lit), do: {:lit, :atom, lit}
+  defp type_multi_pattern({:atom, a}, _env) when is_atom(a), do: {:lit, :atom, a}
+  defp type_multi_pattern({:string, s}, _env) when is_binary(s), do: {:lit, :string, s}
+  defp type_multi_pattern({:tuple_pattern, ps}, env), do: {:tuple_pattern, Enum.map(ps, &type_multi_pattern(&1, env)), :any}
+  defp type_multi_pattern({:tuple, ps, %Vaisto.Parser.Loc{}}, env), do: {:tuple_pattern, Enum.map(ps, &type_multi_pattern(&1, env)), :any}
 
 
   # Context-threaded map literal checking
@@ -2671,11 +2983,14 @@ defmodule Vaisto.TypeChecker do
     case check_s(expr, ctx) do
       {:ok, expr_type, typed_expr, ctx} ->
         bindings = extract_pattern_bindings({:tuple_pattern, elements}, expr_type, ctx.env)
-        extended_ctx = %{ctx | env: Enum.reduce(bindings, ctx.env, fn {var, var_type}, e ->
-          Map.put(e, var, var_type)
-        end)}
-        typed_pattern = type_pattern({:tuple_pattern, elements}, expr_type, ctx.env)
-        check_bindings_s(rest, extended_ctx, [{typed_pattern, typed_expr, expr_type} | acc])
+
+        with :ok <- check_pattern_linear(bindings) do
+          extended_ctx = %{ctx | env: Enum.reduce(bindings, ctx.env, fn {var, var_type}, e ->
+            e |> Map.put(var, var_type) |> add_local_var(var)
+          end)}
+          typed_pattern = type_pattern({:tuple_pattern, elements}, expr_type, ctx.env)
+          check_bindings_s(rest, extended_ctx, [{typed_pattern, typed_expr, expr_type} | acc])
+        end
       error -> error
     end
   end
@@ -2695,10 +3010,13 @@ defmodule Vaisto.TypeChecker do
       {:ok, expr_type, typed_expr, ctx} ->
         bindings = extract_pattern_bindings({:call, ctor_name, args}, expr_type, ctx.env)
         typed_pattern = type_pattern({:call, ctor_name, args}, expr_type, ctx.env)
-        extended_ctx = %{ctx | env: Enum.reduce(bindings, ctx.env, fn {var, var_type}, e ->
-          e |> Map.put(var, var_type) |> add_local_var(var)
-        end)}
-        check_bindings_s(rest, extended_ctx, [{typed_pattern, typed_expr, expr_type} | acc])
+
+        with :ok <- check_pattern_linear(bindings) do
+          extended_ctx = %{ctx | env: Enum.reduce(bindings, ctx.env, fn {var, var_type}, e ->
+            e |> Map.put(var, var_type) |> add_local_var(var)
+          end)}
+          check_bindings_s(rest, extended_ctx, [{typed_pattern, typed_expr, expr_type} | acc])
+        end
       error -> error
     end
   end
@@ -2722,13 +3040,15 @@ defmodule Vaisto.TypeChecker do
   end
 
   # Context-threaded check_match_clauses
-  defp check_match_clauses_s(clauses, expr_type, ctx) do
+  defp check_match_clauses_s(clauses, expr_type, scrutinee, ctx) do
     # Thread ctx through clauses sequentially for deterministic tvar generation
     result = Enum.reduce_while(clauses, {:ok, [], ctx}, fn clause, {:ok, acc, ctx} ->
+      # The clause's shape says whether it has a guard: nil and false are
+      # guards like any other expression, to be checked.
       {pattern, guard, body} =
         case clause do
-          {pattern, body} -> {pattern, nil, body}
-          {pattern, guard, body} -> {pattern, guard, body}
+          {pattern, body} -> {pattern, :unguarded, body}
+          {pattern, guard, body} -> {pattern, {:guarded, guard}, body}
         end
 
       case check_match_clause_s(pattern, guard, body, expr_type, ctx) do
@@ -2743,11 +3063,13 @@ defmodule Vaisto.TypeChecker do
         typed_clauses = Enum.reverse(rev_typed_clauses)
         # A typed clause is {pattern, body, type}, or {pattern, guard, body, type}.
         [first_type | rest_types] = Enum.map(typed_clauses, &elem(&1, tuple_size(&1) - 1))
+        # The body of each later clause, for the span of a type that disagrees.
+        rest_bodies = clauses |> tl() |> Enum.map(&elem(&1, tuple_size(&1) - 1))
 
-        unified_result = Enum.reduce_while(rest_types, {:ok, first_type, ctx}, fn body_type, {:ok, acc_type, ctx} ->
+        unified_result = Enum.reduce_while(Enum.zip(rest_types, rest_bodies), {:ok, first_type, ctx}, fn {body_type, body}, {:ok, acc_type, ctx} ->
           case unify_types_s(acc_type, body_type, ctx) do
             {:ok, unified, ctx} -> {:cont, {:ok, unified, ctx}}
-            {:error, _} = err -> {:halt, err}
+            {:error, _} = err -> {:halt, with_loc(err, node_loc(body))}
           end
         end)
 
@@ -2755,9 +3077,12 @@ defmodule Vaisto.TypeChecker do
           {:error, _} = err -> err
           {:ok, result_type, ctx} ->
             # A guarded clause does not count: its guard may be false.
-            case check_exhaustiveness(for({_pattern, _body} = c <- clauses, do: c), expr_type) do
-              :ok -> {:ok, result_type, typed_clauses, ctx}
-              {:error, _} = err -> err
+            unguarded = for {_pattern, _body} = c <- clauses, do: c
+            heuristic = if scrutinee == :value, do: check_exhaustiveness(unguarded, expr_type), else: :ok
+
+            with :ok <- heuristic,
+                 :ok <- check_coverage(Enum.map(unguarded, &elem(&1, 0)), Vaisto.TypeSystem.Core.apply_subst(ctx.subst, expr_type), scrutinee, ctx.env) do
+              {:ok, result_type, typed_clauses, ctx}
             end
         end
     end
@@ -2766,39 +3091,176 @@ defmodule Vaisto.TypeChecker do
   defp check_match_clause_s(pattern, guard, body, expr_type, ctx) do
     {instantiated_type, ctx} = instantiate_sum_tvars_s(expr_type, ctx)
     bindings = extract_pattern_bindings(pattern, instantiated_type, ctx.env)
+    # A name a pattern binds is local, so calling it applies the value bound,
+    # even when a top-level function has the same name.
     extended_ctx = %{ctx | env: Enum.reduce(bindings, ctx.env, fn {name, type}, acc ->
-      Map.put(acc, name, type)
+      acc |> Map.put(name, type) |> add_local_var(name)
     end)}
-    typed_pattern = type_pattern(pattern, instantiated_type, ctx.env)
-
-    # A guard is a Bool in the scope of the pattern's bindings (D27).
-    guard_result =
-      case if(is_nil(guard), do: nil, else: check_s(guard, extended_ctx)) do
-        nil ->
-          {:ok, nil, extended_ctx}
-
-        {:ok, guard_type, typed_guard, gctx} ->
-          case unify_types_s(:bool, guard_type, gctx) do
-            {:ok, _, gctx} -> {:ok, typed_guard, gctx}
-            {:error, _} -> {:error, Errors.type_mismatch(:bool, guard_type, note: "a guard must be a Bool")}
-          end
-
-        {:error, _} = err ->
-          err
-      end
-
-    with {:ok, typed_guard, extended_ctx} <- guard_result,
+    with :ok <- check_pattern_linear(bindings),
+         {:ok, extended_ctx} <- check_pattern_type_s(pattern, instantiated_type, extended_ctx),
+         typed_pattern = type_pattern(pattern, instantiated_type, ctx.env),
+         {:ok, typed_guard, extended_ctx} <- check_guard_s(guard, extended_ctx),
          {:ok, body_type, typed_body, clause_ctx} <- check_s(body, extended_ctx) do
       # Propagate substitution updates but restore the outer env
       # (pattern-bound variables must not leak out of match clauses)
       restored_ctx = %{clause_ctx | env: ctx.env}
 
       typed_clause =
-        if guard, do: {typed_pattern, typed_guard, typed_body, body_type}, else: {typed_pattern, typed_body, body_type}
+        case typed_guard do
+          :unguarded -> {typed_pattern, typed_body, body_type}
+          {:guarded, typed_guard} -> {typed_pattern, typed_guard, typed_body, body_type}
+        end
 
       {:ok, typed_clause, restored_ctx}
     end
   end
+
+  # A pattern has the type of what it is matched against (liquid-core.md §10.9):
+  # "a" never matches an Int, nor 1 a Float, nor a pair a Bool or a triple; a
+  # constructor of one sum type never matches a value of another. Against a
+  # value whose type is not known (:any, or a type variable, as an unannotated
+  # parameter's), nothing is checked and nothing is inferred: such a match may
+  # take an atom in one clause and a tuple in the next, as Erlang interop does
+  # (D22; the elaborator, which requires signatures, is strict).
+  defp check_pattern_type_s(pattern, type, ctx) do
+    expected = Vaisto.TypeSystem.Core.apply_subst(ctx.subst, type)
+
+    case Vaisto.LocationStripper.strip_node(pattern) |> elem(0) do
+      _ when expected == :any -> {:ok, ctx}
+      _ when is_tuple(expected) and elem(expected, 0) == :tvar -> {:ok, ctx}
+      # nil is the atom nil, which is also how Unit is represented
+      nil when expected == :unit -> {:ok, ctx}
+      nil -> literal_pattern(nil, {:atom, nil}, expected, ctx)
+      p when is_integer(p) -> literal_pattern(p, :int, expected, ctx)
+      p when is_float(p) -> literal_pattern(p, :float, expected, ctx)
+      p when is_boolean(p) -> literal_pattern(p, :bool, expected, ctx)
+      {:string, s} when is_binary(s) -> literal_pattern(s, :string, expected, ctx)
+      {:atom, a} when is_atom(a) -> literal_pattern(a, :atom, expected, ctx)
+      {:call, x, [:@, inner]} when is_atom(x) -> check_pattern_type_s(inner, expected, ctx)
+      {:tuple_pattern, ps} -> tuple_pattern(ps, expected, ctx)
+      {:tuple, ps} when is_list(ps) -> tuple_pattern(ps, expected, ctx)
+      [] -> list_pattern([], expected, ctx)
+      {:bracket, {:cons, h, t}} -> cons_pattern(h, t, expected, ctx)
+      {:bracket, ps} when is_list(ps) -> list_pattern(ps, expected, ctx)
+      {:cons, h, t} -> cons_pattern(h, t, expected, ctx)
+      {:call, c, args} when is_atom(c) and is_list(args) -> constructor_pattern(c, args, expected, ctx)
+      _ -> {:ok, ctx}
+    end
+  end
+
+  defp literal_pattern(literal, literal_type, expected, ctx) do
+    exact? = expected in [:int, :float] or literal_type in [:int, :float]
+
+    case unify_types_s(expected, literal_type, ctx) do
+      {:ok, _, ctx} when not exact? -> {:ok, ctx}
+      {:ok, _, ctx} -> if pattern_type_agrees?(Vaisto.TypeSystem.Core.apply_subst(ctx.subst, expected), literal_type), do: {:ok, ctx}, else: pattern_mismatch(literal, literal_type, expected)
+      {:error, _} -> pattern_mismatch(literal, literal_type, expected)
+    end
+  end
+
+  # Int and Float unify in HM, but 1 never matches 1.0 (exact equality, §7).
+  defp pattern_type_agrees?(expected, literal_type) when expected in [:int, :float], do: expected == literal_type
+  defp pattern_type_agrees?(_expected, _literal_type), do: true
+
+  defp tuple_pattern(ps, expected, ctx) do
+    case expected do
+      {:tuple, ts} when length(ts) == length(ps) -> each_pattern(ps, ts, ctx)
+      {:tuple, ts} -> {:error, Errors.type_mismatch(expected, {:tuple, Enum.map(ps, fn _ -> :any end)}, note: "this pattern is a tuple of #{length(ps)}, but the value is a tuple of #{length(ts)}")}
+      _ -> pattern_shape_mismatch("a tuple", expected)
+    end
+  end
+
+  defp list_pattern(ps, expected, ctx) do
+    case expected do
+      {:list, t} -> each_pattern(ps, Enum.map(ps, fn _ -> t end), ctx)
+      _ -> pattern_shape_mismatch("a list", expected)
+    end
+  end
+
+  defp cons_pattern(h, t, expected, ctx) do
+    case expected do
+      {:list, e} -> each_pattern([h, t], [e, expected], ctx)
+      _ -> pattern_shape_mismatch("a list", expected)
+    end
+  end
+
+  # A constructor's sub-patterns have its fields' types. Against a value whose
+  # type is not known, nothing is checked here (D22).
+  defp constructor_pattern(c, args, expected, ctx) do
+    case expected do
+      {:sum, name, variants} ->
+        case List.keyfind(variants, c, 0) do
+          {^c, fields} when length(fields) == length(args) -> each_pattern(args, unroll(fields, expected), ctx)
+          {^c, fields} -> {:error, Errors.type_mismatch(expected, expected, note: "`#{c}` has #{length(fields)} field#{if length(fields) == 1, do: "", else: "s"}, but this pattern gives #{length(args)}")}
+          nil -> {:error, Errors.type_mismatch(expected, c, note: "`#{c}` is not a constructor of `#{name}`")}
+        end
+
+      {:record, ^c, fields} when length(fields) == length(args) ->
+        each_pattern(args, Enum.map(fields, &unroll(elem(&1, 1), expected)), ctx)
+
+      {:record, name, _} ->
+        {:error, Errors.type_mismatch(expected, c, note: "this pattern is not a `#{name}`")}
+
+      _ when expected in [:int, :float, :string, :bool, :atom, :unit] ->
+        pattern_shape_mismatch("a constructor", expected)
+
+      _ ->
+        {:ok, ctx}
+    end
+  end
+
+  defp each_pattern(ps, ts, ctx) do
+    Enum.zip(ps, ts)
+    |> Enum.reduce_while({:ok, ctx}, fn {p, t}, {:ok, ctx} ->
+      case check_pattern_type_s(p, t, ctx) do
+        {:ok, ctx} -> {:cont, {:ok, ctx}}
+        {:error, _} = err -> {:halt, err}
+      end
+    end)
+  end
+
+  defp pattern_mismatch(literal, literal_type, expected),
+    do: {:error, Errors.type_mismatch(expected, literal_type, note: "the pattern #{inspect(literal)} never matches a value of this type")}
+
+  defp pattern_shape_mismatch(what, expected),
+    do: {:error, Errors.type_mismatch(expected, :pattern, note: "#{what} pattern never matches a value of type #{Vaisto.TypeFormatter.format(expected)}")}
+
+  # A pattern binds each name once: `[x x]` is not an equality test (liquid-core.md
+  # §10.9), and the backends would disagree on what it means.
+  defp check_pattern_linear(bindings) do
+    names = Enum.map(bindings, &elem(&1, 0))
+
+    case names -- Enum.uniq(names) do
+      [] -> :ok
+      [name | _] -> {:error, Errors.pattern_binds_twice(name)}
+    end
+  end
+
+  # A guard is a guard-safe Bool in the scope of the pattern's bindings (D27,
+  # liquid-core.md §6.6).
+  defp check_guard_s(:unguarded, ctx), do: {:ok, :unguarded, ctx}
+
+  defp check_guard_s({:guarded, guard}, ctx) do
+    span = Error.span_from_loc(node_loc(guard), 1, "this guard")
+
+    with :ok <- check_guard_safe(guard, ctx.env),
+         {:ok, guard_type, typed_guard, ctx} <- check_s(guard, ctx) do
+      case unify_types_s(:bool, guard_type, ctx) do
+        {:ok, _, ctx} -> {:ok, {:guarded, typed_guard}, ctx}
+        {:error, _} -> {:error, Errors.type_mismatch(:bool, guard_type, span: span, note: "a guard must be a Bool")}
+      end
+    end
+  end
+
+  defp check_guard_safe(guard, env) do
+    case Vaisto.TypeSystem.Guard.unsafe(guard, env) do
+      nil -> :ok
+      {what, node} -> {:error, Errors.guard_not_safe(what, span: Error.span_from_loc(node_loc(node) || node_loc(guard), 1, "not allowed in a guard"))}
+    end
+  end
+
+  defp node_loc(node) when is_tuple(node), do: elem(Vaisto.LocationStripper.strip_node(node), 1)
+  defp node_loc(_), do: nil
 
   # Context-threaded check_receive_clauses
   defp check_receive_clauses_s(clauses, ctx) do
@@ -3294,6 +3756,11 @@ defmodule Vaisto.TypeChecker do
     end
   end
 
+  # A value that is not a function, called: (let [head 5] (head xs))
+  defp unify_call_s(other, _actual_args, _ctx, _original_args, func_name) do
+    {:error, Errors.type_mismatch({:fn, [], :any}, other, note: "`#{func_name}` is not a function, so it cannot be called")}
+  end
+
   # Verify that builtin class constraints (Num, Ord) are satisfied after unification
   defp verify_builtin_constraints(ctx) do
     instances = Map.get(ctx.env, :__instances__, %{})
@@ -3444,9 +3911,20 @@ defmodule Vaisto.TypeChecker do
 
   defp check_module(forms, env, acc) when is_list(forms) and acc == [] do
     Logger.debug("typecheck: checking module with #{length(forms)} forms")
-    # First pass: collect all signatures
+    {type_forms, other_forms} = Enum.split_with(forms, &type_form?/1)
+
+    case order_types(type_forms) do
+      {:ok, ordered_types} -> check_module_ordered(forms, ordered_types ++ other_forms, env)
+      {:error, _} = error -> error
+    end
+  end
+
+  # First pass: collect all signatures, the types' first and each after the
+  # types it names, so that a definition or a type can name one declared after
+  # it. Second pass: check each form in source order.
+  defp check_module_ordered(forms, collection_order, env) do
     # Patterns handle both with and without location metadata
-    env_with_signatures = Enum.reduce(forms, env, fn form, acc_env ->
+    env_with_signatures = Enum.reduce(collection_order, env, fn form, acc_env ->
       case form do
         # 7-tuple guarded defn with return type, guard, and location
         {:defn, name, params, _body, ret_type, _guard, %Vaisto.Parser.Loc{}} ->
@@ -3540,11 +4018,65 @@ defmodule Vaisto.TypeChecker do
     check_module_forms(forms, ctx, [], [])
   end
 
+  defp type_form?(form), do: is_tuple(form) and tuple_size(form) > 2 and elem(form, 0) in [:deftype, :deftype_deriving]
+
+  # The type declarations in an order where each comes after the others it
+  # names. A type may name itself; types that name each other are an error.
+  defp order_types(type_forms) do
+    by_name = Map.new(type_forms, &{elem(&1, 1), &1})
+    deps = Map.new(type_forms, fn form -> {elem(form, 1), form |> type_body() |> named_types() |> Enum.filter(&(Map.has_key?(by_name, &1) and &1 != elem(form, 1)))} end)
+
+    result =
+      Enum.reduce_while(type_forms, {[], MapSet.new()}, fn form, {order, done} ->
+        case visit_type(elem(form, 1), deps, [], done, order) do
+          {:ok, order, done} -> {:cont, {order, done}}
+          {:cycle, names} -> {:halt, {:cycle, names}}
+        end
+      end)
+
+    case result do
+      {:cycle, names} -> {:error, Errors.mutually_recursive_types(names, span: Error.span_from_loc(node_loc(by_name[hd(names)])))}
+      {order, _done} -> {:ok, order |> Enum.reverse() |> Enum.map(&Map.fetch!(by_name, &1))}
+    end
+  end
+
+  defp visit_type(name, deps, path, done, order) do
+    cond do
+      MapSet.member?(done, name) -> {:ok, order, done}
+      name in path -> {:cycle, Enum.reverse([name | Enum.take_while(path, &(&1 != name))])}
+      true ->
+        result =
+          Enum.reduce_while(Map.fetch!(deps, name), {:ok, order, done}, fn dep, {:ok, order, done} ->
+            case visit_type(dep, deps, [name | path], done, order) do
+              {:ok, _, _} = ok -> {:cont, ok}
+              cycle -> {:halt, cycle}
+            end
+          end)
+
+        with {:ok, order, done} <- result, do: {:ok, [name | order], MapSet.put(done, name)}
+    end
+  end
+
+  defp type_body({:deftype, _name, body, %Vaisto.Parser.Loc{}}), do: body
+  defp type_body({:deftype, _name, body}), do: body
+  defp type_body({:deftype_deriving, _name, body, _classes, %Vaisto.Parser.Loc{}}), do: body
+  defp type_body({:deftype_deriving, _name, body, _classes}), do: body
+  defp type_body(_form), do: []
+
+  # The capitalized names a type declaration's fields mention.
+  defp named_types({:sum, variants}), do: Enum.flat_map(variants, fn {_ctor, fields} -> named_types(fields) end)
+  defp named_types({:product, fields}), do: Enum.flat_map(fields, fn {_label, type} -> named_types(type) end)
+  defp named_types(t) when is_atom(t), do: if(String.match?(Atom.to_string(t), ~r/^[A-Z]/), do: [t], else: [])
+  defp named_types(%Vaisto.Parser.Loc{}), do: []
+  defp named_types(t) when is_tuple(t), do: t |> Tuple.to_list() |> Enum.flat_map(&named_types/1)
+  defp named_types(l) when is_list(l), do: Enum.flat_map(l, &named_types/1)
+  defp named_types(_), do: []
+
   # Signature collection helpers
   defp collect_defn_signature(name, params, ret_type, env) do
     # Params are now [{:x, :int}, {:y, :int}] tuples
-    param_types = Enum.map(params, fn {_name, type} -> parse_type_expr(type) end)
-    func_type = {:fn, param_types, parse_type_expr(ret_type)}
+    param_types = Enum.map(params, fn {_name, type} -> resolve_annotation_or_raw(type, env) end)
+    func_type = {:fn, param_types, resolve_annotation_or_raw(ret_type, env)}
     Map.put(env, name, func_type)
   end
 
@@ -3554,7 +4086,7 @@ defmodule Vaisto.TypeChecker do
     # expression must not reference other defvals (no circular deps)
     case check(value, env) do
       {:ok, val_type, _typed_value} ->
-        Map.put(env, name, val_type)
+        env |> Map.put(name, generalize_closed(val_type)) |> Map.put({:__value__, name}, true)
       {:error, _} ->
         # If type checking fails, use :any to allow forward progress
         # The error will be caught again during the full check pass
@@ -3578,47 +4110,114 @@ defmodule Vaisto.TypeChecker do
   defp collect_deftype_signature(name, {:product, fields}, env) do
     # Product type (record): single constructor
     normalized_fields = Enum.map(fields, fn {field_name, type} ->
-      {field_name, parse_type_expr(type)}
+      {field_name, record_field_type_or_raw(type, name, env)}
     end)
-    field_types = Enum.map(normalized_fields, fn {_name, type} -> type end)
-    record_type = {:record, name, normalized_fields}
-    constructor_type = {:fn, field_types, record_type}
-    Map.put(env, name, constructor_type)
+
+    register_record({:record, name, normalized_fields}, env)
   end
 
   defp collect_deftype_signature(name, {:sum, variants}, env) do
-    # Collect all type parameters used across variants
-    all_params = variants
-    |> Enum.flat_map(fn {_ctor, params} -> params end)
-    |> Enum.uniq()
+    normalized_variants = sum_variants_or_any(name, variants, env)
+    register_sum({:sum, name, normalized_variants}, env)
+  end
 
-    # Create type variable mapping: param_name -> {:tvar, index}
-    param_map = all_params
-    |> Enum.with_index()
-    |> Map.new(fn {param, idx} -> {param, {:tvar, idx}} end)
+  # A sum type under its name, and each constructor as a function from its
+  # fields, where a field of the type's own type is the constructed value's.
+  defp register_sum({:sum, name, variants} = sum_type, env) do
+    env = env |> Map.put(name, sum_type) |> Map.put({:__type__, name}, sum_type)
 
-    # Normalize variants with type variables
-    normalized_variants = Enum.map(variants, fn {ctor_name, type_params} ->
-      field_types = Enum.map(type_params, fn param ->
-        Map.get(param_map, param, :any)
-      end)
-      {ctor_name, field_types}
-    end)
-
-    sum_type = {:sum, name, normalized_variants}
-
-    # Register sum type and all constructors
-    env_with_type = Map.put(env, name, sum_type)
-    Enum.reduce(normalized_variants, env_with_type, fn {ctor_name, field_types}, acc_env ->
-      constructor_type = {:fn, field_types, sum_type}
-      Map.put(acc_env, ctor_name, constructor_type)
+    Enum.reduce(variants, env, fn {ctor_name, field_types}, acc_env ->
+      Map.put(acc_env, ctor_name, {:fn, unroll(field_types, sum_type), sum_type})
     end)
   end
+
+  # A record type under {:__type__, name}, and its constructor under its name.
+  defp register_record({:record, name, fields} = record_type, env) do
+    field_types = Enum.map(fields, fn {_label, type} -> unroll(type, record_type) end)
+    env |> Map.put(name, {:fn, field_types, record_type}) |> Map.put({:__type__, name}, record_type)
+  end
+
+  # The type declared as `name`: a constructor may share the name, as in
+  # (deftype Wrapper (Wrapper :int)), so types are kept apart from values.
+  defp declared_type(env, name), do: Map.get(env, {:__type__, name})
 
   # Legacy: list of fields without wrapper
   defp collect_deftype_signature(name, fields, env) when is_list(fields) do
     collect_deftype_signature(name, {:product, fields}, env)
   end
+
+  # --- Constructor fields (P0-17, D18) -----------------------------------------
+
+  # A sum type's constructors with their field types. A field has its declared
+  # type. A lowercase name, as in (Just v) or (Just :a), is a type parameter,
+  # numbered in order of first appearance, as the elaborator reads it. A field
+  # that names the type being declared, applied to its own parameters, is
+  # {:rec, name}: the type of the value it is in (see unroll/2). Any other
+  # recursion, and a name that is not a type, is an error, thrown as
+  # {:type_error, error}.
+  defp sum_variants(name, variants, env) do
+    params = variants |> Enum.flat_map(fn {_ctor, fields} -> Enum.flat_map(fields, &field_type_vars/1) end) |> Enum.uniq()
+    scope = %{self: name, order: params, params: params |> Enum.with_index() |> Map.new(fn {p, i} -> {p, {:tvar, i}} end), env: env}
+    Enum.map(variants, fn {ctor, fields} -> {ctor, Enum.map(fields, &field_type(&1, scope))} end)
+  end
+
+  # The first pass cannot report an error, so it registers a type it cannot
+  # read with fields of type :any; the second pass reports the error.
+  defp sum_variants_or_any(name, variants, env) do
+    sum_variants(name, variants, env)
+  catch
+    {:type_error, _} -> Enum.map(variants, fn {ctor, fields} -> {ctor, Enum.map(fields, fn _ -> :any end)} end)
+  end
+
+  defp field_type_vars(t) when is_atom(t), do: if(lowercase_name?(t), do: [t], else: [])
+  defp field_type_vars({:atom, t}) when is_atom(t), do: if(lowercase_name?(t) and t not in @primitive_type_names, do: [t], else: [])
+  defp field_type_vars({:call, _t, args, _loc}) when is_list(args), do: Enum.flat_map(args, &field_type_vars/1)
+  defp field_type_vars(_), do: []
+
+  defp lowercase_name?(t), do: String.match?(Atom.to_string(t), ~r/^[a-z]/)
+
+  defp field_type(t, scope) when is_atom(t), do: Map.get_lazy(scope.params, t, fn -> named_field_type(t, scope) end)
+  defp field_type({:atom, t}, scope) when is_atom(t), do: Map.get_lazy(scope.params, t, fn -> named_field_type(t, scope) end)
+  defp field_type({:call, :List, [e], _loc}, scope), do: {:list, field_type(e, scope)}
+  defp field_type({:call, :Tuple, es, _loc}, scope) when is_list(es), do: {:tuple, Enum.map(es, &field_type(&1, scope))}
+
+  defp field_type({:call, :Fn, [_ | _] = ts, _loc}, scope) do
+    {ps, [r]} = Enum.split(ts, -1)
+    {:fn, Enum.map(ps, &field_type(&1, scope)), field_type(r, scope)}
+  end
+
+  defp field_type({:call, name, args, _loc}, %{self: name} = scope) when is_list(args) do
+    if Enum.map(args, &unwrap_type_name/1) == scope.order,
+      do: {:rec, name},
+      else: throw({:type_error, Errors.nonuniform_recursion(name)})
+  end
+
+  defp field_type({:call, t, args, _loc} = type, scope) when is_atom(t) and is_list(args) do
+    case declared_type(scope.env, t) do
+      {:sum, ^t, _} = sum -> apply_declared(sum, Enum.map(args, &field_type(&1, scope)))
+      {:record, ^t, _} -> throw({:type_error, Errors.type_arity(t, 0, length(args))})
+      nil when t in @opaque_type_names -> parse_type_expr(type)
+      nil -> throw({:type_error, Errors.not_a_type(t)})
+    end
+  end
+
+  defp field_type(other, _scope), do: throw({:type_error, Errors.not_a_type(other)})
+
+  defp named_field_type(t, scope) do
+    cond do
+      t in @primitive_type_names -> t
+      t == scope.self -> {:rec, t}
+      true ->
+        case declared_type(scope.env, t) do
+          {:sum, ^t, _} = sum -> fill_sum_tvars(sum, List.duplicate(:any, length(declared_params(sum))))
+          {:record, ^t, _} = record -> record
+          nil -> throw({:type_error, Errors.not_a_type(t)})
+        end
+    end
+  end
+
+  defp unwrap_type_name({:atom, t}), do: t
+  defp unwrap_type_name(t), do: t
 
   defp collect_process_signature(name, initial_state, handlers, env) do
     # Infer process type from handlers
@@ -3871,20 +4470,11 @@ defmodule Vaisto.TypeChecker do
       {:process, name, _init, _handlers, process_type} ->
         Map.put(env, name, process_type)
 
-      {:deftype, name, {:product, fields}, record_type} ->
-        # Product type: register single constructor
-        field_types = Enum.map(fields, fn {_name, type} -> type end)
-        constructor_type = {:fn, field_types, record_type}
-        Map.put(env, name, constructor_type)
+      {:deftype, _name, {:product, _fields}, record_type} ->
+        register_record(record_type, env)
 
-      {:deftype, name, {:sum, variants}, sum_type} ->
-        # Sum type: register constructor for each variant
-        # Also register the sum type itself for type annotations
-        env_with_type = Map.put(env, name, sum_type)
-        Enum.reduce(variants, env_with_type, fn {ctor_name, field_types}, acc_env ->
-          constructor_type = {:fn, field_types, sum_type}
-          Map.put(acc_env, ctor_name, constructor_type)
-        end)
+      {:deftype, _name, {:sum, _variants}, sum_type} ->
+        register_sum(sum_type, env)
 
       {:defprompt, name, input_type, output_type, _template, :unit} ->
         prompts = Map.get(env, :__prompts__, %{})

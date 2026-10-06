@@ -308,7 +308,23 @@ defmodule Vaisto.Refine.VCGen do
   end
 
   defp synth([:inj, type, _ctor | fields], env, st), do: synth_all(fields, env, st, opaque(type))
-  defp synth([:tuple | es], env, st), do: synth_all(es, env, st, opaque(nil))
+  # A tuple keeps its components' values, so that a match on a tuple written in
+  # place, as a multi-clause function's arguments are, knows what each of its
+  # patterns tests.
+  defp synth([:tuple | es], env, st) do
+    result =
+      Enum.reduce_while(es, {[], env, st}, fn e, {vs, env, st} ->
+        case synth(e, env, st) do
+          {:bottom, env, st} -> {:halt, {:bottom, env, st}}
+          {v, env, st} -> {:cont, {[v | vs], env, st}}
+        end
+      end)
+
+    case result do
+      {:bottom, env, st} -> {:bottom, env, st}
+      {vs, env, st} -> {Map.put(opaque(nil), :elems, Enum.reverse(vs)), env, st}
+    end
+  end
   defp synth([:record, type | fields], env, st), do: synth_all(for([_l, e] <- fields, do: e), env, st, opaque(type))
 
   defp synth([:select, e, _label], env, st), do: synth_all([e], env, st, opaque(nil))
@@ -413,7 +429,9 @@ defmodule Vaisto.Refine.VCGen do
     end)
   end
 
-  defp fresh_like(%{s: nil} = v, env, st), do: {v, env, st}
+  # A value the logic cannot name is fresh too: nothing known about the one
+  # given, such as a tuple's components, holds of the new one.
+  defp fresh_like(%{s: nil} = v, env, st), do: {opaque(v.ty), env, st}
 
   defp fresh_like(v, env, st) do
     {t, st} = fresh(v.s, st)
@@ -715,10 +733,11 @@ defmodule Vaisto.Refine.VCGen do
   # cannot state it. `earlier` holds the earlier clauses' match conditions,
   # whose negations hold in this clause.
   defp clause_env(clause, sv, earlier, env, st) do
+    # The clause's shape says whether it has a guard.
     {pat, guard, body} =
       case clause do
-        [pat, [:when, g], body] -> {pat, g, body}
-        [pat, body] -> {pat, nil, body}
+        [pat, [:when, g], body] -> {pat, {:guarded, g}, body}
+        [pat, body] -> {pat, :unguarded, body}
       end
 
     first_fresh = st.n + 1
@@ -729,10 +748,15 @@ defmodule Vaisto.Refine.VCGen do
     env = %{env | binds: Map.merge(env.binds, binds)}
 
     {guard_fact, guard_exact?} =
-      case if(is_nil(guard), do: nil, else: guard(guard, env.binds)) do
-        nil -> {nil, true}
-        :unsupported -> {nil, false}
-        {:ok, d, p} -> {IR.and_([d, p]), not mentions_fresh?([d, p], first_fresh, st.n)}
+      case guard do
+        :unguarded ->
+          {nil, true}
+
+        {:guarded, g} ->
+          case guard(g, env.binds) do
+            :unsupported -> {nil, false}
+            {:ok, d, p} -> {IR.and_([d, p]), not mentions_fresh?([d, p], first_fresh, st.n)}
+          end
       end
 
     env = if guard_fact, do: add_fact(env, guard_fact), else: env
@@ -740,7 +764,7 @@ defmodule Vaisto.Refine.VCGen do
     matched =
       cond do
         not exact? or mentions_fresh?(tests, first_fresh, st.n) -> nil
-        guard != nil and not guard_exact? -> nil
+        not guard_exact? -> nil
         guard_fact -> IR.and_(tests ++ [guard_fact])
         true -> IR.and_(tests)
       end
@@ -815,6 +839,16 @@ defmodule Vaisto.Refine.VCGen do
   defp pattern([:as, x, p], v, st) do
     {r, st} = pattern(p, v, st)
     {%{r | binds: Map.put(r.binds, x, v)}, st}
+  end
+
+  # A tuple whose components the logic knows: each sub-pattern tests its own,
+  # and the tuple's tests are theirs.
+  defp pattern([:tuple | ps], %{elems: vs}, st) when length(ps) == length(vs) do
+    Enum.zip(ps, vs)
+    |> Enum.reduce({%{tests: [], local: [], binds: %{}, exact?: true}, st}, fn {p, v}, {acc, st} ->
+      {r, st} = pattern(p, v, st)
+      {%{tests: acc.tests ++ r.tests, local: acc.local ++ r.local, binds: Map.merge(acc.binds, r.binds), exact?: acc.exact? and r.exact?}, st}
+    end)
   end
 
   defp pattern([:tuple | ps], v, st) do

@@ -63,6 +63,9 @@ defmodule Vaisto.TypeSystem.Infer do
       {:error, _} = err ->
         err
     end
+  catch
+    # A pattern that can never match the value it is matched against
+    {:pattern_error, error} -> {:error, error}
   end
 
   # --- Literals ---
@@ -92,7 +95,7 @@ defmodule Vaisto.TypeSystem.Infer do
     case Context.lookup(ctx, name) do
       {:ok, scheme} ->
         {type, ctx} = Context.instantiate(ctx, scheme)
-        {:ok, type, var_or_fn_ref(name, type), ctx}
+        {:ok, type, var_or_fn_ref(name, type, ctx), ctx}
 
       :error ->
         {:error, Errors.undefined_variable(name)}
@@ -104,7 +107,7 @@ defmodule Vaisto.TypeSystem.Infer do
     case Context.lookup(ctx, a) do
       {:ok, scheme} ->
         {type, ctx} = Context.instantiate(ctx, scheme)
-        {:ok, type, var_or_fn_ref(a, type), ctx}
+        {:ok, type, var_or_fn_ref(a, type, ctx), ctx}
 
       :error ->
         # It's a literal atom
@@ -153,6 +156,20 @@ defmodule Vaisto.TypeSystem.Infer do
   end
 
   # --- List Builtins ---
+
+  # A local name shadows a builtin's or a definition's, as in (fn [+] (+ 2 3)):
+  # the call applies the value it is bound to.
+  defp infer_expr({:call, func, args}, ctx) when is_atom(func) and is_map_key(ctx.locals, func) do
+    with {:ok, func_type, typed_func, ctx} <- infer_expr(func, ctx) do
+      {ret_tvar, ctx} = Context.fresh_var(ctx)
+      {arg_tvars, ctx} = Context.fresh_vars(ctx, length(args))
+
+      with {:ok, ctx} <- Context.unify_types(ctx, func_type, {:fn, arg_tvars, ret_tvar}),
+           {:ok, typed_args, ctx} <- infer_and_unify_args(args, arg_tvars, ctx, []) do
+        {:ok, ret_tvar, {:apply, typed_func, typed_args, ret_tvar}, ctx}
+      end
+    end
+  end
 
   defp infer_expr({:call, :head, [list_expr]}, ctx) do
     case infer_expr(list_expr, ctx) do
@@ -595,12 +612,12 @@ defmodule Vaisto.TypeSystem.Infer do
     with {:ok, scrutinee_type, typed_scrutinee, ctx} <- infer_expr(scrutinee, ctx) do
       {result_tvar, ctx} = Context.fresh_var(ctx)
 
-      case infer_match_clauses(clauses, scrutinee_type, result_tvar, ctx, []) do
-        {:ok, typed_clauses, ctx} ->
-          {:ok, result_tvar, {:match, typed_scrutinee, typed_clauses, result_tvar}, ctx}
+      # The unguarded clauses cover the scrutinee's type, as in the main checker.
+      unguarded = for {pattern, _body} <- clauses, do: pattern
 
-        error ->
-          error
+      with {:ok, typed_clauses, ctx} <- infer_match_clauses(clauses, scrutinee_type, result_tvar, ctx, []),
+           :ok <- Vaisto.TypeChecker.coverage(unguarded, Context.apply(ctx, scrutinee_type), ctx.env) do
+        {:ok, result_tvar, {:match, typed_scrutinee, typed_clauses, result_tvar}, ctx}
       end
     end
   end
@@ -619,11 +636,12 @@ defmodule Vaisto.TypeSystem.Infer do
   # --- Helpers ---
 
   # Emit {:fn_ref, ...} for function types used as values, {:var, ...} otherwise
-  defp var_or_fn_ref(name, {:fn, params, _} = type) do
+  # A local holds a value; only a definition is referred to by name and arity.
+  defp var_or_fn_ref(name, {:fn, params, _} = type, ctx) when not is_map_key(ctx.locals, name) do
     {:fn_ref, name, length(params), type}
   end
 
-  defp var_or_fn_ref(name, type), do: {:var, name, type}
+  defp var_or_fn_ref(name, type, _ctx), do: {:var, name, type}
 
   defp infer_application(func_name, func_type, args, ctx) do
     case func_type do
@@ -768,36 +786,58 @@ defmodule Vaisto.TypeSystem.Infer do
     {:ok, Enum.reverse(acc), ctx}
   end
 
-  # Guarded clauses are typed by the main checker, which this falls back to.
-  defp infer_match_clauses([{_pattern, _guard, _body} = clause | _rest], _scrutinee_type, _result_tvar, _ctx, _acc) do
-    {:error, Errors.unknown_expression(clause, hint: "inference not implemented for guarded clauses")}
-  end
-
-  defp infer_match_clauses([{pattern, body} | rest], scrutinee_type, result_tvar, ctx, acc) do
+  # A clause is {pattern, body}, or {pattern, guard, body}: its shape says
+  # whether it has a guard, so nil and false are guards to be checked.
+  defp infer_match_clauses([clause | rest], scrutinee_type, result_tvar, ctx, acc) do
     saved_env = ctx.env
+    {pattern, body} = {elem(clause, 0), elem(clause, tuple_size(clause) - 1)}
 
-    case infer_pattern(pattern, scrutinee_type, ctx) do
-      {:ok, bindings, typed_pattern, ctx} ->
-        ctx = Context.extend_many(ctx, bindings)
-
-        case infer_expr(body, ctx) do
-          {:ok, body_type, typed_body, ctx} ->
-            case Context.unify_types(ctx, body_type, result_tvar) do
-              {:ok, ctx} ->
-                typed_clause = {typed_pattern, typed_body, body_type}
-                ctx = %{ctx | env: saved_env}
-                infer_match_clauses(rest, scrutinee_type, result_tvar, ctx, [typed_clause | acc])
-
-              {:error, _} = err ->
-                err
-            end
-
-          error ->
-            error
+    with {:ok, bindings, typed_pattern, ctx} <- infer_pattern(pattern, scrutinee_type, ctx),
+         :ok <- linear(bindings),
+         ctx = Context.extend_many(ctx, bindings),
+         {:ok, typed_guard, ctx} <- infer_guard(clause, ctx),
+         {:ok, body_type, typed_body, ctx} <- infer_expr(body, ctx),
+         {:ok, ctx} <- Context.unify_types(ctx, body_type, result_tvar) do
+      typed_clause =
+        case typed_guard do
+          :unguarded -> {typed_pattern, typed_body, body_type}
+          {:guarded, typed_guard} -> {typed_pattern, typed_guard, typed_body, body_type}
         end
 
-      {:error, _} = err ->
-        err
+      infer_match_clauses(rest, scrutinee_type, result_tvar, %{ctx | env: saved_env}, [typed_clause | acc])
+    end
+  end
+
+  # A pattern binds each name once (liquid-core.md §10.9).
+  defp linear(bindings) do
+    names = Enum.map(bindings, &elem(&1, 0))
+
+    case names -- Enum.uniq(names) do
+      [] -> :ok
+      [name | _] -> {:error, Errors.pattern_binds_twice(name)}
+    end
+  end
+
+  # A guard is a guard-safe Bool in the scope of the pattern's bindings (D27,
+  # liquid-core.md §6.6).
+  defp infer_guard({_pattern, _body}, ctx), do: {:ok, :unguarded, ctx}
+
+  defp infer_guard({_pattern, guard, _body}, ctx) do
+    # The lambda's own locals, with those around it, shadow what they name.
+    locals = MapSet.new(Map.keys(ctx.locals))
+    env = Map.update(ctx.env, :__local_vars__, locals, &MapSet.union(&1, locals))
+
+    case Vaisto.TypeSystem.Guard.unsafe(guard, env) do
+      nil ->
+        with {:ok, guard_type, typed_guard, ctx} <- infer_expr(guard, ctx) do
+          case Context.unify_types(ctx, guard_type, :bool) do
+            {:ok, ctx} -> {:ok, {:guarded, typed_guard}, ctx}
+            {:error, _} -> {:error, Errors.type_mismatch(:bool, guard_type, note: "a guard must be a Bool")}
+          end
+        end
+
+      {what, _node} ->
+        {:error, Errors.guard_not_safe(what)}
     end
   end
 
@@ -833,6 +873,9 @@ defmodule Vaisto.TypeSystem.Infer do
       {:error, reason} -> {:error, reason}
     end
   end
+
+  # nil is a literal, as true and false are, not a name to bind
+  defp infer_pattern(nil, _scrutinee_type, ctx), do: {:ok, [], {:lit, :atom, nil}, ctx}
 
   # Variable
   defp infer_pattern(name, scrutinee_type, ctx) when is_atom(name) do
@@ -890,13 +933,13 @@ defmodule Vaisto.TypeSystem.Infer do
 
     ctx = case Context.unify_types(ctx, scrutinee_type, list_type) do
       {:ok, ctx} -> ctx
-      {:error, _} -> ctx
+      {:error, _} -> throw({:pattern_error, Errors.type_mismatch(scrutinee_type, list_type, note: "a list pattern never matches a value of this type")})
     end
 
-    {:ok, head_bindings, typed_head, ctx} = infer_pattern(head, elem_tvar, ctx)
-    {:ok, tail_bindings, typed_tail, ctx} = infer_pattern(tail, list_type, ctx)
-
-    {:ok, head_bindings ++ tail_bindings, {:cons_pattern, typed_head, typed_tail, list_type}, ctx}
+    with {:ok, head_bindings, typed_head, ctx} <- infer_pattern(head, elem_tvar, ctx),
+         {:ok, tail_bindings, typed_tail, ctx} <- infer_pattern(tail, list_type, ctx) do
+      {:ok, head_bindings ++ tail_bindings, {:cons_pattern, typed_head, typed_tail, list_type}, ctx}
+    end
   end
 
   defp infer_pattern({:cons, head, tail, %Vaisto.Parser.Loc{}}, scrutinee_type, ctx) do
@@ -913,13 +956,30 @@ defmodule Vaisto.TypeSystem.Infer do
   end
 
   defp infer_pattern({:bracket, elements}, scrutinee_type, ctx) when is_list(elements) do
-    infer_pattern(elements, scrutinee_type, ctx)
+    {elem_tvar, ctx} = Context.fresh_var(ctx)
+
+    with {:ok, ctx} <- Context.unify_types(ctx, scrutinee_type, {:list, elem_tvar}),
+         {:ok, bindings, typed_elems, ctx} <- infer_pattern_elements(elements, List.duplicate(elem_tvar, length(elements)), ctx, [], []) do
+      {:ok, bindings, {:list_pattern, typed_elems, {:list, elem_tvar}}, ctx}
+    end
+  end
+
+  # As-pattern: (x @ inner) names the whole value and matches it against inner
+  defp infer_pattern({:call, x, [:@, inner]}, scrutinee_type, ctx) when is_atom(x) do
+    with {:ok, bindings, typed_inner, ctx} <- infer_pattern(inner, scrutinee_type, ctx) do
+      {:ok, [{x, scrutinee_type} | bindings], {:as_pattern, {:var, x, scrutinee_type}, typed_inner, scrutinee_type}, ctx}
+    end
   end
 
   # Tuple pattern
-  defp infer_pattern({:tuple_pattern, elements}, _scrutinee_type, ctx) do
-    {:ok, bindings, typed_elems, ctx} = infer_pattern_elements(elements, :any, ctx, [], [])
-    {:ok, bindings, {:tuple_pattern, typed_elems, :any}, ctx}
+  defp infer_pattern({:tuple_pattern, elements}, scrutinee_type, ctx) do
+    {elem_tvars, ctx} = Context.fresh_vars(ctx, length(elements))
+    tuple_type = {:tuple, elem_tvars}
+
+    with {:ok, ctx} <- Context.unify_types(ctx, scrutinee_type, tuple_type),
+         {:ok, bindings, typed_elems, ctx} <- infer_pattern_elements(elements, elem_tvars, ctx, [], []) do
+      {:ok, bindings, {:tuple_pattern, typed_elems, tuple_type}, ctx}
+    end
   end
 
   defp infer_pattern({:tuple, elements, %Vaisto.Parser.Loc{}}, scrutinee_type, ctx) when is_list(elements) do
@@ -939,30 +999,32 @@ defmodule Vaisto.TypeSystem.Infer do
 
         case ctor_type do
           {:fn, param_types, ret_type} ->
-            # Unify return type with scrutinee to propagate constraints
+            # Unify return type with scrutinee: a constructor of another type never matches
             ctx = case Context.unify_types(ctx, ret_type, scrutinee_type) do
               {:ok, ctx} -> ctx
-              {:error, _} -> ctx
+              {:error, _} -> throw({:pattern_error, Errors.type_mismatch(scrutinee_type, ret_type, note: "`#{name}` is not a constructor of this type")})
             end
-            {:ok, bindings, typed_args, ctx} = infer_pattern_elements(args, param_types, ctx, [], [])
-            {:ok, bindings, {:pattern, name, typed_args, scrutinee_type}, ctx}
+            with {:ok, bindings, typed_args, ctx} <- infer_pattern_elements(args, param_types, ctx, [], []) do
+              {:ok, bindings, {:pattern, name, typed_args, scrutinee_type}, ctx}
+            end
 
           _ ->
-            {:ok, bindings, typed_args, ctx} = infer_pattern_elements(
-              args, List.duplicate(:any, length(args)), ctx, [], [])
-            {:ok, bindings, {:pattern, name, typed_args, scrutinee_type}, ctx}
+            with {:ok, bindings, typed_args, ctx} <- infer_pattern_elements(args, List.duplicate(:any, length(args)), ctx, [], []) do
+              {:ok, bindings, {:pattern, name, typed_args, scrutinee_type}, ctx}
+            end
         end
 
       :error ->
-        {:ok, bindings, typed_args, ctx} = infer_pattern_elements(
-          args, List.duplicate(:any, length(args)), ctx, [], [])
-        {:ok, bindings, {:pattern, name, typed_args, scrutinee_type}, ctx}
+        with {:ok, bindings, typed_args, ctx} <- infer_pattern_elements(args, List.duplicate(:any, length(args)), ctx, [], []) do
+          {:ok, bindings, {:pattern, name, typed_args, scrutinee_type}, ctx}
+        end
     end
   end
 
-  # Catch-all pattern — treat as opaque
-  defp infer_pattern(_pattern, _scrutinee_type, ctx) do
-    {:ok, [], :_, ctx}
+  # Any other pattern is one inference does not handle: the lambda falls back
+  # to the main checker, rather than reading the pattern as a wildcard.
+  defp infer_pattern(pattern, _scrutinee_type, _ctx) do
+    {:error, Errors.unknown_expression(pattern, hint: "pattern not handled by inference")}
   end
 
   defp infer_pattern_elements([], _types, ctx, bindings_acc, elems_acc) do
@@ -976,8 +1038,9 @@ defmodule Vaisto.TypeSystem.Infer do
       _ -> {:any, :any}
     end
 
-    {:ok, bindings, typed_elem, ctx} = infer_pattern(elem, elem_type, ctx)
-    infer_pattern_elements(rest, rest_types, ctx, Enum.reverse(bindings) ++ bindings_acc, [typed_elem | elems_acc])
+    with {:ok, bindings, typed_elem, ctx} <- infer_pattern(elem, elem_type, ctx) do
+      infer_pattern_elements(rest, rest_types, ctx, Enum.reverse(bindings) ++ bindings_acc, [typed_elem | elems_acc])
+    end
   end
 
   defp with_location(%Vaisto.Error{} = error, %Vaisto.Parser.Loc{} = loc) do
@@ -1057,8 +1120,12 @@ defmodule Vaisto.TypeSystem.Infer do
   end
 
   defp apply_subst_to_ast({:match, scrutinee, clauses, type}, subst) do
-    typed_clauses = Enum.map(clauses, fn {pattern, body, body_type} ->
-      {apply_subst_to_pattern(pattern, subst), apply_subst_to_ast(body, subst), Core.apply_subst(subst, body_type)}
+    typed_clauses = Enum.map(clauses, fn
+      {pattern, body, body_type} ->
+        {apply_subst_to_pattern(pattern, subst), apply_subst_to_ast(body, subst), Core.apply_subst(subst, body_type)}
+
+      {pattern, guard, body, body_type} ->
+        {apply_subst_to_pattern(pattern, subst), apply_subst_to_ast(guard, subst), apply_subst_to_ast(body, subst), Core.apply_subst(subst, body_type)}
     end)
     {:match, apply_subst_to_ast(scrutinee, subst), typed_clauses, Core.apply_subst(subst, type)}
   end

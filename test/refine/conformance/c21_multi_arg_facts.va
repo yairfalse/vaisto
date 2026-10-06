@@ -1,0 +1,11 @@
+; C21: the patterns and guards of a multi-clause function over several arguments are facts (RFC §10.3)
+; expect: compiles
+; main: 3
+(defn safe-div [x :int y {d :int | (!= d 0)}] :int (div x y))
+(defn quot (Fn :int :int :int)
+  [_ 0 0]
+  [x y (safe-div x y)])
+(defn quot-guarded (Fn :int :int :int)
+  [x y :when (!= y 0) (safe-div x y)]
+  [_ _ 0])
+(defn main [] :int (+ (quot 7 3) (quot-guarded 3 3)))

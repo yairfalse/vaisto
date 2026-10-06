@@ -32,7 +32,7 @@ defmodule Vaisto.Refine.ConformanceTest do
   test "the suite covers the Phase 2.1 conformance programs" do
     names = Enum.map(@programs, &Path.basename/1)
 
-    for prefix <- ~w(c01 c02 c03 c04 c05 c06 c07 c09 c10 c18 c20) do
+    for prefix <- ~w(c01 c02 c03 c04 c05 c06 c07 c09 c10 c18 c19 c20 c21 c22 c23 c24) do
       assert Enum.any?(names, &String.starts_with?(&1, prefix)), "no program for #{prefix}"
     end
   end

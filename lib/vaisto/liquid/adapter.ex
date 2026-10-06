@@ -195,6 +195,13 @@ defmodule Vaisto.Liquid.Adapter do
   defp ty(ctx, {:record, t, _fields} = type), do: [t | type_args(ctx, t, type)]
   defp ty(ctx, {:sum, t, _ctors} = type), do: [t | type_args(ctx, t, type)]
 
+  # A field of a recursive type that names the type itself, with its own
+  # parameters (P0-17): it occurs only inside the type's declaration.
+  defp ty(ctx, {:rec, t}) do
+    {_kind, params, _} = Map.fetch!(ctx.decls, t)
+    [t | Enum.map(params, &[:tvar, tv(&1)])]
+  end
+
   # D1: a parameter annotated with a declared type's name reaches the typed AST as that name.
   defp ty(ctx, t) when is_atom(t) and is_map_key(ctx.decls, t) do
     {_kind, params, _} = Map.fetch!(ctx.decls, t)

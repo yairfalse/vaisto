@@ -533,7 +533,7 @@ Each is a disagreement between a backend and §6 to §9. The differential harnes
 
 | # | Program | Expected (this document) | `:core` | `:elixir` |
 |---|---|---|---|---|
-| D25 | `(== 0.0 -0.0)`; `(== 1 1.0)` | `false`; rejected by Core Lint (operands of different types) | `false`; `false` | `true`; `true` |
+| D25 | `(== 0.0 -0.0)`; `(== 1 1.0)` | `false`; rejected by Core Lint (operands of different types) | `false`; `false` | `true`; `true`. **Fixed** (2026-10-06): `==` and `!=` are `===` and `!==`, and `:core`'s `!=` is `=/=` rather than `/=` |
 | D26 | a `match` with no matching clause | `(crash no_match)` | `if_clause` | `{case_clause, _}`, which §9 reads as `no_match` |
 
 D26 is not a disagreement of outcomes: §9 reads both as `no_match`. It is listed because the reason a program's own `handle-crash` sees differs between the backends.

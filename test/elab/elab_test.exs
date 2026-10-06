@@ -145,8 +145,16 @@ defmodule Vaisto.ElabTest do
 
     test "a guard must be guard-safe" do
       e = error("(defn pos [x :int] :bool (> x 0))\n(defn f [x :int :when (pos x)] :int x)")
-      assert e.message == "a guard cannot call a function"
+      assert e.message == "a guard may not contain a function call"
       assert {:ok, _} = elab("(defn f [x :int :when (and (> x 0) (< x 10))] :int x)")
+    end
+
+    # §6.6 allows tuples and constructors of sum types, not records: the
+    # elaborator applies the rule Core Lint does, so they cannot disagree.
+    test "a guard may not construct a record, as Core Lint holds" do
+      e = error("(deftype P [x :int y :int])\n(defn f [p :P] :int (match p [q :when (== q (P 1 2)) 1] [_ 2]))")
+      assert e.message == "a guard may not contain the construction of a record"
+      assert {:ok, _} = elab("(deftype C (R :int) (G))\n(defn f [n :int] :int (match n [m :when (== (R m) (R 3)) 1] [_ 2]))")
     end
   end
 

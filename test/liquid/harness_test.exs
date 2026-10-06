@@ -31,10 +31,9 @@ defmodule Vaisto.Liquid.HarnessTest do
                Harness.run("(defn chk [x :int y :int] :bool (or (!= y 0) (> (div x y) 1)))\n(defn main [] :bool (chk 10 0))")
     end
 
-    test "D25: the Elixir backend's == is not exact equality" do
-      result = Harness.run("(defn main [] :bool (== 0.0 -0.0))")
-      assert %{verdict: {:disagree, [:elixir]}, eval: {:ok, false}} = result
-      assert result.beam.elixir == {:ok, true}
+    test "D25 fixed: == and != are exact equality on both backends" do
+      assert %{verdict: :agree, eval: {:ok, false}} = Harness.run("(defn main [] :bool (== 0.0 -0.0))")
+      assert %{verdict: :agree, eval: {:ok, true}} = Harness.run("(defn main [] :bool (!= 0.0 -0.0))")
     end
 
     # P0-10 (D11): guarded defn on the Core Erlang backend
@@ -59,6 +58,18 @@ defmodule Vaisto.Liquid.HarnessTest do
       classify = "(defn classify [n :int] :atom (match n [x :when (< x 0) :negative] [0 :zero] [_ :positive]))\n"
       assert %{verdict: :agree, eval: {:ok, :negative}} = Harness.run(classify <> "(defn main [] :atom (classify -1))")
       assert %{verdict: :agree, eval: {:ok, 2}} = Harness.run("(defn f [n :int] :int (match n [x :when (> (div 10 x) 1) 1] [_ 2]))\n(defn main [] :int (f 0))")
+    end
+
+    # A crash in a branch of the case that and, or and if lower to escaped the
+    # :core backend's guard until the guard was wrapped as Erlang wraps its own.
+    test "a guard that crashes inside its and, or or if counts as false on every path" do
+      for guard <- ["(or (> x 5) (> (div 10 x) 1))", "(and (== x 0) (> (div 10 x) 1))", "(if (== x 0) (> (div 10 x) 1) false)"] do
+        assert %{verdict: :agree, eval: {:ok, 2}} = Harness.run("(defn f [n :int] :int (match n [x :when #{guard} 1] [_ 2]))\n(defn main [] :int (f 0))"), guard
+      end
+    end
+
+    test "an if in a guard means the same on every path, whatever its type" do
+      assert %{verdict: :agree, eval: {:ok, 1}} = Harness.run("(defn f [n :int] :int (match n [x :when (> (if (> x 0) x (- 0 x)) 2) 1] [_ 0]))\n(defn main [] :int (f -3))")
     end
 
     # P0-10 (D12): field access on the Elixir backend

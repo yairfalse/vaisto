@@ -367,7 +367,7 @@ defmodule Vaisto.CoreBackendParityTest do
       code = """
       (defn main []
         (match (list 1 2 3)
-          [[] :empty]
+          [[] 0]
           [[h | t] h]))
       """
       assert {:ok, 1} = run_both(code, :match_list)

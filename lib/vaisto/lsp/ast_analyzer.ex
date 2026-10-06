@@ -39,6 +39,10 @@ defmodule Vaisto.LSP.ASTAnalyzer do
     extract_definition(ast)
   end
 
+  defp extract_definition({:defn, name, params, _body, _ret, _guard, loc}) when is_struct(loc, Loc) do
+    [%{name: name, kind: :function, arity: length(params), loc: loc, type: nil}]
+  end
+
   defp extract_definition({:defn, name, params, _body, _ret, loc}) do
     [%{name: name, kind: :function, arity: length(params), loc: loc, type: nil}]
   end
@@ -51,12 +55,9 @@ defmodule Vaisto.LSP.ASTAnalyzer do
     [%{name: name, kind: :function, arity: arity, loc: loc, type: nil}]
   end
 
+  # Each clause has one pattern for the one argument
   defp extract_definition({:defn_multi, name, clauses, loc}) when is_list(clauses) do
-    arity = case clauses do
-      [{pattern, _} | _] when is_list(pattern) -> length(pattern)
-      _ -> 1
-    end
-    [%{name: name, kind: :function, arity: arity, loc: loc, type: nil}]
+    [%{name: name, kind: :function, arity: 1, loc: loc, type: nil}]
   end
 
   defp extract_definition({:deftype, name, {:sum, variants}, loc}) do
@@ -122,6 +123,11 @@ defmodule Vaisto.LSP.ASTAnalyzer do
     {:ok, definition_loc(:defn, loc)}
   end
 
+  # Guarded defn: {:defn, name, params, body, ret, guard, loc}
+  defp find_top_level_definition([{:defn, name, _params, _body, _ret, _guard, loc} | _], name) do
+    {:ok, definition_loc(:defn, loc)}
+  end
+
   defp find_top_level_definition([{:defn, name, _params, _body, loc} | _], name) when is_struct(loc, Loc) do
     {:ok, definition_loc(:defn, loc)}
   end
@@ -138,11 +144,11 @@ defmodule Vaisto.LSP.ASTAnalyzer do
     {:ok, definition_loc(:process, loc)}
   end
 
-  defp find_top_level_definition([{:deftype, type_name, {:sum, variants}, loc} | _], name) do
+  defp find_top_level_definition([{:deftype, type_name, {:sum, variants}, loc} | rest], name) do
     cond do
       type_name == name -> {:ok, definition_loc(:deftype, loc)}
       Enum.any?(variants, fn {ctor, _} -> ctor == name end) -> {:ok, definition_loc(:deftype, loc)}
-      true -> :not_found
+      true -> find_top_level_definition(rest, name)
     end
   end
 

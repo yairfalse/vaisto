@@ -79,7 +79,7 @@ defmodule Vaisto.Refine do
          :ok <- commutes(core, sigs, opts),
          {:ok, lsigs} <- logic_sigs(sigs, core, opts),
          {vcs, []} <- VCGen.generate(core, lsigs, involved) do
-      solve(vcs, opts)
+      solve(vcs, Keyword.put(opts, :binder_names, binder_names(sigs)))
     else
       {:error, _} = error -> error
       {_vcs, gate} -> {:error, Enum.map(Enum.uniq(gate), &gate_error(&1, opts))}
@@ -135,8 +135,11 @@ defmodule Vaisto.Refine do
   defp commutes(core, sigs, opts) do
     defs = for [:def, f, type, _] <- core, into: %{}, do: {f, type}
 
+    # A refinement on a base the logic does not support is reported, with its
+    # reason, when its obligations are generated; it is not a bridge bug.
     problems =
       for {f, %Surface.Sig{} = sig} <- Enum.sort(sigs),
+          supported_bases?(sig),
           type = Map.get(defs, f),
           type != nil,
           erase(elaborate(sig, type)) != type do
@@ -155,11 +158,17 @@ defmodule Vaisto.Refine do
 
   defp elaborate(_sig, type), do: [:mismatch, type]
 
+  defp supported_bases?(%Surface.Sig{params: params, result: {rbase, rref}}) do
+    refined = for({_x, base, ref} <- params, ref != nil, do: base) ++ if(rref, do: [rbase], else: [])
+    Enum.all?(refined, &match?({:ok, _}, Vaisto.Refine.Predicate.sort_of_base(&1)))
+  end
+
   # An unrefined position keeps the adapter's type; a refined one is written
   # from the surface base type.
   defp refined_type(_base, type, nil), do: type
   defp refined_type(base, _type, {binder, pred}), do: [:refine, binder, core_type(base), {:surface, pred}]
 
+  defp core_type({:atom, t}), do: core_type(t)
   defp core_type(:int), do: :Int
   defp core_type(:bool), do: [:Bool]
   defp core_type(:float), do: :Float
@@ -288,7 +297,7 @@ defmodule Vaisto.Refine do
   end
 
   defp failure_error(%VC{kind: :postcondition, meta: m}, opts) do
-    requirement = Render.surface(m.conjunct, %{})
+    requirement = Render.surface(m.conjunct, binder_names(m.def, opts))
     label = "this result, #{Render.core(m.expr)}, must satisfy #{requirement}"
     span = expr_span(m.def, m.expr, opts, label, Map.get(m, :within))
     Error.new("result does not satisfy the declared type", span: span, note: facts_note(m))
@@ -299,16 +308,40 @@ defmodule Vaisto.Refine do
   end
 
   defp failure_error(%VC{kind: :precondition, meta: %{about: :as_value} = m}, opts) do
-    requirement = Render.surface(m.conjunct, m.subst)
-    label = "`#{m.callee}` is used as a value here, so #{requirement} must hold for every argument `#{m.param}`"
+    # A parameter the parser named is shown by its refinement's own binder.
+    requirement = Render.surface(m.conjunct, if(generated_param?(m.param), do: %{}, else: m.subst))
+    label = "`#{m.callee}` is used as a value here, so #{requirement} must hold for every value of #{argument(m.param)}"
     Error.new("requirement not met", span: expr_span(m.def, m.expr, opts, label), hint: "call it directly, where its argument can be checked")
   end
 
   defp failure_error(%VC{kind: :precondition, meta: m}, opts) do
     requirement = Render.surface(m.conjunct, m.subst)
-    label = "`#{m.callee}` requires #{requirement} for its argument `#{m.param}`"
+    label = "`#{m.callee}` requires #{requirement} for #{argument(m.param)}"
     Error.new("requirement not met", span: arg_span(m, opts, label), note: facts_note(m))
   end
+
+  # A parameter by its name, or by its place when the parser named it: a signed
+  # multi-clause function's parameters are `arg 1`, `arg 2` ..., which no
+  # program can write.
+  defp argument(param) do
+    case to_string(param) do
+      "arg " <> n -> "its argument #{n}"
+      name -> "its argument `#{name}`"
+    end
+  end
+
+  defp generated_param?(param), do: String.starts_with?(to_string(param), "arg ")
+
+  # A refinement in a signed multi-clause function's signature names an
+  # earlier argument by its binder, which the parser turned into the argument's
+  # generated name; messages show the binder again.
+  defp binder_names(sigs) do
+    Map.new(sigs, fn {f, %Surface.Sig{params: params}} ->
+      {f, for({x, _base, {binder, _pred}} <- params, generated_param?(x), into: %{}, do: {x, Atom.to_string(binder)})}
+    end)
+  end
+
+  defp binder_names(f, opts), do: opts |> Keyword.get(:binder_names, %{}) |> Map.get(f, %{})
 
   defp contradiction_error(%VC{meta: m}, opts) do
     Error.new("this code can only run under contradictory facts",
@@ -322,7 +355,7 @@ defmodule Vaisto.Refine do
     label =
       case m do
         %{about: :precondition} -> "`#{m.callee}` requires #{Render.surface(m.conjunct, m.subst)}"
-        %{about: :result} -> "this result must satisfy #{Render.surface(m.conjunct, %{})}"
+        %{about: :result} -> "this result must satisfy #{Render.surface(m.conjunct, binder_names(m.def, opts))}"
         %{label: label} -> label
         _ -> "this requirement"
       end

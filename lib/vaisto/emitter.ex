@@ -35,6 +35,9 @@ defmodule Vaisto.Emitter do
   def to_elixir({:lit, :unit, _}), do: nil
 
   # List literal
+  # [h | t] as an expression
+  def to_elixir({:cons, head, tail, _type}), do: [{:|, [], [to_elixir(head), to_elixir(tail)]}]
+
   def to_elixir({:list, elements, _type}) do
     Enum.map(elements, &to_elixir/1)
   end
@@ -84,16 +87,23 @@ defmodule Vaisto.Emitter do
   # Match expression → Elixir case
   def to_elixir({:match, expr, clauses, _type}) do
     expr_ast = to_elixir(expr)
-    clause_asts = Enum.map(clauses, fn
-      {pattern, body, _body_type} ->
-        {:->, [], [[emit_pattern(pattern)], to_elixir(body)]}
 
-      # A guarded clause: a guard that crashes counts as false, as in Elixir.
-      {pattern, guard, body, _body_type} ->
-        {:->, [], [[{:when, [], [emit_pattern(pattern), to_elixir(guard)]}], to_elixir(body)]}
-    end)
+    clauses =
+      Enum.map(clauses, fn
+        {pattern, body, _body_type} -> {emit_pattern(pattern), :unguarded, to_elixir(body)}
+        {pattern, guard, body, _body_type} -> {emit_pattern(pattern), {:guarded, guard}, to_elixir(body)}
+      end)
 
-    {:case, [], [expr_ast, [do: clause_asts]]}
+    if Enum.all?(clauses, fn {_p, guard, _b} -> direct_guard?(guard) end) do
+      {:case, [], [expr_ast, [do: Enum.map(clauses, &direct_clause/1)]]}
+    else
+      subject = Macro.unique_var(:subject, __MODULE__)
+
+      quote do
+        unquote(subject) = unquote(expr_ast)
+        unquote(match_chain(subject, clauses, quote(do: :erlang.error({:case_clause, unquote(subject)}))))
+      end
+    end
   end
 
   # Raw tuple expression → Elixir tuple
@@ -192,11 +202,17 @@ defmodule Vaisto.Emitter do
   end
 
   # Comparison calls
-  def to_elixir({:call, op, [left, right], _type}) when op in [:==, :!=, :<, :>, :<=, :>=] do
+  # == and != are exact equality of representations (liquid-core.md §7, D25):
+  # Elixir's === and !==, as the Core Erlang backend's =:= and =/=.
+  def to_elixir({:call, :==, [left, right], _type}), do: {:===, [], [to_elixir(left), to_elixir(right)]}
+  def to_elixir({:call, :!=, [left, right], _type}), do: {:!==, [], [to_elixir(left), to_elixir(right)]}
+
+  def to_elixir({:call, op, [left, right], _type}) when op in [:<, :>, :<=, :>=] do
     {op, [], [to_elixir(left), to_elixir(right)]}
   end
 
-  # Field access: :erlang.element on a record, :maps.get otherwise, the same
+  # Field access: :erlang.element on a record, :erlang.map_get otherwise (a guard
+  # BIF, so it may stand in a guard), the same
   # calls as the Core Erlang backend (Shared.field_slot/2)
   def to_elixir({:field_access, record_expr, field, _field_type, _record_type}) do
     to_elixir({:field_access, record_expr, field, :any})
@@ -207,7 +223,7 @@ defmodule Vaisto.Emitter do
 
     case Shared.field_slot(record_expr, field) do
       {:element, tuple_index} -> quote do: :erlang.element(unquote(tuple_index), unquote(record_ast))
-      :map_key -> quote do: :maps.get(unquote(field), unquote(record_ast))
+      :map_key -> quote do: :erlang.map_get(unquote(field), unquote(record_ast))
     end
   end
 
@@ -446,11 +462,18 @@ defmodule Vaisto.Emitter do
   def to_elixir({:defn, name, params, body, _type, typed_guard}) do
     param_vars = Enum.map(params, &Macro.var(&1, nil))
     body_ast = to_elixir(body)
-    guard_ast = to_elixir(typed_guard)
 
-    quote do
-      def unquote(name)(unquote_splicing(param_vars)) when unquote(guard_ast) do
-        unquote(body_ast)
+    if direct_guard?({:guarded, typed_guard}) do
+      quote do
+        def unquote(name)(unquote_splicing(param_vars)) when unquote(to_elixir(typed_guard)) do
+          unquote(body_ast)
+        end
+      end
+    else
+      quote do
+        def unquote(name)(unquote_splicing(param_vars)) do
+          if unquote(guard_holds(typed_guard)), do: unquote(body_ast), else: :erlang.error(:function_clause)
+        end
       end
     end
   end
@@ -458,6 +481,26 @@ defmodule Vaisto.Emitter do
   # Multi-clause function definition → multiple Elixir def clauses
   # Clauses are now 4-tuples: {pattern, guard_or_nil, body, body_type}
   def to_elixir({:defn_multi, name, _arity, clauses, _type}) do
+    clauses_with_guards =
+      Enum.map(clauses, fn {pattern, guard, body, _body_type} ->
+        {emit_fn_pattern(pattern), if(is_nil(guard), do: :unguarded, else: {:guarded, guard}), to_elixir(body)}
+      end)
+
+    if Enum.all?(clauses_with_guards, fn {_p, guard, _b} -> direct_guard?(guard) end) do
+      defn_multi_clauses(name, clauses)
+    else
+      arg = Macro.unique_var(:arg, __MODULE__)
+
+      quote do
+        def unquote(name)(unquote(arg)) do
+          unquote(match_chain(arg, clauses_with_guards, quote(do: :erlang.error(:function_clause))))
+        end
+      end
+    end
+  end
+
+  # A typed multi-clause guard is nil when the clause has none.
+  defp defn_multi_clauses(name, clauses) do
     clause_defs = Enum.map(clauses, fn
       {pattern, nil, body, _body_type} ->
         pattern_ast = emit_fn_pattern(pattern)
@@ -544,12 +587,13 @@ defmodule Vaisto.Emitter do
   # Class call (6-tuple, unconstrained): built-in Eq/Show on primitives inline directly
   def to_elixir({:class_call, :Eq, :eq, concrete_type, [left, right], _type})
       when concrete_type in [:int, :float, :string, :bool, :atom] do
-    {:==, [], [to_elixir(left), to_elixir(right)]}
+    # Exact equality, as == is (liquid-core.md §7)
+    {:===, [], [to_elixir(left), to_elixir(right)]}
   end
 
   def to_elixir({:class_call, :Eq, :neq, concrete_type, [left, right], _type})
       when concrete_type in [:int, :float, :string, :bool, :atom] do
-    {:!=, [], [to_elixir(left), to_elixir(right)]}
+    {:!==, [], [to_elixir(left), to_elixir(right)]}
   end
 
   def to_elixir({:class_call, :Show, :show, :int, [arg], _type}) do
@@ -1176,10 +1220,14 @@ defmodule Vaisto.Emitter do
 
   defp emit_pattern({:lit, :atom, a}), do: a
   defp emit_pattern({:lit, :int, n}), do: n
+  defp emit_pattern({:lit, :float, f}), do: f
+  defp emit_pattern({:lit, :bool, b}), do: b
+  defp emit_pattern({:lit, :string, s}), do: s
   defp emit_pattern({:atom, a}), do: a  # Wrapped atom from parser
 
   # Empty list pattern: [] → []
   defp emit_pattern({:list_pattern, [], _type}), do: []
+  defp emit_pattern({:list_pattern, elements, _type}), do: Enum.map(elements, &emit_pattern/1)
   defp emit_pattern({:list, [], _type}), do: []
 
   # Cons pattern: [h | t] → [h | t]
@@ -1204,6 +1252,62 @@ defmodule Vaisto.Emitter do
   defp emit_pattern(:_), do: Macro.var(:_, nil)
   defp emit_pattern(a) when is_atom(a), do: a
   defp emit_pattern(n) when is_integer(n), do: n
+  defp emit_pattern(f) when is_float(f), do: f
+  defp emit_pattern({:string, s, _type}) when is_binary(s), do: s
+
+  # --- Guards (liquid-core.md §6.6) ---------------------------------------------
+
+  # Elixir has no `if` in a guard. A guard without one is a `when`; a clause
+  # whose guard has one tests it in its body, as an expression in a try, so
+  # that a guard that crashes counts as false, and falls through to the rest.
+  defp direct_guard?(:unguarded), do: true
+  defp direct_guard?({:guarded, guard}), do: not has_if?(guard)
+
+  defp has_if?({:if, _, _, _, _}), do: true
+  defp has_if?(t) when is_tuple(t), do: t |> Tuple.to_list() |> Enum.any?(&has_if?/1)
+  defp has_if?(l) when is_list(l), do: Enum.any?(l, &has_if?/1)
+  defp has_if?(_), do: false
+
+  defp guard_holds(guard) do
+    quote do
+      try do
+        unquote(to_elixir(guard)) === true
+      catch
+        _, _ -> false
+      end
+    end
+  end
+
+  # The clauses of a match, or of a multi-clause function, on the value of
+  # `subject`: {pattern_ast, :unguarded | {:guarded, typed_guard}, body_ast}.
+  # The clauses before the first whose guard cannot be a `when` are one case;
+  # that clause tests its guard in its body, and the clauses after it are a
+  # closure that its failing guard, or its failing pattern, calls. `no_match`
+  # is what happens when no clause matches.
+  defp match_chain(subject, clauses, no_match) do
+    {direct, rest} = Enum.split_while(clauses, fn {_p, guard, _b} -> direct_guard?(guard) end)
+    direct_asts = Enum.map(direct, &direct_clause/1)
+
+    case rest do
+      [] ->
+        {:case, [], [subject, [do: direct_asts ++ [{:->, [], [[Macro.var(:_, nil)], no_match]}]]]}
+
+      [{pattern_ast, {:guarded, guard}, body_ast} | later] ->
+        rest_fun = Macro.unique_var(:rest, __MODULE__)
+        continue = quote do: unquote(rest_fun).()
+        tested = {:->, [], [[pattern_ast], quote(do: if(unquote(guard_holds(guard)), do: unquote(body_ast), else: unquote(continue)))]}
+        otherwise = {:->, [], [[Macro.var(:_, nil)], continue]}
+        later_ast = if later == [], do: no_match, else: match_chain(subject, later, no_match)
+
+        quote do
+          unquote(rest_fun) = fn -> unquote(later_ast) end
+          unquote({:case, [], [subject, [do: direct_asts ++ [tested, otherwise]]]})
+        end
+    end
+  end
+
+  defp direct_clause({pattern_ast, :unguarded, body_ast}), do: {:->, [], [[pattern_ast], body_ast]}
+  defp direct_clause({pattern_ast, {:guarded, guard}, body_ast}), do: {:->, [], [[{:when, [], [pattern_ast, to_elixir(guard)]}], body_ast]}
 
   # case value do pattern -> body end: binds pattern in body only
   defp scoped_binding(pattern_ast, value_ast, body_ast) do
@@ -1237,6 +1341,9 @@ defmodule Vaisto.Emitter do
   defp emit_fn_pattern({:lit, :int, n}), do: n
   defp emit_fn_pattern({:lit, :atom, a}), do: a
   defp emit_fn_pattern({:lit, :bool, b}), do: b
+  defp emit_fn_pattern({:lit, :float, f}), do: f
+  defp emit_fn_pattern({:lit, :string, s}), do: s
+  defp emit_fn_pattern({:tuple_pattern, elements, _type}), do: {:{}, [], Enum.map(elements, &emit_fn_pattern/1)}
 
   # Untyped atoms (underscore, etc)
   # As-pattern in multi-clause function
@@ -1356,8 +1463,8 @@ defmodule Vaisto.Emitter do
   defp build_inline_constraint_dict(:Eq, t) when t in [:int, :float, :string, :bool, :atom] do
     x = Macro.var(:__eq_x, nil)
     y = Macro.var(:__eq_y, nil)
-    eq_fn = {:fn, [], [{:->, [], [[x, y], {:==, [], [x, y]}]}]}
-    neq_fn = {:fn, [], [{:->, [], [[x, y], {:!=, [], [x, y]}]}]}
+    eq_fn = {:fn, [], [{:->, [], [[x, y], {:===, [], [x, y]}]}]}
+    neq_fn = {:fn, [], [{:->, [], [[x, y], {:!==, [], [x, y]}]}]}
     {:{}, [], [eq_fn, neq_fn]}
   end
 

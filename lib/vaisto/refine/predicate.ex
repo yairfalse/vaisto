@@ -18,11 +18,21 @@ defmodule Vaisto.Refine.Predicate do
   @arith %{:+ => :add, :- => :sub, :* => :mul}
   @compare [:<, :<=, :>, :>=]
 
+  defp list_element_base?({:atom, t}), do: list_element_base?(t)
+  defp list_element_base?(t) when t in [:int, :bool, :float, :string], do: true
+  defp list_element_base?({:call, :List, [elem], _loc}), do: list_element_base?(elem)
+  defp list_element_base?(_), do: false
+
   @doc "The sort of a base type written in a refinement, or an error message (C18)."
   @spec sort_of_base(term()) :: {:ok, IR.sort()} | {:error, String.t()}
+  def sort_of_base({:atom, t}), do: sort_of_base(t)
   def sort_of_base(:int), do: {:ok, :int}
   def sort_of_base(:bool), do: {:ok, :bool}
-  def sort_of_base({:call, :List, [_elem], _loc}), do: {:ok, :list}
+  def sort_of_base({:call, :List, [elem], _loc}) do
+    # The bridge writes a refined list's type from its element type, which it
+    # knows for the built-in types only.
+    if list_element_base?(elem), do: {:ok, :list}, else: {:error, "refinements on a list of #{describe_type(elem)} are not supported yet: only lists of Int, Bool, Float, String or lists"}
+  end
   def sort_of_base(:float), do: {:error, "refinements on Float are not supported"}
   def sort_of_base(:string), do: {:error, "refinements on String are not supported"}
   def sort_of_base(type), do: {:error, "refinements on #{describe_type(type)} are not supported yet: only Int, Bool and List"}

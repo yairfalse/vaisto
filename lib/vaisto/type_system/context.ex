@@ -17,7 +17,8 @@ defmodule Vaisto.TypeSystem.Context do
     :row_counter,  # Next fresh row variable ID
     :subst,        # Current substitution map
     :env,          # Type environment: var_name -> type or type_scheme
-    constraints: []  # Accumulated type class constraints [{class, type}]
+    constraints: [],  # Accumulated type class constraints [{class, type}]
+    locals: %{}       # Names bound locally (parameters, lets, patterns): name -> true
   ]
 
   @doc """
@@ -28,7 +29,8 @@ defmodule Vaisto.TypeSystem.Context do
       counter: 0,
       row_counter: 0,
       subst: Core.empty_subst(),
-      env: env
+      env: env,
+      locals: env |> Map.get(:__local_vars__, MapSet.new()) |> Map.new(&{&1, true})
     }
   end
 
@@ -69,7 +71,7 @@ defmodule Vaisto.TypeSystem.Context do
   Extends the environment with a new binding.
   """
   def extend(%__MODULE__{env: env} = ctx, name, type) do
-    %{ctx | env: Map.put(env, name, type)}
+    %{ctx | env: Map.put(env, name, type), locals: Map.put(ctx.locals, name, true)}
   end
 
   @doc """

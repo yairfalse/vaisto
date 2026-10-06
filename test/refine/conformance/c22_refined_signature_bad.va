@@ -1,0 +1,7 @@
+; C22: a call that breaks the signature's refinement (RFC §4.4)
+; expect: errors
+; error: requirement not met | (> 0 0) | 0
+(defn pred (Fn {v :int | (> v 0)} {r :int | (>= r 0)})
+  [1 0]
+  [n (- n 1)])
+(defn main [] :int (pred 0))

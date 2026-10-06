@@ -412,6 +412,12 @@ defmodule Vaisto.Errors do
       Keyword.merge(opts, [hint: "missing: #{missing}"]))
   end
 
+  @doc "A match whose unguarded clauses miss a value, given as a pattern"
+  def non_exhaustive_match(witness, opts \\ []) do
+    Error.new("non-exhaustive pattern match",
+      Keyword.merge(opts, [hint: "no clause matches #{witness}"]))
+  end
+
   @doc "Non-exhaustive pattern match on result tuples"
   def non_exhaustive_result(missing_tags, opts \\ []) do
     missing_str = missing_tags |> Enum.map(&":#{&1}") |> Enum.join(", ")
@@ -419,6 +425,60 @@ defmodule Vaisto.Errors do
       Keyword.merge(opts, [
         note: "result-like match is not exhaustive",
         hint: "missing patterns for: #{missing_str}"
+      ])
+    )
+  end
+
+  @doc "A pattern binds the same name twice"
+  def pattern_binds_twice(name, opts \\ []) do
+    Error.new("`#{name}` is bound twice in one pattern",
+      Keyword.merge(opts, [
+        hint: "to compare two values, bind them apart and compare them in a guard: [x y :when (== x y) ...]"
+      ])
+    )
+  end
+
+  @doc "A declared type applied to the wrong number of type arguments"
+  def type_arity(name, expected, given, opts \\ []) do
+    Error.new("`#{name}` takes #{expected} type argument#{if expected == 1, do: "", else: "s"}, not #{given}", opts)
+  end
+
+  @doc "A name in a type that names no type"
+  def not_a_type(name, opts \\ []) do
+    shown = if is_atom(name), do: "`#{name}`", else: "this"
+
+    hint =
+      case name do
+        n when n in [:Int, :Float, :String, :Bool, :Atom, :Unit, :Any] -> "the built-in types are lowercase keywords, as in :#{n |> Atom.to_string() |> String.downcase()}"
+        _ -> "declare it with deftype, or write a type parameter as a lowercase name"
+      end
+
+    Error.new("#{shown} is not a type", Keyword.merge([hint: hint], opts))
+  end
+
+  @doc "A recursive type whose field applies it to other arguments than its own parameters"
+  def nonuniform_recursion(name, opts \\ []) do
+    Error.new("`#{name}` refers to itself with other type arguments than its own parameters",
+      Keyword.merge([note: "a recursive type's fields may name it only as it is declared, with its parameters in order"], opts))
+  end
+
+  @doc "A record type with a field of its own type"
+  def record_contains_itself(name, field, opts \\ []) do
+    Error.new("the record `#{name}` contains itself in its field `#{field}`",
+      Keyword.merge([note: "such a record has no finite value; use a sum type with a case that ends the recursion"], opts))
+  end
+
+  @doc "Mutually recursive type declarations"
+  def mutually_recursive_types(names, opts \\ []) do
+    Error.new("the types #{Enum.map_join(names, ", ", &"`#{&1}`")} refer to each other",
+      Keyword.merge([note: "the type checker supports a type that refers to itself, not types that refer to each other yet"], opts))
+  end
+
+  @doc "A guard uses a form a guard may not contain (liquid-core.md §6.6)"
+  def guard_not_safe(what, opts \\ []) do
+    Error.new("a guard may not contain #{what}",
+      Keyword.merge(opts, [
+        note: "a guard may use only variables, literals, field access, tuples, lists, constructors of sum types, if, and the primitives other than ++"
       ])
     )
   end

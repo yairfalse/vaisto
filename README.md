@@ -187,7 +187,8 @@ Fields can also be read with `(. p :x)`.
   (fold + 0 (map (fn [x] (* x x)) (filter (fn [x] (> x 2)) [1 2 3 4]))))   ; 25
 
 ; A multi-clause function: its signature, then one clause per case.
-; The signature's arity is how many patterns each clause has.
+; The signature's arity is how many patterns each clause has, and each
+; clause has one body: several expressions go in (do ...).
 (defn len (Fn (List :a) :int)
   [[] 0]
   [[h | t] (+ 1 (len t))])
@@ -196,7 +197,9 @@ Fields can also be read with `(. p :x)`.
   [0 y y]
   [x y (+ x y)])
 
-; A clause may have a guard, in match as in a multi-clause function.
+; A clause may have a guard, in match as in a multi-clause function. A guard
+; may use variables, literals, primitives, fields, tuples, lists, constructors
+; and if, and a guard that crashes counts as false.
 (defn sign [n :int] :atom
   (match n
     [x :when (< x 0) :negative]
@@ -613,10 +616,8 @@ the defect IDs of the [Liquid Vaisto RFC](docs/design/liquid-vaisto-rfc.md)
 (§1.12, with reproductions in Appendix A) and of
 [`liquid-core.md`](docs/design/liquid-core.md) §12.
 
-**The backends disagree** on some programs:
-- `==` is exact equality on one backend and numeric equality on the other
-  (D25);
-- a failed match crashes with a different reason on each backend (D26).
+**The backends disagree** on the reason a failed match crashes with (D26),
+though both crash.
 
 **The type checker accepts some ill-typed programs.** Among them:
 - a function declared `:int` can return a float or a string (D4, D16);
@@ -630,12 +631,19 @@ the defect IDs of the [Liquid Vaisto RFC](docs/design/liquid-vaisto-rfc.md)
 **Modules.** Cross-module calls are not type-checked yet. `.vsi` interfaces are
 written but not used for typing imports (D9).
 
-**Records.** A function parameter annotated with a record or sum type does not
-match values of that type at call sites (D1, D2). Row-polymorphic field access
-on a record crashes at run time (D24).
+**Records.** Row-polymorphic field access on a record crashes at run time
+(D24).
+
+**Type variables.** HM reads a type variable in a signature, such as `:a`, as
+`Any`; the elaborator gives it its meaning.
+
+**Recursive types.** A type may refer to itself with its own parameters, as
+`(deftype Tree (Leaf) (Node (Tree :a) :a (Tree :a)))` does. Types that refer
+to each other are not supported by the type checker yet.
 
 **Guards.** `receive` clauses have no guards yet; `[x :when g body]` there is
-a parse error (D27). `match` clauses and multi-clause functions take them.
+a parse error (D27). `match` clauses and multi-clause functions take them, and
+the checkers, both backends and Core Lint agree on what a guard may contain.
 
 **Not there yet:** receive with a timeout, binary syntax, decoding values
 from `Dyn`, refinements beyond `Int`, `Bool` and `List` on single-clause

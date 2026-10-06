@@ -270,6 +270,19 @@ defmodule Vaisto.LSP.HoverTest do
   end
 
   describe "get_hover/4" do
+    test "returns the type of a guarded definition" do
+      source = "(defn g [x :int :when (> x 0)] :int x)\n(defn main [] :int (g 1))"
+      assert {:ok, hover} = Hover.get_hover(source, 1, 7)
+      assert hover.contents =~ "(Int) -> Int"
+    end
+
+    test "returns the type of a variable bound in any clause of a match, not only the first" do
+      source = "(defn f [n :int] :int (match n [0 1] [k (+ k 1)]))"
+      assert {:ok, hover} = Hover.get_hover(source, 1, 44)
+      assert hover.contents =~ "Int"
+      assert hover.contents =~ "`k`"
+    end
+
     test "returns type for variable in let binding" do
       source = "(let [x 42] x)"
       # Hover on the 'x' at the end (position 13)

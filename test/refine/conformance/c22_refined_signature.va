@@ -1,0 +1,7 @@
+; C22: refined types in a multi-clause function's signature (RFC §4.4)
+; expect: compiles
+; main: 4
+(defn pred (Fn {v :int | (> v 0)} {r :int | (>= r 0)})
+  [1 0]
+  [n (- n 1)])
+(defn main [] :int (pred 5))

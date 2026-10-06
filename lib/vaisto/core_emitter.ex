@@ -259,7 +259,7 @@ defmodule Vaisto.CoreEmitter do
         param_vars = Enum.map(params, &:cerl.c_var/1)
         local_vars = MapSet.new(params)
         body_core = to_core_expr(body, user_fns, local_vars)
-        guard_core = to_core_expr(typed_guard, user_fns, local_vars)
+        guard_core = core_guard(to_core_expr(typed_guard, user_fns, local_vars))
         # case nil of _ when Guard -> Body; _ -> erlang:error(function_clause) end
         # A clause guard, not a case on the guard's value, so a guard that crashes
         # counts as false (liquid-core.md §6.6), as on the Elixir backend.
@@ -292,11 +292,7 @@ defmodule Vaisto.CoreEmitter do
           pattern_vars = Shared.extract_pattern_vars(pattern)
           local_vars = MapSet.new(pattern_vars)
           body_core = to_core_expr(body, user_fns, local_vars)
-          guard_core = if guard do
-            to_core_expr(guard, user_fns, local_vars)
-          else
-            :cerl.c_atom(true)
-          end
+          guard_core = if is_nil(guard), do: :cerl.c_atom(true), else: core_guard(to_core_expr(guard, user_fns, local_vars))
           :cerl.c_clause([pattern_core], guard_core, body_core)
         end)
 
@@ -473,7 +469,7 @@ defmodule Vaisto.CoreEmitter do
   defp to_core_expr_with_state({:call, op, [left, right], _type}, state_var) when op in [:==, :!=, :<, :>, :<=, :>=] do
     :cerl.c_call(
       :cerl.c_atom(:erlang),
-      :cerl.c_atom(op),
+      :cerl.c_atom(erlang_comparison(op)),
       [to_core_expr_with_state(left, state_var), to_core_expr_with_state(right, state_var)]
     )
   end
@@ -586,19 +582,21 @@ defmodule Vaisto.CoreEmitter do
   defp to_core_expr({:match, expr, clauses, _type}, user_fns, local_vars) do
     expr_core = to_core_expr(expr, user_fns, local_vars)
     clause_cores = Enum.map(clauses, fn clause ->
-      {pattern, guard, body} =
-        case clause do
-          {pattern, body, _body_type} -> {pattern, nil, body}
-          {pattern, guard, body, _body_type} -> {pattern, guard, body}
-        end
-
+      # A typed clause is {pattern, body, type}, or {pattern, guard, body, type}.
+      pattern = elem(clause, 0)
+      body = elem(clause, tuple_size(clause) - 2)
       pattern_core = to_core_pattern(pattern)
       # Track pattern variables in the clause body
       pattern_vars = Shared.extract_pattern_vars(pattern)
       clause_local_vars = MapSet.union(local_vars, MapSet.new(pattern_vars))
       body_core = to_core_expr(body, user_fns, clause_local_vars)
-      # A clause guard, so a guard that crashes counts as false (liquid-core.md §6.6).
-      guard_core = if guard, do: to_core_expr(guard, user_fns, clause_local_vars), else: :cerl.c_atom(true)
+
+      guard_core =
+        case clause do
+          {_pattern, _body, _type} -> :cerl.c_atom(true)
+          {_pattern, guard, _body, _type} -> core_guard(to_core_expr(guard, user_fns, clause_local_vars))
+        end
+
       :cerl.c_clause([pattern_core], guard_core, body_core)
     end)
     :cerl.c_case(expr_core, clause_cores)
@@ -834,19 +832,19 @@ defmodule Vaisto.CoreEmitter do
 
   # Comparison operators
   defp to_core_expr({:call, op, [left, right], _type}, user_fns, local_vars) when op in [:==, :!=, :<, :>, :<=, :>=] do
-    erlang_op = case op do
-      :== -> :"=:="
-      :!= -> :"/="
-      :<= -> :"=<"   # Erlang uses =< for less-than-or-equal
-      _ -> op        # <, >, >= are same in Erlang
-    end
-
     :cerl.c_call(
       :cerl.c_atom(:erlang),
-      :cerl.c_atom(erlang_op),
+      :cerl.c_atom(erlang_comparison(op)),
       [to_core_expr(left, user_fns, local_vars), to_core_expr(right, user_fns, local_vars)]
     )
   end
+
+  # Exact equality of representations (liquid-core.md §7): 1 =/= 1.0, 0.0 =/= -0.0.
+  # Erlang writes less-than-or-equal =<; <, > and >= are the same.
+  defp erlang_comparison(:==), do: :"=:="
+  defp erlang_comparison(:!=), do: :"=/="
+  defp erlang_comparison(:<=), do: :"=<"
+  defp erlang_comparison(op), do: op
 
   # --- List operations ---
 
@@ -1186,10 +1184,11 @@ defmodule Vaisto.CoreEmitter do
           [:cerl.c_int(tuple_index), record_core]
         )
 
+      # erlang:map_get, a guard BIF, so that it may stand in a guard
       :map_key ->
         :cerl.c_call(
-          :cerl.c_atom(:maps),
-          :cerl.c_atom(:get),
+          :cerl.c_atom(:erlang),
+          :cerl.c_atom(:map_get),
           [:cerl.c_atom(field), record_core]
         )
     end
@@ -1320,6 +1319,16 @@ defmodule Vaisto.CoreEmitter do
     :cerl.c_call(:cerl.c_atom(:erlang), :cerl.c_atom(:iolist_to_binary), [:cerl.c_cons(l, :cerl.c_cons(r, :cerl.c_nil()))])
   end
 
+  # A clause guard counts as false when it crashes (liquid-core.md §6.6). The
+  # BEAM gives that for free only to a guard BIF called directly: a crash in a
+  # branch of the case that and, or and if lower to is a real exception. So the
+  # guard is wrapped as Erlang wraps its own, in the one try core_lint accepts
+  # in a guard, which the compiler turns into the guard's fail label.
+  defp core_guard(guard) do
+    value = :cerl.c_var(:_guard_value)
+    :cerl.c_try(guard, [value], value, [:cerl.c_var(:_guard_class), :cerl.c_var(:_guard_reason)], :cerl.c_atom(false))
+  end
+
   # (and a b) → case a of true -> b; false -> false end
   # (or a b)  → case a of true -> true; false -> b end
   # The right operand runs only when the left does not decide (liquid-core.md
@@ -1399,6 +1408,12 @@ defmodule Vaisto.CoreEmitter do
     :cerl.c_atom(value)
   end
 
+  # The other literal patterns, as Infer types them in a lambda
+  defp to_core_pattern({:lit, :int, n}), do: :cerl.c_int(n)
+  defp to_core_pattern({:lit, :float, f}), do: :cerl.c_float(f)
+  defp to_core_pattern({:lit, :bool, b}), do: :cerl.c_atom(b)
+  defp to_core_pattern({:lit, :string, s}), do: to_core_pattern({:string, s, :string})
+
   # Tuple pattern: {:tuple_pattern, elements, type}
   defp to_core_pattern({:tuple_pattern, elements, _type}) do
     pattern_elements = Enum.map(elements, &to_core_pattern/1)
@@ -1431,6 +1446,7 @@ defmodule Vaisto.CoreEmitter do
   end
 
   defp to_core_pattern(n) when is_integer(n), do: :cerl.c_int(n)
+  defp to_core_pattern(f) when is_float(f), do: :cerl.c_float(f)
 
   # Wildcard pattern - generate a unique variable name for each wildcard
   # Core Erlang doesn't allow multiple _ variables in the same pattern
@@ -1487,6 +1503,9 @@ defmodule Vaisto.CoreEmitter do
   defp to_core_multi_pattern({:lit, :int, n}), do: :cerl.c_int(n)
   defp to_core_multi_pattern({:lit, :atom, a}), do: :cerl.c_atom(a)
   defp to_core_multi_pattern({:lit, :bool, b}), do: :cerl.c_atom(b)
+  defp to_core_multi_pattern({:lit, :float, f}), do: :cerl.c_float(f)
+  defp to_core_multi_pattern({:lit, :string, s}), do: to_core_pattern({:string, s, :string})
+  defp to_core_multi_pattern({:tuple_pattern, elements, _type}), do: :cerl.c_tuple(Enum.map(elements, &to_core_multi_pattern/1))
 
   # Underscore (wildcard) - generate unique variable name
   defp to_core_multi_pattern(:_) do

@@ -197,15 +197,19 @@ Typed AST shapes:
 (defn add [x :int y :int] :int (+ x y))
 (defn take [n :int xs] ...)          ; n is :int, xs is :any
 
-; Multi-clause functions: the (Fn ...) signature, then one clause per case. The
-; parser turns this into a defn with params `arg 1`.. and a match on them.
+; Multi-clause functions: the (Fn ...) signature, then one clause per case. A
+; clause is as many patterns as the signature has arguments, an optional
+; :when guard, and one body ((do ...) for several). The parser turns this into
+; a defn with params `arg 1`.. and a match on them.
 (defn len (Fn (List :a) :int)
   [[] 0]
   [[h | t] (+ 1 (len t))])
 (defn add (Fn :int :int :int) [0 y y] [x y (+ x y)])   ; arity from the signature
 ; Without a signature, (defn len [[] 0] ...) is defn_multi: arity 1, Any -> Any.
 
-; Guards in match clauses (D27): a guard that crashes counts as false
+; Guards in match clauses (D27): a guard that crashes counts as false. A guard
+; is guard-safe (liquid-core.md §6.6): variables, literals, primitives but ++,
+; field access, tuples, lists, sum constructors and if; no calls, lets or records.
 (match n [x :when (< x 0) :neg] [_ :non-neg])
 
 ; Algebraic data types
@@ -260,11 +264,7 @@ Typed AST shapes:
 - **Typed PIDs** — `spawn` returns `(Pid ProcessName)`, `!` validates message types
 - **Row polymorphism** — functions can require records with *at least* certain fields
 - **Exhaustiveness checking** — match on sum types and booleans must cover all variants
-- **Two backends** — Core Erlang (`:core`) and Elixir (`:elixir`), tested for parity via `core_backend_parity_test.exs`. The suite misses known divergences:
-  - `and`/`or` are strict on `:core` and short-circuit on `:elixir`;
-  - guarded `defn` fails to compile on `:core`;
-  - record field access crashes on `:elixir`;
-  - `let` bindings leak on `:elixir`.
+- **Two backends** — Core Erlang (`:core`) and Elixir (`:elixir`), tested for parity via `core_backend_parity_test.exs`, and against the reference evaluator by `Vaisto.Liquid.Harness`. They agree on every program the harness corpus has (`==` is exact on both since D25 was fixed); they crash with different reasons on a failed match (D26).
 
   When touching an emitter, run end-to-end tests on both backends.
 
@@ -276,12 +276,14 @@ Typed AST shapes:
 - Unknown qualified calls silently return `:any` instead of erroring
 - Multi-clause functions without a signature (`defn_multi`) hardcode arity=1 and are typed Any -> Any; with an `(Fn ...)` signature they take any arity
 - No receive-with-timeout, no binary/bitstring syntax
-- Record/sum annotations on `defn` parameters do not resolve at call sites: `[p :Point]` gives "expected `Point`, found `Point`". Existing tests only type-check such definitions and never call them.
+- Types that refer to each other are an error in HM; a type that refers to itself with its own parameters is fine.
+- Found by review, not fixed yet: on `:elixir` a function that refers to a top-level `(def ...)` value does not compile; an immediately applied lambda, `((fn [x] x) 1)`, is "unknown function"; on `:core` a `match` with no matching clause is not caught by an enclosing `try`.
+- A type variable in a signature (`:a`) reads as Any in HM. The elaborator gives it its meaning, but refinement checking refuses a module that calls a polymorphic signed function at a concrete type (Core Lint: "expected (List Dyn), found (List Int)").
 - `receive` clauses have no guards: `[x :when g body]` there is a parse error (D27). `match` clauses and multi-clause `defn` take guards.
 - Lambda parameters cannot be annotated: `(fn [x :int] x)` is a two-parameter lambda.
 - `(deftype opaque ...)` and `(deftype T p [...])` are silently misparsed as records.
 - Row-polymorphic field access type-checks but crashes at runtime on both backends when given a record.
-- The checker accepts some ill-typed programs with no `:any` in the source (leaked `let` scope, a declared return type checked without the body's substitution, ignored sum-constructor field types). The full list with reproductions is in the Liquid Vaisto RFC, §1.12 and Appendix A.
+- The checker accepts some ill-typed programs with no `:any` in the source (a declared return type checked without the body's substitution, D4/D16; arithmetic on an unannotated parameter, D17). The full list with reproductions is in the Liquid Vaisto RFC, §1.12 and Appendix A.
 
 ### Error Handling
 - Parser **raises** on syntax errors (wrap with `Compilation.parse/2` for `{:error, ...}`)

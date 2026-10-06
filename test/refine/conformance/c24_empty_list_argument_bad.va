@@ -1,0 +1,5 @@
+; C24: the empty list is a (List Int) where one is needed, and has length 0 (RFC §14)
+; expect: errors
+; error: requirement not met | (> (length []) 0) | []
+(defn first [xs {v (List :int) | (> (length v) 0)}] :int (head xs))
+(defn main [] :int (first []))

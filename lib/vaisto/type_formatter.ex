@@ -72,6 +72,9 @@ defmodule Vaisto.TypeFormatter do
   # Sum types
   def format({:sum, name, _variants}), do: "#{name}"
 
+  # A recursive type's field that names the type itself
+  def format({:rec, name}), do: "#{name}"
+
   # Typed PIDs
   def format({:pid, name, _msgs}), do: "Pid(#{name})"
 

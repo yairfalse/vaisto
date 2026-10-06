@@ -205,7 +205,9 @@ defmodule Vaisto.TypeSystemRedesignTest do
     test "mixed comparisons" do
       assert {:ok, true} = Runner.run("(< 1 2.0)")
       assert {:ok, true} = Runner.run("(> 2.5 2)")
-      assert {:ok, true} = Runner.run("(== 5 5.0)")
+      # == is exact equality of representations (liquid-core.md §7, D25)
+      assert {:ok, false} = Runner.run("(== 5 5.0)")
+      assert {:ok, true} = Runner.run("(== 5.0 5.0)")
     end
   end
 
