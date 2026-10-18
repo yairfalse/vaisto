@@ -5,13 +5,13 @@
 (import Std.List)
 
 ; Count lines in a file
-(defn count-lines [path]
+(defn count-lines [path :string] (Result :int :dyn)
   (match (Std.File/read-lines path)
     [(Ok lines) (Ok (Std.List/length lines))]
     [(Err e) (Err e)]))
 
 ; Main: count lines in this source file
-(defn main []
+(defn main [] :int
   (match (count-lines "examples/LineCount.va")
     [(Ok n) (do (println (str "Lines: " (str n))) n)]
     [(Err e) (do (println "Error reading file") 0)]))

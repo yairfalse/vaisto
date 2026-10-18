@@ -7,7 +7,7 @@
   :get state)
 
 ; A logger process - accepts :log messages
-(process logger []
+(process logger (the (List :string) [])
   :log state)
 
 ; This should TYPE CHECK:

@@ -180,7 +180,7 @@ defmodule Vaisto.Errors do
 
   @doc "Occurs check failure (infinite type)"
   def occurs_check_error(id, type, opts \\ []) do
-    type_str = Vaisto.TypeSystem.Core.format_type(type)
+    type_str = Vaisto.TypeFormatter.format(type)
     Error.new("infinite type",
       Keyword.merge(opts, [
         note: "type variable t#{id} occurs in #{type_str}"
@@ -190,7 +190,7 @@ defmodule Vaisto.Errors do
 
   @doc "Row occurs check failure (infinite row type)"
   def row_occurs_check_error(id, type, opts \\ []) do
-    type_str = Vaisto.TypeSystem.Core.format_type(type)
+    type_str = Vaisto.TypeFormatter.format(type)
     Error.new("infinite row type",
       Keyword.merge(opts, [
         note: "row variable r#{id} occurs in #{type_str}"
@@ -257,15 +257,15 @@ defmodule Vaisto.Errors do
       missing_or_mistyped_fields
       |> Enum.map(fn
         {:missing, field, expected_type} ->
-          "missing field: #{field} : #{Vaisto.TypeSystem.Core.format_type(expected_type)}"
+          "missing field: #{field} : #{Vaisto.TypeFormatter.format(expected_type)}"
 
         {:mistyped, field, expected_type, actual_type} ->
-          "field `#{field}` has type #{Vaisto.TypeSystem.Core.format_type(actual_type)}, expected #{Vaisto.TypeSystem.Core.format_type(expected_type)}"
+          "field `#{field}` has type #{Vaisto.TypeFormatter.format(actual_type)}, expected #{Vaisto.TypeFormatter.format(expected_type)}"
       end)
 
     note =
       [
-        "prompt `#{prompt_name}` output #{Vaisto.TypeSystem.Core.format_type(prompt_output_type)} does not satisfy extract target #{Vaisto.TypeSystem.Core.format_type(extract_target)}"
+        "prompt `#{prompt_name}` output #{Vaisto.TypeFormatter.format(prompt_output_type)} does not satisfy extract target #{Vaisto.TypeFormatter.format(extract_target)}"
         | detail_lines
       ]
       |> Enum.join("\n  note: ")
@@ -705,14 +705,10 @@ defmodule Vaisto.Errors do
     Error.new("BEAM compilation failed", Keyword.merge(opts, [note: detail]))
   end
 
-  @doc "Unknown backend specified"
-  def unknown_backend(backend, opts \\ []) do
-    Error.new("unknown backend",
-      Keyword.merge(opts, [
-        note: "#{inspect(backend)} is not valid",
-        hint: "use :core or :elixir"
-      ])
-    )
+  @doc "The retired backend selector cannot select a fallback compiler."
+  def backend_selection_removed(opts \\ []) do
+    Error.new("backend selection has been removed",
+      Keyword.merge([hint: "compilation uses verified Liquid Core and native BEAM lowering"], opts))
   end
 
   # ============================================================================

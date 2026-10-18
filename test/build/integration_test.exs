@@ -50,7 +50,7 @@ defmodule Vaisto.Build.IntegrationTest do
       source = """
       (ns WithADT)
       (deftype Result (Ok v) (Err e))
-      (defn wrap [x] (Ok x))
+      (defn wrap [x :a] (Result :a :err) (Ok x))
       """
       path = Path.join(src_dir, "WithADT.va")
       File.write!(path, source)
@@ -70,15 +70,13 @@ defmodule Vaisto.Build.IntegrationTest do
       assert {:error, _reason} = Compiler.compile(path, %{}, output_dir: build_dir)
     end
 
-    test "raises error for parse errors", %{src_dir: src_dir, build_dir: build_dir} do
+    test "returns a structured error for parse errors", %{src_dir: src_dir, build_dir: build_dir} do
       source = "(defn incomplete [x"
       path = Path.join(src_dir, "BadParse.va")
       File.write!(path, source)
 
-      # Parser raises RuntimeError on parse failure
-      assert_raise RuntimeError, fn ->
-        Compiler.compile(path, %{}, output_dir: build_dir)
-      end
+      assert {:error, error} = Compiler.compile(path, %{}, output_dir: build_dir)
+      assert error =~ "Unclosed"
     end
   end
 
@@ -204,8 +202,8 @@ defmodule Vaisto.Build.IntegrationTest do
 
       source = """
       (ns WithPrelude)
-      (defn wrap-ok [x] (Ok x))
-      (defn main [] (wrap-ok 42))
+      (defn wrap-ok [x :a] (Result :a :err) (Ok x))
+      (defn main [] (Result :int :string) (wrap-ok 42))
       """
       path = Path.join(src_dir, "WithPrelude.va")
       File.write!(path, source)

@@ -1,7 +1,7 @@
 defmodule Vaisto.LanguageFeaturesBatch2Test do
   use ExUnit.Case, async: true
 
-  alias Vaisto.TypeChecker
+  import Vaisto.TestHelpers, only: [check_type: 1]
   alias Vaisto.Parser
   alias Vaisto.Runner
 
@@ -53,13 +53,13 @@ defmodule Vaisto.LanguageFeaturesBatch2Test do
 
   describe "string interpolation type checking" do
     test "interpolated string has type :string" do
-      ast = Parser.parse(~S|(let [x 42] "value: #{x}")|)
-      assert {:ok, :string, _} = TypeChecker.check(ast)
+      result = check_type(~S|(let [x 42] "value: #{x}")|)
+      assert {:ok, :String} = result
     end
 
     test "expression interpolation type checks" do
-      ast = Parser.parse(~S|"#{(+ 1 2)}"|)
-      assert {:ok, :string, _} = TypeChecker.check(ast)
+      result = check_type(~S|"#{(+ 1 2)}"|)
+      assert {:ok, :String} = result
     end
   end
 
@@ -123,20 +123,20 @@ defmodule Vaisto.LanguageFeaturesBatch2Test do
 
   describe "for comprehension type checking" do
     test "basic for returns list" do
-      ast = Parser.parse("(let [xs (list 1 2 3)] (for [x xs] (* x 2)))")
-      assert {:ok, {:list, :int}, _} = TypeChecker.check(ast)
+      result = check_type("(let [xs (list 1 2 3)] (for [x xs] (* x 2)))")
+      assert {:ok, [:List, :Int]} = result
     end
 
     test "for with :when returns list" do
-      ast = Parser.parse("(let [xs (list 1 2 3 4)] (for [x xs :when (> x 2)] (* x 2)))")
-      assert {:ok, {:list, :int}, _} = TypeChecker.check(ast)
+      result = check_type("(let [xs (list 1 2 3 4)] (for [x xs :when (> x 2)] (* x 2)))")
+      assert {:ok, [:List, :Int]} = result
     end
   end
 
   describe "for comprehension e2e" do
     test "basic map" do
       {:ok, mod} = Runner.compile_and_load(
-        "(defn main [] (for [x (list 1 2 3)] (* x 2)))",
+        "(defn main [] (List :int) (for [x (list 1 2 3)] (* x 2)))",
         :ForBasic
       )
       assert Runner.call(mod, :main) == [2, 4, 6]
@@ -144,7 +144,7 @@ defmodule Vaisto.LanguageFeaturesBatch2Test do
 
     test "with :when filter" do
       {:ok, mod} = Runner.compile_and_load(
-        "(defn main [] (for [x (list 1 2 3 4) :when (> x 2)] (* x 2)))",
+        "(defn main [] (List :int) (for [x (list 1 2 3 4) :when (> x 2)] (* x 2)))",
         :ForWhen
       )
       assert Runner.call(mod, :main) == [6, 8]
@@ -177,7 +177,7 @@ defmodule Vaisto.LanguageFeaturesBatch2Test do
   describe "thread-last e2e" do
     test "filter then map" do
       {:ok, mod} = Runner.compile_and_load(
-        "(defn main [] (->> (list 1 2 3 4) (filter (fn [x] (> x 2))) (map (fn [x] (* x 2)))))",
+        "(defn main [] (List :int) (->> (list 1 2 3 4) (filter (fn [x] (> x 2))) (map (fn [x] (* x 2)))))",
         :ThreadLastFilterMap
       )
       assert Runner.call(mod, :main) == [6, 8]

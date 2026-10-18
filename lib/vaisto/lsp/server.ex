@@ -53,6 +53,8 @@ defmodule Vaisto.LSP.Server do
 
     # Start reading from input
     if input == :stdio do
+      # LSP Content-Length counts UTF-8 bytes, not decoded characters.
+      :ok = :io.setopts(:standard_io, encoding: :latin1)
       server = self()
       spawn_link(fn -> read_loop(server) end)
     end
@@ -135,10 +137,11 @@ defmodule Vaisto.LSP.Server do
   end
 
   defp read_content(length) do
-    case IO.read(:stdio, length) do
+    case IO.binread(:stdio, length) do
       :eof -> :eof
       {:error, reason} -> {:error, reason}
-      content when is_binary(content) -> {:ok, content}
+      content when is_binary(content) and byte_size(content) == length -> {:ok, content}
+      content when is_binary(content) -> {:error, :truncated_message}
     end
   end
 

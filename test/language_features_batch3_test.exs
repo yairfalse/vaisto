@@ -1,7 +1,7 @@
 defmodule Vaisto.LanguageFeaturesBatch3Test do
   use ExUnit.Case, async: true
 
-  alias Vaisto.TypeChecker
+  import Vaisto.TestHelpers, only: [check_type: 1]
   alias Vaisto.Parser
   alias Vaisto.Runner
 
@@ -42,21 +42,21 @@ defmodule Vaisto.LanguageFeaturesBatch3Test do
             ys (list 10 20)]
         (for [x xs y ys] (+ x y)))
       """
-      ast = Parser.parse(code)
-      assert {:ok, {:list, :int}, _} = TypeChecker.check(ast)
+      result = check_type(code)
+      assert {:ok, [:List, :Int]} = result
     end
 
     test "single binding backward compat" do
       code = "(for [x (list 1 2 3)] (+ x 1))"
-      ast = Parser.parse(code)
-      assert {:ok, {:list, :int}, _} = TypeChecker.check(ast)
+      result = check_type(code)
+      assert {:ok, [:List, :Int]} = result
     end
   end
 
   describe "multi-binding for e2e" do
     test "two bindings cartesian product" do
       {:ok, mod} = Runner.compile_and_load(
-        "(defn main [] (for [x (list 1 2) y (list 10 20)] (+ x y)))",
+        "(defn main [] (List :int) (for [x (list 1 2) y (list 10 20)] (+ x y)))",
         :ForMulti1
       )
       assert Runner.call(mod, :main) == [11, 21, 12, 22]
@@ -64,7 +64,7 @@ defmodule Vaisto.LanguageFeaturesBatch3Test do
 
     test "two bindings with :when filter" do
       {:ok, mod} = Runner.compile_and_load(
-        "(defn main [] (for [x (list 1 2 3) y (list 1 2 3) :when (< x y)] (list x y)))",
+        "(defn main [] (List (List :int)) (for [x (list 1 2 3) y (list 1 2 3) :when (< x y)] (list x y)))",
         :ForMultiWhen
       )
       assert Runner.call(mod, :main) == [[1, 2], [1, 3], [2, 3]]
@@ -72,7 +72,7 @@ defmodule Vaisto.LanguageFeaturesBatch3Test do
 
     test "three bindings" do
       {:ok, mod} = Runner.compile_and_load(
-        "(defn main [] (for [a (list 1 2) b (list 10 20) c (list 100)] (+ a (+ b c))))",
+        "(defn main [] (List :int) (for [a (list 1 2) b (list 10 20) c (list 100)] (+ a (+ b c))))",
         :ForMulti3
       )
       assert Runner.call(mod, :main) == [111, 121, 112, 122]
@@ -80,7 +80,7 @@ defmodule Vaisto.LanguageFeaturesBatch3Test do
 
     test "single binding still works e2e" do
       {:ok, mod} = Runner.compile_and_load(
-        "(defn main [] (for [x (list 1 2 3)] (* x x)))",
+        "(defn main [] (List :int) (for [x (list 1 2 3)] (* x x)))",
         :ForSingle
       )
       assert Runner.call(mod, :main) == [1, 4, 9]
@@ -94,7 +94,7 @@ defmodule Vaisto.LanguageFeaturesBatch3Test do
   describe "let destructuring e2e" do
     test "sum type variant destructuring" do
       {:ok, mod} = Runner.compile_and_load("""
-      (deftype Result (Ok v) (Err e))
+      (deftype Result (Ok :int))
       (defn main [] :int
         (let [(Ok v) (Ok 42)] v))
       """, :LetDestrSum)
@@ -141,14 +141,14 @@ defmodule Vaisto.LanguageFeaturesBatch3Test do
   describe "guarded defn type checking" do
     test "guard must return bool" do
       code = "(defn bad [x :int :when (+ x 1)] :int x)"
-      ast = Parser.parse(code)
-      assert {:error, _} = TypeChecker.check(ast)
+      result = check_type(code)
+      assert {:error, _} = result
     end
 
     test "valid guard type checks" do
       code = "(defn pos [x :int :when (> x 0)] :int x)"
-      ast = Parser.parse(code)
-      assert {:ok, {:fn, [:int], :int}, _} = TypeChecker.check(ast)
+      result = check_type(code)
+      assert {:ok, [:->, [:Int], _, :Int]} = result
     end
   end
 
@@ -166,14 +166,12 @@ defmodule Vaisto.LanguageFeaturesBatch3Test do
       (defn negate [x :int :when (< x 0)] :int (- 0 x))
       (defn main [] :int (negate 5))
       """, :GuardFail)
-      assert_raise FunctionClauseError, fn ->
-        Runner.call(mod, :main)
-      end
+      assert {:crash, :no_match} = Vaisto.Liquid.Runtime.run(mod, :main, [])
     end
 
     test "multi-clause with guards" do
       {:ok, mod} = Runner.compile_and_load("""
-      (defn classify
+      (defn classify (Fn :int :atom)
         [x :when (< x 0) :negative]
         [x :when (> x 0) :positive]
         [x :zero])
@@ -184,7 +182,7 @@ defmodule Vaisto.LanguageFeaturesBatch3Test do
 
     test "multi-clause guards dispatch correctly" do
       {:ok, mod} = Runner.compile_and_load("""
-      (defn classify
+      (defn classify (Fn :int :atom)
         [x :when (< x 0) :negative]
         [x :when (> x 0) :positive]
         [x :zero])
@@ -195,7 +193,7 @@ defmodule Vaisto.LanguageFeaturesBatch3Test do
 
     test "multi-clause guards with positive" do
       {:ok, mod} = Runner.compile_and_load("""
-      (defn classify
+      (defn classify (Fn :int :atom)
         [x :when (< x 0) :negative]
         [x :when (> x 0) :positive]
         [x :zero])

@@ -168,11 +168,11 @@
     {
       "id": "POS-018",
       "category": "positive",
-      "description": "Eval integer division",
-      "command": ["--eval", "(/ 10 2)"],
+      "description": "Eval floating-point division",
+      "command": ["--eval", "(/ 10.0 2.0)"],
       "expect_exit": 0,
       "expect_stdout_contains": "5",
-      "spec_source": "CLAUDE.md#Language-Features (`(try (/ 1 0) [catch ...])` shows `/` is a language operator)"
+      "spec_source": "CLAUDE.md#Language-Features (`(try (div 1 0) [catch ...])` shows `/` is a language operator)"
     },
     {
       "id": "POS-019",
@@ -338,7 +338,7 @@
       "description": "Non-exhaustive pattern match",
       "command": ["--eval", "(deftype Color (Red) (Green) (Blue)) (match (Red) [(Red) 1] [(Green) 2])"],
       "expect_exit": 1,
-      "expect_stderr_contains": "non-exhaustive",
+      "expect_stderr_contains": "not exhaustive",
       "expect_no_stacktrace": true,
       "spec_source": "CLAUDE.md#Design-Decisions (`Exhaustiveness checking — match on sum types and booleans must cover all variants`)"
     },
@@ -560,7 +560,7 @@
       "id": "ABN-001",
       "category": "abnormal",
       "description": "Division by zero should not leak stacktrace",
-      "command": ["--eval", "(/ 1 0)"],
+      "command": ["--eval", "(div 1 0)"],
       "expect_exit": 1,
       "expect_no_stacktrace": true,
       "spec_source": "CLAUDE.md#Error-Messages (`short, exact, with source context and actionable hints`) — runtime errors must not leak Elixir/Erlang stacktraces",

@@ -1,16 +1,11 @@
 defmodule Vaisto.Refine.Surface do
   @moduledoc """
-  Refinement syntax at the surface (RFC §4.4, §21.1).
+  Refined source annotations and signatures (RFC §4.4).
 
-  The parser reads `{v :int | p}` in a `defn`'s parameter or result slot as
-  `{:refine, v, base_type, p}`. Phase 2.1 checks refinements through a bridge:
-  HM sees the plain program, with every refined type replaced by its base type,
-  and only the refinement checker reads the refined signatures. `split/1`
-  produces both.
-
-  HM must never see a refined type. If it did, an entry point that skips the
-  refinement checker would accept the program and drop its refinements
-  silently, so `refined?/1` lets the type checker refuse instead.
+  `split/1` gives base annotations to the elaborator and retains predicates
+  for `Refine.check_core/3`. All compilation entry points verify those
+  signatures before lowering. The bare elaborator refuses refined types,
+  rather than silently erasing a contract on an unchecked path.
   """
 
   defmodule Sig do

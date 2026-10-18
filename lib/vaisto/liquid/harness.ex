@@ -2,28 +2,24 @@ defmodule Vaisto.Liquid.Harness do
   @moduledoc """
   The differential harness (RFC §6.3, `docs/design/liquid-core.md` §9).
 
-  `run/1` takes one Vaisto program with a `main` of no arguments and runs it
-  every way there is: elaborated to Core through the Phase 0 adapter, checked
-  by Core Lint, evaluated by the reference evaluator, and compiled and run on
-  both backends. Its verdict says whether they agree:
+  `run/1` elaborates and verifies a signed program, evaluates its Core with
+  the independent reference evaluator, and compares it with native BEAM:
 
-    * `:agree` - the evaluator and both backends give the same outcome (§9),
-      and every value a backend returns is a value of `main`'s type (§5.1);
+    * `:agree` - evaluator and BEAM give the same outcome (§9), and the
+      returned value inhabits `main`'s type (§5.1);
     * `{:disagree, backends}` - these backends give a different outcome from
       the evaluator, or return a value that is not of `main`'s type;
-    * `{:lint_rejects, problems}` - HM accepted the program but its Core is
-      ill typed: an elaborator bug or an HM hole (RFC §6.3, item 3);
+    * `{:lint_rejects, problems}` - the elaborator produced ill-typed Core;
     * `{:outside_fragment, reason}` - `main` uses something Core version 0
       does not cover yet;
-    * `{:hm_rejects, error}` - the type checker rejects the program, so there
-      is no Core to compare;
+    * `{:elab_rejects, error}` - the source fails checking;
     * `:no_main` - there is nothing to run.
 
   Every run happens in its own process, bounded in time and memory: a
   program may loop, and not ending is an outcome too.
   """
 
-  alias Vaisto.Liquid.{Adapter, Eval, Lint}
+  alias Vaisto.Liquid.{Eval, Lint, Runtime}
 
   @timeout 2_000
   @max_heap_words 20_000_000
@@ -31,9 +27,9 @@ defmodule Vaisto.Liquid.Harness do
   @type outcome ::
           {:ok, term()} | {:crash, term()} | {:compile_error, String.t()} | :did_not_end | {:went_wrong, String.t()}
 
-  @doc "The outcome of running `main` on each backend, compiled from source by today's pipeline."
-  @spec beam_outcomes(String.t()) :: %{core: outcome(), elixir: outcome()}
-  def beam_outcomes(source), do: for(backend <- [:core, :elixir], into: %{}, do: {backend, on_beam(source, backend)})
+  @doc "The outcome of running `main` as native BEAM, bounded in time and memory."
+  @spec beam_outcomes(String.t()) :: %{native: outcome()}
+  def beam_outcomes(source), do: %{native: on_beam(source)}
 
   @doc "The outcome of evaluating a Core module's `main`, bounded in time and memory."
   @spec evaluate(Vaisto.Liquid.Canonical.tree()) :: outcome()
@@ -46,41 +42,38 @@ defmodule Vaisto.Liquid.Harness do
   @doc "Run one program every way and compare (see the module doc)."
   @spec run(String.t()) :: map()
   def run(source) do
-    with {:ok, ast} <- Vaisto.Compilation.parse(source),
-         {:ok, _type, typed} <- typecheck(ast) do
-      {:ok, core, skipped} = Adapter.module(typed)
-      compare(source, core, skipped)
+    with {:ok, core} <- Vaisto.Compilation.check_liquid(source, :Harness, format_errors: false) do
+      if effectful?(core) do
+        %{verdict: {:outside_fragment, "effects need a scripted handler"}, core: core}
+      else
+        compare(source, core)
+      end
     else
-      {:error, error} -> %{verdict: {:hm_rejects, error}}
+      {:error, error} -> %{verdict: {:elab_rejects, error}}
     end
   end
 
-  defp typecheck(ast) do
-    Vaisto.TypeChecker.check(ast)
-  rescue
-    e -> {:error, Exception.message(e)}
-  end
+  defp effectful?([:eff | labels]), do: Enum.any?(Enum.drop(labels, -1), &(&1 != :crash))
+  defp effectful?(l) when is_list(l), do: Enum.any?(l, &effectful?/1)
+  defp effectful?(_), do: false
 
-  defp compare(source, core, skipped) do
+  defp compare(source, core) do
     defs = for [:def, f, type, _] <- core, into: %{}, do: {f, type}
     decls = for [:type | _] = d <- core, do: d
 
     cond do
-      Keyword.has_key?(skipped, :main) ->
-        %{verdict: {:outside_fragment, Keyword.fetch!(skipped, :main)}, core: core, skipped: skipped}
-
       not Map.has_key?(defs, :main) ->
-        %{verdict: :no_main, core: core, skipped: skipped}
+        %{verdict: :no_main, core: core}
 
       true ->
         case Lint.check_module(core) do
           {:error, problems} ->
-            %{verdict: {:lint_rejects, problems}, core: core, skipped: skipped}
+            %{verdict: {:lint_rejects, problems}, core: core}
 
           :ok ->
             result_type = result_type(Map.fetch!(defs, :main))
             eval = bounded(fn -> Eval.run(core, :main, []) end)
-            beam = for backend <- [:core, :elixir], into: %{}, do: {backend, on_beam(source, backend)}
+            beam = beam_outcomes(source)
 
             differing =
               for {backend, outcome} <- beam,
@@ -88,7 +81,7 @@ defmodule Vaisto.Liquid.Harness do
                   do: backend
 
             verdict = if differing == [], do: :agree, else: {:disagree, differing}
-            %{verdict: verdict, core: core, skipped: skipped, eval: eval, beam: beam}
+            %{verdict: verdict, core: core, eval: eval, beam: beam}
         end
     end
   end
@@ -98,24 +91,17 @@ defmodule Vaisto.Liquid.Harness do
 
   # --- Running on BEAM (§9) ----------------------------------------------------------
 
-  defp on_beam(source, backend) do
+  defp on_beam(source) do
     module = :"VaistoHarness_#{:erlang.unique_integer([:positive])}"
 
-    # The Elixir compiler's warnings about generated code are not the harness's
-    # to print.
+    # Generated-code warnings are not the harness's to print.
     {compiled, _diagnostics} =
-      Code.with_diagnostics(fn -> Vaisto.Compilation.compile(source, module, backend: backend, format_errors: false) end)
+      Code.with_diagnostics(fn -> Vaisto.Compilation.compile(source, module, format_errors: false) end)
 
     case compiled do
       {:ok, ^module, _bytecode} ->
         try do
-          bounded(fn ->
-            try do
-              {:ok, apply(module, :main, [])}
-            catch
-              kind, reason -> {:crash, reason(kind, reason)}
-            end
-          end)
+          bounded(fn -> Runtime.run(module, :main, [], handler: :pure) end)
         after
           :code.purge(module)
           :code.delete(module)
@@ -128,17 +114,10 @@ defmodule Vaisto.Liquid.Harness do
     e -> {:compile_error, Exception.message(e) |> String.slice(0, 200)}
   end
 
-  # The table of liquid-core.md §9: a BEAM exception read as a Core crash reason.
-  defp reason(:error, :badarith), do: :badarith
-  defp reason(:error, :badarg), do: :badarg
-  defp reason(:error, :if_clause), do: :no_match
-  defp reason(:error, :function_clause), do: :no_match
-  defp reason(:error, {tag, _}) when tag in [:case_clause, :badmatch, :try_clause], do: :no_match
-  defp reason(kind, reason), do: {:raised, kind, reason}
-
   # Two outcomes agree when their values are equal with functions left out, or
   # their crash reasons are equal (§9). Not ending agrees only with itself.
   defp agree?({:ok, a}, {:ok, b}), do: erase_functions(a) === erase_functions(b)
+  defp agree?({:effect, op, a}, {:effect, op, b}), do: erase_functions(a) === erase_functions(b)
   defp agree?({:crash, a}, {:crash, b}), do: a === b
   defp agree?(a, b), do: a == b
 

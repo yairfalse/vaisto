@@ -6,7 +6,7 @@ defmodule Vaisto.TestHelpers do
   Vaisto code within test cases.
   """
 
-  alias Vaisto.{Parser, TypeChecker, CoreEmitter}
+  alias Vaisto.{Compilation, Parser}
 
   @doc """
   Parse Vaisto source code and return the AST.
@@ -30,14 +30,18 @@ defmodule Vaisto.TestHelpers do
 
   ## Examples
 
-      assert {:ok, :int} = check_type("(+ 1 2)")
-      assert {:ok, {:fn, [:int, :int], :int}} = check_type("(defn add [x :int y :int] :int (+ x y))")
+      assert {:ok, :Int} = check_type("(+ 1 2)")
+      assert {:ok, [:->, [:Int, :Int], [:eff, :closed], :Int]} = check_type("(defn add [x :int y :int] :int (+ x y))")
   """
   @spec check_type(String.t()) :: {:ok, term()} | {:error, term()}
   def check_type(code) do
-    ast = parse!(code)
-    case TypeChecker.check(ast) do
-      {:ok, type, _typed_ast} -> {:ok, type}
+    case Compilation.check_liquid(code, :TestType, format_errors: false) do
+      {:ok, [:module, _, _ | items]} ->
+        definitions = for [:def, name, type, _] <- items, do: {name, type}
+        case List.keyfind(definitions, :main, 0) || List.last(definitions) do
+          {:main, [:->, [], _, type]} -> {:ok, type}
+          {_, type} -> {:ok, type}
+        end
       {:error, [first | _]} -> {:error, first}
       {:error, _} = err -> err
     end
@@ -48,8 +52,8 @@ defmodule Vaisto.TestHelpers do
 
   ## Examples
 
-      assert_type "(+ 1 2)", :int
-      assert_type "(list 1 2 3)", {:list, :int}
+      assert_type "(+ 1 2)", :Int
+      assert_type "(list 1 2 3)", [:List, :Int]
   """
   @spec assert_type(String.t(), term()) :: true
   def assert_type(code, expected_type) do
@@ -105,7 +109,7 @@ defmodule Vaisto.TestHelpers do
   @doc """
   Compile and run Vaisto code, returning the result.
 
-  Uses the Core Erlang backend by default.
+  Uses checked native Core and cleans up the loaded module.
 
   ## Examples
 
@@ -116,21 +120,13 @@ defmodule Vaisto.TestHelpers do
   def compile_and_run(code, module_name \\ nil) do
     module_name = module_name || generate_module_name()
 
-    ast = parse!(code)
-    case TypeChecker.check(ast) do
-      {:ok, _type, typed_ast} ->
-        case CoreEmitter.compile(typed_ast, module_name) do
-          {:ok, _mod, binary} ->
-            :code.load_binary(module_name, ~c"test", binary)
-            result = apply(module_name, :main, [])
-            {:ok, result}
-
-          {:error, _} = err ->
-            err
-        end
-
-      {:error, _} = err ->
-        err
+    with {:ok, module, _} <- Compilation.compile(code, module_name) do
+      try do
+        Vaisto.Liquid.Runtime.run(module, :main, [], handler: :native)
+      after
+        :code.purge(module)
+        :code.delete(module)
+      end
     end
   end
 
@@ -152,7 +148,7 @@ defmodule Vaisto.TestHelpers do
   @doc """
   Evaluate a Vaisto expression and return the result.
 
-  This wraps the expression in a main function and runs it.
+  The expression program infers its generated main and runs it natively.
 
   ## Examples
 
@@ -161,8 +157,7 @@ defmodule Vaisto.TestHelpers do
   """
   @spec eval(String.t()) :: {:ok, term()} | {:error, term()}
   def eval(expr) do
-    code = "(defn main [] :any #{expr})"
-    compile_and_run(code)
+    compile_and_run(expr)
   end
 
   @doc """

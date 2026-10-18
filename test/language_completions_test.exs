@@ -1,31 +1,30 @@
 defmodule Vaisto.LanguageCompletionsTest do
   use ExUnit.Case, async: true
 
-  alias Vaisto.TypeChecker
-  alias Vaisto.Parser
+  import Vaisto.TestHelpers, only: [check_type: 1]
   alias Vaisto.Runner
 
   # ── Type checking: andalso / orelse ────────────────────────────────
 
   describe "type checking andalso/orelse" do
     test "andalso returns bool" do
-      ast = Parser.parse("(andalso true false)")
-      assert {:ok, :bool, _typed} = TypeChecker.check(ast)
+      result = check_type("(andalso true false)")
+      assert {:ok, [:Bool]} = result
     end
 
     test "orelse returns bool" do
-      ast = Parser.parse("(orelse true false)")
-      assert {:ok, :bool, _typed} = TypeChecker.check(ast)
+      result = check_type("(orelse true false)")
+      assert {:ok, [:Bool]} = result
     end
 
     test "andalso rejects non-boolean args" do
-      ast = Parser.parse("(andalso 1 2)")
-      assert {:error, _} = TypeChecker.check(ast)
+      result = check_type("(andalso 1 2)")
+      assert {:error, _} = result
     end
 
     test "orelse rejects non-boolean args" do
-      ast = Parser.parse("(orelse 1 2)")
-      assert {:error, _} = TypeChecker.check(ast)
+      result = check_type("(orelse 1 2)")
+      assert {:error, _} = result
     end
   end
 
@@ -33,13 +32,13 @@ defmodule Vaisto.LanguageCompletionsTest do
 
   describe "type checking ++" do
     test "++ returns string" do
-      ast = Parser.parse(~s|(++ "a" "b")|)
-      assert {:ok, :string, _typed} = TypeChecker.check(ast)
+      result = check_type(~s|(++ "a" "b")|)
+      assert {:ok, :String} = result
     end
 
     test "++ rejects non-string args" do
-      ast = Parser.parse(~s|(++ 1 "b")|)
-      assert {:error, _} = TypeChecker.check(ast)
+      result = check_type(~s|(++ 1 "b")|)
+      assert {:error, _} = result
     end
   end
 
@@ -47,18 +46,18 @@ defmodule Vaisto.LanguageCompletionsTest do
 
   describe "type checking unary -" do
     test "negate int returns int" do
-      ast = Parser.parse("(- 5)")
-      assert {:ok, :int, _typed} = TypeChecker.check(ast)
+      result = check_type("(- 5)")
+      assert {:ok, :Int} = result
     end
 
     test "negate float returns float" do
-      ast = Parser.parse("(- 3.14)")
-      assert {:ok, :float, _typed} = TypeChecker.check(ast)
+      result = check_type("(- 3.14)")
+      assert {:ok, :Float} = result
     end
 
     test "negate rejects non-numeric" do
-      ast = Parser.parse(~s|(- "hello")|)
-      assert {:error, _} = TypeChecker.check(ast)
+      result = check_type(~s|(- "hello")|)
+      assert {:error, _} = result
     end
   end
 
@@ -97,12 +96,12 @@ defmodule Vaisto.LanguageCompletionsTest do
 
     test "andalso short-circuits (does not evaluate second arg on false)" do
       # (/ 1 0) would crash if evaluated, but andalso should short-circuit
-      {:ok, mod} = Runner.compile_and_load("(defn main [] :bool (andalso false (> (/ 1 0) 0)))", :AndalsoSC)
+      {:ok, mod} = Runner.compile_and_load("(defn main [] :bool (andalso false (> (div 1 0) 0)))", :AndalsoSC)
       assert Runner.call(mod, :main) == false
     end
 
     test "orelse short-circuits (does not evaluate second arg on true)" do
-      {:ok, mod} = Runner.compile_and_load("(defn main [] :bool (orelse true (> (/ 1 0) 0)))", :OrelseSC)
+      {:ok, mod} = Runner.compile_and_load("(defn main [] :bool (orelse true (> (div 1 0) 0)))", :OrelseSC)
       assert Runner.call(mod, :main) == true
     end
   end

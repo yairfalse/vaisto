@@ -8,7 +8,7 @@ Three consumers implement it:
 - the **reference evaluator** (`Vaisto.Liquid.Eval`) implements §6 to §9, and is the executable form of this document;
 - **Core Lint** (`Vaisto.Liquid.Lint`) implements the static semantics, §10.
 
-Version 0 covers what Phase 0 of the roadmap needs: the full type grammar, the pure fragment with crashes, and effects as requests to a handler. Refinements and decoding out of `Dyn` are written down here as syntax only, and say so where they appear.
+Version 0 covers the full type grammar, the pure fragment with crashes, and effects as requests to a handler. The Phase 1a extern slice adds structural decoding out of `Dyn` to the previously reserved syntax. Refinements remain syntax only.
 
 ## 1. Notation
 
@@ -108,13 +108,21 @@ decl ::= (type T (a…) (sum (C τ…)…₁))        a named sum: constructor C
 
 A constructor carries a **sequence** of fields, so `(Pair 1 2)` is `(inj P Pair 1 2)`, not an injection of a tuple (§11, item 1).
 
-Three named types are built in, and a module may not declare them:
+Six named types are built in, and a module may not declare them:
 
 ```text
 (type Bool () (sum (true) (false)))
 (type List (a) (sum (Nil) (Cons (tvar a) (List (tvar a)))))
 (type Reason () (sum (badarith) (badarg) (no_match) (bad_decode) (user Dyn) (raised Atom Dyn)))
+(type Core.DecodeError () (sum (Core.BadDecode)))
+(type Core.Result (e a) (sum (Core.Err (tvar e)) (Core.Ok (tvar a))))
+(type Core.TaskResult (a) (sum (ok (tvar a)) (error Dyn)))
 ```
+
+The qualified `Core.*` names are the RFC's `DecodeError`, `Result`, `Err`
+and `Ok` at the decoding boundary; they do not claim user-defined names.
+`Core.TaskResult` retains the existing pipeline runtime values `{ok, value}`
+and `{error, reason}`. Its constructor tags are not claimed as surface names.
 
 ### 3.4 Dependent functions
 
@@ -134,8 +142,10 @@ e ::= x                                   variable
     | (let ((x τ e)) e)                   one binding
     | (letrec ((f τ (fn …))…₁) e)         mutually recursive functions
     | (inst e τ…₁)                        explicit instantiation of a polymorphic term
+    | (remote M f)                        an imported function with a checked signature
     | (tuple e…₁)
     | (record τ (l e)…)                   a record of type τ: every field, in any order
+    | (map κ τ (e e)…)                    a homogeneous finite map
     | (select e l)                        field l of a record; l an integer selects from a tuple
     | (inj τ C e…)                        constructor C of the named sum type τ
     | (match e clause…₁)
@@ -143,13 +153,19 @@ e ::= x                                   variable
     | (prim op e…)                        a primitive (§7)
     | (perform op e…)                     an effect request (§8)
     | (handle-crash e ((x (Reason)) e))   run e; on a crash, bind its reason to x
-    | (up τ e) | (decode τ e)             into and out of Dyn (syntax only in version 0)
+    | (up τ e) | (decode τ e)             into and out of Dyn
 
 clause ::= (p e) | (p (when g) e)
 g      ::= e, restricted to guard-safe forms (§6.6)
 ```
 
 In `(record τ …)`, `τ` is a named record type `(T σ…)` or an anonymous record type `(Record (row (l σ)… closed))`. In `(inj τ C …)`, `τ` is a named sum type `(T σ…)`. Constructors and records name their full type, so that Core Lint never has to work out a type argument: `(inj (List Int) Nil)` is the empty list of integers.
+
+`(map κ τ …)` checks each key against `κ` and each value against `τ`.
+Evaluation visits pairs in source order, key before value, including pairs
+whose keys are later overwritten. The last equal key wins, using BEAM's
+exact map-key equality. This is not a record constructor or logical equality
+over an abstract type.
 
 `do` is `let` with an unused binder; `and` and `or` are `if` (§6.5); a list literal is nested `(inj (List τ) Cons …)` ending in `(inj (List τ) Nil)`.
 
@@ -169,10 +185,19 @@ A pattern binds each variable at most once. `_` matches anything and binds nothi
 
 ```text
 module ::= (module M (core-version 0) item…)
-item   ::= decl | (def f τ (fn …))
+item   ::= decl | (def f τ (fn …)) | (import M digest ((f τ status)…))
 ```
 
 The `def`s of a module form one `letrec`: each may refer to any other. Every top-level definition is a function; a constant is a function of no arguments.
+
+An import pins a canonical interface digest (64 lowercase SHA-256 hex
+characters) and declares distinct exported function signatures. Each module
+has at most one import header. A `remote` can synthesize only a declared,
+well-formed signature. Native lowering emits a remote BEAM function reference;
+the reference evaluator instead requires the imported module's Core through
+`imports:`. It never invokes the native exporter as its oracle. `status` is
+`plain` or `refined`; calling a `refined` export is refused until the refined
+interface rules are implemented (C12), never erased to an unchecked call.
 
 ## 5. Values and their representation on BEAM
 
@@ -236,6 +261,15 @@ Evaluation is call-by-value and strictly left to right: the function before its 
 
 An environment maps variables to values. `(fn ((x τ)…) e)` evaluates to a **closure** of its parameters, body and the current environment. `(app f a₁ … aₙ)` evaluates `f`, then `a₁ … aₙ`, then the closure's body in its own environment extended with its parameters bound to the arguments. `(let ((x τ e₁)) e₂)` evaluates `e₁`, then `e₂` with `x` bound. In `(letrec ((f τ (fn …))…) e)`, every `fᵢ` is bound, inside every function of the group and inside `e`, to the closure of its own `fn`. Types are erased: `(inst e τ…)` and `(up τ e)` evaluate to the value of `e`.
 
+`(decode τ e)` evaluates `e` once to `v`, then checks `v ⊨ τ` (§5.1)
+structurally. It returns `{Core.Ok, v}` on success and
+`{Core.Err, {Core.BadDecode}}` on failure. It neither coerces nor rebuilds
+the value; a crash while evaluating `e` propagates. The check walks list
+tails to `[]`, checks every nested field and nominal tag, and rejects extra
+keys in closed anonymous records. Thus decoding after embedding returns
+the original value, and a successful decode preserves the foreign term
+exactly (the retraction and projection laws of `liquid-types.md` §6).
+
 ### 6.4 Data
 
 `(tuple e…)`, `(record …)` and `(inj …)` build the value of their fields, represented as §5 says. `(select e l)` evaluates `e` and returns:
@@ -278,13 +312,25 @@ Every primitive is defined here. The evaluator implements each from this table. 
 | `fdiv` | `Float Float` | `y = 0.0` or `y = −0.0`, or the result is not finite: `badarith` | IEEE-754 binary64 |
 | `flt` `fle` `fgt` `fge` | `Float Float` | never | IEEE-754 comparison (`−0.0 < 0.0` is false) |
 | `int-to-float` | `Int` | the integer is out of binary64 range: `badarg` | the nearest binary64 |
+| `float-round` | `Float` | never for finite values | nearest integer, ties away from zero |
+| `float-trunc` | `Float` | never for finite values | truncate toward zero |
 | `eq` `ne` | two values of one type, not a function type | never | exact equality of representations (Erlang `=:=`) and its negation |
 | `not` | `(Bool)` | never | `¬x` |
 | `concat` | `String String` | never | concatenation |
+| `str` | zero or more `Dyn` values | never for data | binaries unchanged, integers in decimal, floats in shortest round-trip form, atoms by name; other data uses Erlang `~p` formatting, concatenated in order |
 | `length` | `(List τ)` | never | the number of `Cons` cells |
 | `empty?` | `(List τ)` | never | `true` exactly for `Nil` |
 | `head` | `(List τ)` | the list is `Nil`: `badarg` | the first field of the `Cons` |
 | `tail` | `(List τ)` | the list is `Nil`: `badarg` | the second field of the `Cons` |
+| `map-get` | `(Map κ τ) κ` | missing key: `badarg` | associated value of type `τ` |
+| `map-put` | `(Map κ τ) κ τ` | never | insert or replace a binding |
+| `map-delete` | `(Map κ τ) κ` | never | remove a key, if present |
+| `map-has?` | `(Map κ τ) κ` | never | membership as `(Bool)` |
+| `map-keys` / `map-values` | `(Map κ τ)` | never | `(List κ)` / `(List τ)` |
+| `map-size` | `(Map κ τ)` | never | cardinality as `Int` |
+| `map-merge` | two `(Map κ τ)` | never | the second map wins on shared keys |
+| `map-to-list` | `(Map κ τ)` | never | `(List (Tuple κ τ))`, in BEAM map iteration order |
+| `map-from-list` | `(List (Tuple κ τ))` | never | `(Map κ τ)`, last equal key wins |
 
 Exact equality distinguishes `0.0` from `-0.0`, and an `Int` from a `Float` of the same value. Comparisons are defined on `Int` and on `Float` only.
 
@@ -301,11 +347,21 @@ Version 0 defines two handlers:
 - the **pure handler** answers no request: a `perform` other than `crash` is an internal error;
 - the **scripted handler** holds a list of expected requests with their outcomes. It answers the `n`-th request with the `n`-th outcome when the request equals the `n`-th expected one, and otherwise stops with "the script does not fit". A script that is not used up is also reported.
 
+The test/runtime API also provides an **observer handler** (`:observe`). It
+stops before the first request and returns `{:effect, op, args}` without
+executing the operation or supplying an answer. This is a suspended
+observation, not a source-language return value, crash, resumable continuation
+or permission to execute arbitrary effects. Pure and scripted handlers keep
+their strict rejection behavior.
+
 ## 9. Comparing results
 
 The differential harness (RFC §6.3) compares a Core program's outcome with that of the BEAM program it was lowered to.
 
 - Two `(ok v)` outcomes agree when the representations are equal as terms (`=:=`), after every function inside them has been replaced by the same placeholder: functions are never compared.
+- Under observer handlers, two pending requests agree when their operation
+  and arguments agree with the same function erasure. This checks progress
+  up to an effect boundary; scripted tests check complete effect sequences.
 - Two `(crash ρ)` outcomes agree when the reasons are equal. On BEAM, a reason is read from the raised exception as follows:
 
 | BEAM exception | Reason |
@@ -383,7 +439,13 @@ A **brand** is a label that begins with `#`. Brands appear only in rows: the unf
 | `(perform op e…)` | the result type of `op` below, when each operand checks against its type |
 | `(handle-crash e ((x (Reason)) h))` | the common type of `e` and of `h` (with `x : (Reason)`) |
 | `(up τ e)` | `Dyn`, when `e ⇐ τ` and `τ` is ground data (§10.11) |
-| `(decode τ e)` | not in version 0 |
+| `(decode τ e)` | `(Core.Result (Core.DecodeError) τ)`, when `e ⇐ Dyn` and `τ` is decodable |
+
+A decodable type is ground data (§10.11), with the additional restriction
+that every pid component is `(Pid Dyn)`: a pid's protocol cannot be checked
+at runtime. Functions, unresolved variables, open rows and refinements
+are not decode targets in this slice. The check follows named declarations,
+including recursive sums and records; a nested function cannot hide in data.
 
 The operations of version 0 are a subset of RFC §4.5's signature:
 
@@ -394,6 +456,73 @@ The operations of version 0 are a subset of RFC §4.5's signature:
 | `unique` | none | `Ref` |
 | `external` | `Atom Atom (List Dyn)` | `Dyn` |
 | `crash` | `(Reason)` | checks against any type; synthesizes none |
+
+The process migration slice adds explicitly typed operations:
+
+| Core term | Rule |
+|---|---|
+| `(perform spawn N S (C…) step initial)` | `N` and `S` are closed decodable types; the selector lists distinct constructors of `N`; `step ⇒ (-> (S N) ε S)` and `initial ⇐ S`. Returns `(Pid N)` and performs `spawn`. An empty selector creates an idle process. |
+| `(perform send N pid message)` | `pid ⇐ (Pid N)`, `message ⇐ N`. Returns `Unit` and performs `send`. |
+| `(perform link N pid)` | `pid ⇐ (Pid N)`. Returns `Unit` and performs `link`. |
+| `(perform supervise strategy (id N S (C…) step initial)…)` | Each child obeys the `spawn` rule; IDs are distinct. Returns `(Tuple Atom (Pid Dyn))`, and requires `supervise`, `spawn` and `link`. |
+| `(perform generate In Out template payload)` | `In` and `Out` have supported closed finite JSON schemas, `template` is a literal string and `payload ⇐ In`. Returns `(Core.TaskResult Out)` and requires `external`. |
+
+The type and selector arguments are annotations, not evaluated operands.
+Spawn evaluates `step` then `initial`; send evaluates `pid` then `message`.
+The evaluator exposes these as scripted requests; its spawn request carries
+`[N, S, selector, step-value, initial-value]`, send carries `[pid, message]`,
+and link carries `[pid]`. Pure handlers reject all three. Function effect
+rows must contain the performed label; child transitions run under their
+own declared function row, not the parent's row.
+
+The native runtime uses OTP processes. Each selected message is decoded
+against `N` before the transition runs, and every resulting state is checked
+against `S`. Messages not selected, or failing decoding, are dropped (owner
+decision, 2026-10-17, RFC Q26). The process loop replies with the new state
+for synchronous foreign-driver requests and uses it as the next state.
+Typed Core sends are asynchronous and return `Unit`, regardless of replies
+from a foreign driver. The driver also accepts legacy atom commands only
+after validating the corresponding nullary constructor, and preserves both
+GenServer and raw `{command, sender}` request/reply entry points.
+
+**OTP supervision boundary.** `supervise` evaluates each child's step and
+initial state in source order, validates the states, then starts a linked OTP
+supervisor. Children start atomically linked to that supervisor. Their
+original initial values are retained for restarts. Strategies are
+`one_for_one`, `one_for_all`, and `rest_for_one`; the source also accepts its
+historical `all_for_one` spelling. Successful startup returns `{ok, pid}`;
+startup failure becomes a normalized crash. The scripted operation carries
+`[strategy, evaluated-children]`. This is an OTP foreign-driver boundary,
+not an implementation or proof of a replayable Vaisto scheduler.
+
+This slice does not add timeouts or system-wide replay.
+Tests compare each state transition with the reference
+evaluator and exercise live native message sequences; this is not a proof of
+concurrent scheduling equivalence.
+
+**Selective receive.** `(receive (T p body) ...)` requires the `receive`
+effect. Each clause declares a closed decodable target `T`, checks pattern
+`p` against it, and checks `body` under those bindings. All bodies return
+the same type. Exhaustiveness is not required: receiving may block.
+Native lowering uses Erlang selective receive with guard-safe type/shape
+checks, then full structural decoding before the body. Unmatched messages
+remain queued. A selected message that fails deep decoding is dropped and
+the receive retries; it cannot fall through to a later clause. Lists/maps
+are checked shallowly in guards; recursive named types expand once per
+name along a type path. Scripts supply an already selected valid message
+for operation `receive`, with arguments `[selectors]`, where each selector
+is `[T, p]`. Invalid scripted answers fail the handler contract.
+
+**Task driver.** A scripted `generate` request carries
+`[In, Out, template, typed-payload]`, and its answer must decode as
+`(Core.TaskResult Out)`. Native execution converts records/lists to the
+existing LLM driver's data/schema descriptors, interpolates each template
+placeholder once, and converts and deeply checks the response before
+returning a typed success. Missing or mistyped model fields crash with
+`bad_decode`. Driver failures retain their `error` outcome. The elaborator
+checks prompts, projections and placeholders; a projection reconstructs
+the target record, including its tag. This is an external driver boundary,
+not solver evidence about model quality or a replayable model runtime.
 
 ### 10.5 Checking
 
@@ -491,7 +620,10 @@ Each problem is reported with the name of the definition it is in and the neares
 
 ### 10.15 Soundness
 
-Core Lint and the evaluator are both trusted, and they must agree. For a closed term `e`:
+Core Lint and the evaluator are both trusted, and they must agree. Pure
+execution requires no executable effects other than `crash`; effectful
+execution needs a handler for the declared operations (§8, §10.16). For a
+closed term `e` in the pure fragment:
 
 - if `e ⇒ τ`, evaluating `e` under the pure handler ends in `(ok v)` with `v ⊨ τ` (§5.1), or in `(crash ρ)` with `ρ ⊨ (Reason)`, or does not end;
 - if `e` synthesizes no type (it never returns), evaluating it ends in a crash or does not end;
@@ -503,7 +635,13 @@ This is type safety: progress and preservation, stated as one property of the tw
 2. **Safety.** Every generated term is evaluated, and the property above must hold.
 3. **Mutants.** Each generated term is corrupted at random: a subterm replaced, a constructor, label, primitive or variable changed, a child dropped. Lint must reject the mutant, or the mutant must satisfy the property at the type Lint gives it. A mutant that Lint accepts and that then goes wrong is a hole in Lint. This is RFC K5, fault injection, with the faults chosen at random instead of by hand.
 
-The same is tested on real Core: the elaborator's output for every program in the test suite is corrupted at random, declarations included. Lint must answer on every corruption (totality, §10.13), and a corrupted module it accepts must satisfy the property for its `main`.
+The same is tested on real Core: the elaborator's output for every program in
+the test suite is corrupted at random, declarations included. Lint must answer
+on every corruption (totality, §10.13). Accepted pure executions must satisfy
+the property for `main`; effectful executions use an observer and may instead
+stop at a pending request, whose operation must belong to `main`'s declared
+effect row. They are not excluded from mutation checking. Strict scripted
+tests separately compare complete effectful executions.
 
 ### 10.16 Effects
 

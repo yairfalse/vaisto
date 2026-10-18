@@ -8,7 +8,7 @@ defmodule Vaisto.LSP.Handler do
   require Logger
 
   alias Vaisto.LSP.{Protocol, Hover, Completion, SignatureHelp, References, Position, InlayHints}
-  alias Vaisto.{Parser, TypeChecker}
+  alias Vaisto.{Compilation, Parser}
 
   @doc """
   Handle an incoming LSP request/notification.
@@ -184,7 +184,7 @@ defmodule Vaisto.LSP.Handler do
     file = uri_to_path(uri)
 
     diagnostics = case parse_and_check(text, file) do
-      {:ok, _type, _ast} ->
+      {:ok, _core} ->
         []
 
       {:error, error} when is_binary(error) ->
@@ -205,13 +205,10 @@ defmodule Vaisto.LSP.Handler do
   end
 
   defp parse_and_check(text, file) do
-    try do
-      ast = Parser.parse(text, file: file)
-      TypeChecker.check(ast)
-    rescue
-      e ->
-        {:error, Vaisto.Errors.compilation_error(Exception.message(e))}
-    end
+    paths = if file, do: [Path.dirname(file), "."], else: ["."]
+    Compilation.check_liquid(text, :LSPDocument, format_errors: false, file: file, search_paths: paths)
+  rescue
+    e -> {:error, Vaisto.Errors.compilation_error(Exception.message(e))}
   end
 
   # ============================================================================
@@ -223,7 +220,7 @@ defmodule Vaisto.LSP.Handler do
     text = state.documents[uri]
 
     if text do
-      {line, col} = Position.lsp_to_vaisto(pos["line"], pos["character"])
+      {line, col} = Position.lsp_to_vaisto(text, pos["line"], pos["character"])
       file = uri_to_path(uri)
 
       result = case Hover.get_hover(text, line, col, file) do
@@ -233,7 +230,7 @@ defmodule Vaisto.LSP.Handler do
               "kind" => "markdown",
               "value" => hover.contents
             },
-            "range" => Position.to_lsp_range(hover.range.line, hover.range.col, hover.range.length)
+            "range" => Position.to_lsp_range(text, hover.range.line, hover.range.col, hover.range.length)
           }
 
         :not_found ->
@@ -255,14 +252,14 @@ defmodule Vaisto.LSP.Handler do
     text = state.documents[uri]
 
     if text do
-      {line, col} = Position.lsp_to_vaisto(pos["line"], pos["character"])
+      {line, col} = Position.lsp_to_vaisto(text, pos["line"], pos["character"])
       file = uri_to_path(uri)
 
       result = case Hover.get_definition(text, line, col, file) do
         {:ok, loc} ->
           %{
             "uri" => uri,
-            "range" => Position.to_lsp_range(loc.line, loc.col, 0)
+            "range" => Position.to_lsp_range(text, loc.line, loc.col, 0)
           }
 
         :not_found ->

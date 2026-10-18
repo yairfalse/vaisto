@@ -20,7 +20,10 @@ defmodule Vaisto.Liquid.Lint do
               """
               ((type Bool () (sum (true) (false)))
                (type List (a) (sum (Nil) (Cons (tvar a) (List (tvar a)))))
-               (type Reason () (sum (badarith) (badarg) (no_match) (bad_decode) (user Dyn) (raised Atom Dyn))))
+               (type Reason () (sum (badarith) (badarg) (no_match) (bad_decode) (user Dyn) (raised Atom Dyn)))
+               (type Core.DecodeError () (sum (Core.BadDecode)))
+               (type Core.Result (e a) (sum (Core.Err (tvar e)) (Core.Ok (tvar a))))
+               (type Core.TaskResult (a) (sum (ok (tvar a)) (error Dyn))))
               """,
               atoms: :create
             )
@@ -48,13 +51,15 @@ defmodule Vaisto.Liquid.Lint do
            neg: {[:Int], :Int},
            fneg: {[:Float], :Float},
            "int-to-float": {[:Int], :Float},
+           "float-round": {[:Float], :Int},
+           "float-trunc": {[:Float], :Int},
            not: {[[:Bool]], [:Bool]},
            concat: {[:String, :String], :String}
          })
 
   # eff: the effect row the code being checked may perform, or :any outside
   # every function, where the handler interprets whatever is performed.
-  defstruct types: %{}, delta: %{}, gamma: %{}, span: nil, eff: :any
+  defstruct types: %{}, delta: %{}, gamma: %{}, span: nil, eff: :any, remotes: %{}
 
   @type problem :: %{message: String.t(), in: atom() | nil, span: Canonical.tree() | nil}
 
@@ -141,16 +146,56 @@ defmodule Vaisto.Liquid.Lint do
 
   defp fail(ctx, message), do: throw({:lint, message, ctx.span})
 
+  @doc "Whether a closed type has a structural decoder (RFC §4.6)."
+  @spec decodable?(Canonical.tree(), keyword()) :: boolean()
+  def decodable?(type, opts \\ []) do
+    with {:ok, ctx} <- context(opts),
+         {:ok, result} <- run(nil, fn ->
+           type = norm(type)
+           wf(ctx, type)
+           {:ok, ground_data?(ctx, type, MapSet.new(), :decode)}
+         end) do
+      result
+    else
+      _ -> false
+    end
+  end
+
   # --- §10.13 Modules ------------------------------------------------------------
 
   defp check_items(items) do
     items = for item <- items, not meta?(item), do: split_meta(item)
     decls = for {[:type, t, params, _body] = d, _span} <- items, is_atom(t) and is_list(params), do: d
     defs = for {[:def, f, _type, _fun], _span} = d <- items, is_atom(f), do: d
-    others = for {item, _span} <- items, item not in decls and item not in Enum.map(defs, &elem(&1, 0)), do: item
+    imports = for {[:import, _, _, _] = i, _} <- items, do: i
+    others = for {item, _span} <- items, item not in decls and item not in imports and item not in Enum.map(defs, &elem(&1, 0)), do: item
 
     {types, decl_problems} = declare(decls)
     ctx = %__MODULE__{types: types}
+    modules = Enum.map(imports, fn [:import, m, _, _] -> m end)
+    duplicate_imports = if distinct?(modules), do: [], else: [%{message: "a module is imported twice", in: nil, span: nil}]
+    {remotes, import_problems} = Enum.reduce(imports, {%{}, []}, fn [:import, m, digest, exports], {remotes, problems} ->
+      result = run(nil, fn ->
+        unless is_atom(m) and is_binary(digest) and byte_size(digest) == 64 and String.match?(digest, ~r/^[0-9a-f]+$/) and is_list(exports), do: fail(ctx, "malformed import")
+        Enum.reduce(exports, remotes, fn
+          [f, type, status], remotes when is_atom(f) and status in [:plain, :refined] ->
+            wf(ctx, norm(type))
+            arrow = case norm(type) do
+              [:forall, _, a] -> a
+              a -> a
+            end
+            unless match?([:->, _, _, _], arrow), do: fail(ctx, "an imported export is not a function")
+            if Map.has_key?(remotes, {m, f}), do: fail(ctx, "duplicate imported export")
+            Map.put(remotes, {m, f}, {norm(type), status})
+          _, _ -> fail(ctx, "malformed imported export")
+        end)
+      end)
+      case result do
+        {:error, ps} -> {remotes, problems ++ ps}
+        remotes -> {remotes, problems}
+      end
+    end)
+    ctx = %{ctx | remotes: remotes}
 
     item_problems = for other <- others, do: %{message: "not a module item: #{show(other)}", in: nil, span: nil}
 
@@ -191,7 +236,7 @@ defmodule Vaisto.Liquid.Lint do
       end
       |> List.flatten()
 
-    case item_problems ++ decl_problems ++ sig_problems ++ def_problems do
+    case item_problems ++ decl_problems ++ duplicate_imports ++ import_problems ++ sig_problems ++ def_problems do
       [] -> :ok
       problems -> {:error, problems}
     end
@@ -554,6 +599,13 @@ defmodule Vaisto.Liquid.Lint do
   defp synth_form(_ctx, s) when is_binary(s), do: {:ok, :String}
   defp synth_form(_ctx, [:atom, a]) when is_atom(a), do: {:ok, :Atom}
   defp synth_form(_ctx, [:unit]), do: {:ok, :Unit}
+  defp synth_form(ctx, [:remote, m, f]) do
+    case Map.fetch(ctx.remotes, {m, f}) do
+      {:ok, {type, :plain}} -> {:ok, type}
+      {:ok, {_, :refined}} -> fail(ctx, "imported refinements require refined interfaces and cannot be erased")
+      :error -> fail(ctx, "undeclared remote function")
+    end
+  end
 
   # A function synthesized without a type is pure: its row is closed, so its
   # body may perform nothing but crash.
@@ -635,6 +687,16 @@ defmodule Vaisto.Liquid.Lint do
     {:ok, type}
   end
 
+  defp synth_form(ctx, [:map, key, value | entries]) do
+    wf(ctx, key)
+    wf(ctx, value)
+    Enum.each(entries, fn
+      [k, v] -> check_term(ctx, k, key); check_term(ctx, v, value)
+      _ -> fail(ctx, "malformed map entry")
+    end)
+    {:ok, [:Map, key, value]}
+  end
+
   defp synth_form(ctx, [:select, e, l]) do
     type = must_synth(ctx, e, "the record in a select")
 
@@ -673,6 +735,10 @@ defmodule Vaisto.Liquid.Lint do
     common(clause_branches(ctx, e, clauses))
   end
 
+  defp synth_form(ctx, [:receive | clauses]) when clauses != [] do
+    common(receive_branches(ctx, clauses))
+  end
+
   defp synth_form(ctx, [:if, c, e1, e2]) do
     check_term(ctx, c, @bool)
     common([{ctx, e1}, {ctx, e2}])
@@ -683,6 +749,77 @@ defmodule Vaisto.Liquid.Lint do
   defp synth_form(ctx, [:perform, :crash, e]) do
     check_term(ctx, e, [:Reason])
     :none
+  end
+
+  defp synth_form(ctx, [:perform, :spawn, protocol, state, tags, step, initial]) do
+    protocol = norm(protocol)
+    state = norm(state)
+    wf(ctx, protocol)
+    wf(ctx, state)
+    unless ground_data?(ctx, protocol, MapSet.new(), :decode) and ground_data?(ctx, state, MapSet.new(), :decode),
+      do: fail(ctx, "spawn requires decodable protocol and state types")
+    unless is_list(tags) and Enum.all?(tags, &is_atom/1) and distinct?(tags),
+      do: fail(ctx, "a process selector must list distinct constructor tags")
+    available = case protocol do
+      [name | args] ->
+        if match?({:sum, _, _}, Map.get(ctx.types, name)),
+          do: Enum.map(constructors(ctx, name, args), &elem(&1, 0)), else: []
+      _ -> []
+    end
+    unless Enum.all?(tags, &(&1 in available)), do: fail(ctx, "a process selector names a constructor outside its protocol")
+    case must_synth(ctx, step, "the process step") do
+      [:->, [s, m], _eff, result] ->
+        unless equal?(ctx, s, state) and equal?(ctx, m, protocol) and equal?(ctx, result, state),
+          do: fail(ctx, "a process step must take its state and protocol message and return the same state type")
+      _ -> fail(ctx, "a process step must be a function of state and message")
+    end
+    check_term(ctx, initial, state)
+    allowed!(ctx, [:eff, :spawn, :closed])
+    {:ok, [:Pid, protocol]}
+  end
+
+  defp synth_form(ctx, [:perform, :generate, input, output, template, payload]) when is_binary(template) do
+    for t <- [input, output] do
+      wf(ctx, norm(t))
+      declarations = for {name, {kind, params, members}} <- ctx.types, name not in [:Bool, :List, :Reason, :"Core.DecodeError", :"Core.Result", :"Core.TaskResult"] do
+        fields = if kind == :sum, do: Enum.map(members, fn {c, fs} -> [c | fs] end), else: Enum.map(members, fn {l, t} -> [l, t] end)
+        [:type, name, params, [kind | fields]]
+      end
+      unless Vaisto.LLM.OpenAI.Schema.core_supported?(t, declarations), do: fail(ctx, "generate requires supported closed JSON data types")
+    end
+    check_term(ctx, payload, norm(input))
+    allowed!(ctx, [:eff, :external, :closed])
+    {:ok, [:"Core.TaskResult", norm(output)]}
+  end
+
+  defp synth_form(ctx, [:perform, :supervise, strategy | children]) do
+    unless strategy in [:one_for_one, :one_for_all, :rest_for_one], do: fail(ctx, "unknown supervision strategy")
+    ids = Enum.map(children, fn
+      [id, protocol, state, tags, step, initial] when is_atom(id) ->
+        synth_form(ctx, [:perform, :spawn, protocol, state, tags, step, initial])
+        id
+      _ -> fail(ctx, "malformed supervised child")
+    end)
+    unless distinct?(ids), do: fail(ctx, "duplicate supervised child id")
+    allowed!(ctx, [:eff, :link, :spawn, :supervise, :closed])
+    {:ok, [:Tuple, :Atom, [:Pid, :Dyn]]}
+  end
+
+  defp synth_form(ctx, [:perform, :send, protocol, pid, message]) do
+    protocol = norm(protocol)
+    wf(ctx, protocol)
+    check_term(ctx, pid, [:Pid, protocol])
+    check_term(ctx, message, protocol)
+    allowed!(ctx, [:eff, :send, :closed])
+    {:ok, :Unit}
+  end
+
+  defp synth_form(ctx, [:perform, :link, protocol, pid]) do
+    protocol = norm(protocol)
+    wf(ctx, protocol)
+    check_term(ctx, pid, [:Pid, protocol])
+    allowed!(ctx, [:eff, :link, :closed])
+    {:ok, :Unit}
   end
 
   defp synth_form(ctx, [:perform, op | es]) do
@@ -713,7 +850,13 @@ defmodule Vaisto.Liquid.Lint do
     {:ok, :Dyn}
   end
 
-  defp synth_form(ctx, [:decode | _]), do: fail(ctx, "decode is not in Liquid Core version 0")
+  defp synth_form(ctx, [:decode, type, e]) do
+    type = norm(type)
+    wf(ctx, type)
+    unless ground_data?(ctx, type, MapSet.new(), :decode), do: fail(ctx, "#{show(type)} is not decodable: it must be ground data, with only (Pid Dyn) protocols")
+    check_term(ctx, e, :Dyn)
+    {:ok, [:"Core.Result", [:"Core.DecodeError"], type]}
+  end
   defp synth_form(ctx, term), do: fail(ctx, "not a Core term: #{show(term)}")
 
   defp must_synth(ctx, e, what) do
@@ -753,12 +896,28 @@ defmodule Vaisto.Liquid.Lint do
       [:let, [[x, _type, e1]], e2] -> named([x]) ++ binders(e1) ++ binders(e2)
       [:letrec, group, body] when is_list(group) -> Enum.flat_map(group, &binding_binders/1) ++ binders(body)
       [:match, e | clauses] -> binders(e) ++ Enum.flat_map(clauses, &clause_binders/1)
+      [:receive | clauses] -> Enum.flat_map(clauses, fn
+        [_type, p, body] -> pattern_vars(p) ++ binders(body)
+        _ -> []
+      end)
       [:"handle-crash", e, [[x, _type], h]] -> named([x]) ++ binders(e) ++ binders(h)
       [form, _type, e] when form in [:up, :decode] -> binders(e)
       [:select, e, _label] -> binders(e)
       [:inst, e | _types] -> binders(e)
       [:record, _type | fields] -> Enum.flat_map(fields, &field_binders/1)
+      [:map, _key, _value | entries] -> Enum.flat_map(entries, fn
+        [k, v] -> binders(k) ++ binders(v)
+        _ -> []
+      end)
       [:inj, _type, _c | es] -> Enum.flat_map(es, &binders/1)
+      [:perform, :spawn, _protocol, _state, _tags, step, initial] -> binders(step) ++ binders(initial)
+      [:perform, :generate, _input, _output, _template, payload] -> binders(payload)
+      [:perform, :supervise, _strategy | children] -> Enum.flat_map(children, fn
+        [_id, _protocol, _state, _tags, step, initial] -> binders(step) ++ binders(initial)
+        _ -> []
+      end)
+      [:perform, :send, _protocol, pid, message] -> binders(pid) ++ binders(message)
+      [:perform, :link, _protocol, pid] -> binders(pid)
       [form, _op | es] when form in [:prim, :perform] -> Enum.flat_map(es, &binders/1)
       [form | es] when form in [:app, :tuple, :if] -> Enum.flat_map(es, &binders/1)
       _ -> []
@@ -852,6 +1011,43 @@ defmodule Vaisto.Liquid.Lint do
     end
   end
 
+  defp prim_type(ctx, op, es) when op in [:"map-get", :"map-put", :"map-delete", :"map-has?", :"map-keys", :"map-values", :"map-size", :"map-merge", :"map-to-list"] do
+    {map, args} = case es do
+      [m | args] -> {m, args}
+      _ -> fail(ctx, "#{show(op)} needs a map operand")
+    end
+    case must_synth(ctx, map, "the map operand") do
+      [:Map, k, v] = type ->
+        {params, result} = case op do
+          :"map-get" -> {[k], v}
+          :"map-put" -> {[k, v], type}
+          :"map-delete" -> {[k], type}
+          :"map-has?" -> {[k], @bool}
+          :"map-keys" -> {[], [:List, k]}
+          :"map-values" -> {[], [:List, v]}
+          :"map-size" -> {[], :Int}
+          :"map-merge" -> {[type], type}
+          :"map-to-list" -> {[], [:List, [:Tuple, k, v]]}
+        end
+        unless length(params) == length(args), do: fail(ctx, "wrong operand count for #{show(op)}")
+        Enum.zip(args, params) |> Enum.each(fn {arg, type} -> check_term(ctx, arg, type) end)
+        result
+      _ -> fail(ctx, "#{show(op)} needs a map")
+    end
+  end
+
+  defp prim_type(ctx, :"map-from-list", [pairs]) do
+    case must_synth(ctx, pairs, "the map entries") do
+      [:List, [:Tuple, k, v]] -> [:Map, k, v]
+      _ -> fail(ctx, "map-from-list needs a list of key-value tuples")
+    end
+  end
+
+  defp prim_type(ctx, :str, es) do
+    Enum.each(es, &check_term(ctx, &1, :Dyn))
+    :String
+  end
+
   defp prim_type(ctx, op, es) do
     case Map.fetch(@prims, op) do
       {:ok, {params, result}} when length(params) == length(es) ->
@@ -869,21 +1065,22 @@ defmodule Vaisto.Liquid.Lint do
   # §10.11: no arrow and no type, row or effect variable, through the
   # declarations of named types. A recursive occurrence is assumed ground,
   # which is what the rest of its declaration then decides.
-  defp ground_data?(ctx, type), do: ground_data?(ctx, type, MapSet.new())
+  defp ground_data?(ctx, type), do: ground_data?(ctx, type, MapSet.new(), :embed)
 
-  defp ground_data?(_ctx, t, _seen) when t in @base, do: true
-  defp ground_data?(ctx, [:Tuple | ts], seen), do: Enum.all?(ts, &ground_data?(ctx, &1, seen))
-  defp ground_data?(ctx, [:Pid, t], seen), do: ground_data?(ctx, t, seen)
-  defp ground_data?(ctx, [:Map, k, v], seen), do: ground_data?(ctx, k, seen) and ground_data?(ctx, v, seen)
+  defp ground_data?(_ctx, t, _seen, _mode) when t in @base, do: true
+  defp ground_data?(ctx, [:Tuple | ts], seen, mode), do: Enum.all?(ts, &ground_data?(ctx, &1, seen, mode))
+  defp ground_data?(_ctx, [:Pid, t], _seen, :decode), do: t == :Dyn
+  defp ground_data?(ctx, [:Pid, t], seen, mode), do: ground_data?(ctx, t, seen, mode)
+  defp ground_data?(ctx, [:Map, k, v], seen, mode), do: ground_data?(ctx, k, seen, mode) and ground_data?(ctx, v, seen, mode)
 
-  defp ground_data?(ctx, [:Record, row], seen) do
+  defp ground_data?(ctx, [:Record, row], seen, mode) do
     {fields, tail} = split_row(row)
-    tail == :closed and Enum.all?(fields, fn [_, t] -> ground_data?(ctx, t, seen) end)
+    tail == :closed and Enum.all?(fields, fn [_, t] -> ground_data?(ctx, t, seen, mode) end)
   end
 
-  defp ground_data?(ctx, [t | args], seen) when is_atom(t) and t not in @reserved do
+  defp ground_data?(ctx, [t | args], seen, mode) when is_atom(t) and t not in @reserved do
     cond do
-      not Enum.all?(args, &ground_data?(ctx, &1, seen)) ->
+      not Enum.all?(args, &ground_data?(ctx, &1, seen, mode)) ->
         false
 
       MapSet.member?(seen, t) ->
@@ -898,12 +1095,12 @@ defmodule Vaisto.Liquid.Lint do
             {:sum, _, _} -> ctx |> constructors(t, args) |> Enum.flat_map(&elem(&1, 1))
           end
 
-        Enum.all?(member_types, &ground_data?(ctx, &1, seen))
+        Enum.all?(member_types, &ground_data?(ctx, &1, seen, mode))
     end
   end
 
   # Arrows, foralls and variables.
-  defp ground_data?(_ctx, _type, _seen), do: false
+  defp ground_data?(_ctx, _type, _seen, _mode), do: false
 
   defp not_ground(ctx, what, type) do
     fail(ctx, "#{what} #{show(type)}, which is not ground data: a function type or a type variable " <>
@@ -927,6 +1124,10 @@ defmodule Vaisto.Liquid.Lint do
 
   defp check_form(ctx, [:match, e | clauses], type) when clauses != [] do
     for {ctx, body} <- clause_branches(ctx, e, clauses), do: check_term(ctx, body, type)
+  end
+
+  defp check_form(ctx, [:receive | clauses], type) when clauses != [] do
+    for {ctx, body} <- receive_branches(ctx, clauses), do: check_term(ctx, body, type)
   end
 
   defp check_form(ctx, [:"handle-crash", e, [[x, reason], handler]], type) when is_atom(x) do
@@ -1024,6 +1225,22 @@ defmodule Vaisto.Liquid.Lint do
   end
 
   # --- Match clauses, guards (§6.6), patterns (§10.9), exhaustiveness (§10.8) -----
+
+  defp receive_branches(ctx, clauses) do
+    allowed!(ctx, [:eff, :receive, :closed])
+    Enum.map(clauses, fn clause ->
+      {clause, ctx} = enter(ctx, clause)
+      case clause do
+        [type, p, body] ->
+          type = norm(type)
+          wf(ctx, type)
+          unless ground_data?(ctx, type, MapSet.new(), :decode), do: fail(ctx, "a receive target must be decodable")
+          binds = pattern_binds(ctx, Canonical.strip(p), type, %{})
+          {%{ctx | gamma: Map.merge(ctx.gamma, binds)}, body}
+        _ -> fail(ctx, "malformed receive clause #{show(clause)}")
+      end
+    end)
+  end
 
   defp clause_branches(ctx, scrutinee, clauses) do
     stype = must_synth(ctx, scrutinee, "the scrutinee of a match")

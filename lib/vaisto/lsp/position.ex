@@ -77,6 +77,32 @@ defmodule Vaisto.LSP.Position do
     %__MODULE__{line: line, character: character}
   end
 
+  @doc "Convert an absolute grapheme offset to an LSP position with UTF-16 character units."
+  def from_offset(source, offset) when is_binary(source) and is_integer(offset) and offset >= 0 do
+    lines = source |> String.slice(0, offset) |> String.split("\n")
+    units = lines |> List.last() |> utf16_length()
+    %{"line" => length(lines) - 1, "character" => units}
+  end
+
+  @doc "Convert a source-aware LSP position from UTF-16 to tokenizer grapheme coordinates."
+  def lsp_to_vaisto(source, line, character) when is_binary(source) do
+    text = source |> String.split("\n") |> Enum.at(line, "")
+    {graphemes, _} = text |> String.graphemes() |> Enum.reduce_while({0, 0}, fn g, {count, units} ->
+      next = units + utf16_length(g)
+      if next <= character, do: {:cont, {count + 1, next}}, else: {:halt, {count, units}}
+    end)
+    {line + 1, graphemes + 1}
+  end
+
+  @doc "Build a UTF-16 LSP range from source-aware tokenizer coordinates."
+  def to_lsp_range(source, line, col, length) when is_binary(source) do
+    offset = source |> String.split("\n") |> Enum.take(line - 1)
+      |> Enum.reduce(col - 1, fn text, offset -> offset + String.length(text) + 1 end)
+    %{"start" => from_offset(source, offset), "end" => from_offset(source, offset + length)}
+  end
+
+  defp utf16_length(text), do: text |> String.to_charlist() |> Enum.reduce(0, fn c, n -> n + if(c > 0xFFFF, do: 2, else: 1) end)
+
   @doc """
   Convert 0-indexed LSP coordinates to 1-indexed Vaisto coordinates.
 

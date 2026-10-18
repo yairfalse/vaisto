@@ -1,6 +1,6 @@
 # LSP Black-Box Test Runner
 # Tests the Vaisto LSP server at the JSON-RPC protocol boundary.
-# Bypasses stdio transport (known bug) and talks directly to the GenServer.
+# Talks directly to the GenServer; native_cli_test.exs also checks real stdio.
 
 defmodule LSPRunner do
   @green "\e[0;32m"

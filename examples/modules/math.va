@@ -1,11 +1,11 @@
 ; Math utilities module
 (ns Math)
 
-(defn square [x]
+(defn square [x :int] :int
   (* x x))
 
-(defn double [x]
+(defn double [x :int] :int
   (* x 2))
 
-(defn add [x y]
+(defn add [x :int y :int] :int
   (+ x y))

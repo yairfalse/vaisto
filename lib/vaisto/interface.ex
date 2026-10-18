@@ -1,143 +1,203 @@
 defmodule Vaisto.Interface do
   @moduledoc """
-  Handles .vsi (Vaisto Interface) files for cross-module type information.
-
-  When a module is compiled, we export its type environment to a .vsi file.
-  When another module imports it, we load the .vsi to get type signatures.
-
-  Format: Erlang term file containing:
-    %{
-      module: :"Std.List",
-      version: 1,
-      exports: %{
-        fold: {:fn, [:any, :any, :any], :any},
-        map: {:fn, [:any, :any], :any},
-        ...
-      },
-      types: %{
-        Result: {:sum, :Result, [{:Ok, [:any]}, {:Err, [:any]}]},
-        ...
-      }
-    }
+  Canonical .vsi interfaces for checked Core modules. Exports, datatype
+  declarations, effect rows and class dictionaries are independently
+  validated before import; no HM environments or Erlang term files are read.
   """
 
-  @version 2
+  alias Vaisto.Liquid.{Canonical, Lint}
 
-  @doc """
-  Save a module's type environment to a .vsi file.
-
-  Takes the module name, the type environment (after type checking),
-  and the output directory.
-  """
-  @spec save(atom(), map(), map(), String.t()) :: {:ok, String.t()}
-  def save(module_name, type_env, types \\ %{}, output_dir) do
-    interface = %{
-      module: module_name,
-      version: @version,
-      exports: extract_exports(type_env),
-      types: types,
-      classes: Map.get(type_env, :__classes__, %{}),
-      instances: Map.get(type_env, :__instances__, %{}),
-      # Functions with refinements. Until interfaces carry the refinements
-      # themselves (RFC §8.1, C12), an importer must not call them.
-      refined: Map.get(type_env, :__refined__, [])
-    }
-
-    path = interface_path(module_name, output_dir)
-    File.mkdir_p!(Path.dirname(path))
-
-    # Write as Erlang external term format (binary, efficient)
-    binary = :erlang.term_to_binary(interface)
-    File.write!(path, binary)
-
-    {:ok, path}
-  end
-
-  @doc """
-  Load a module's type interface from a .vsi file.
-
-  Returns {:ok, interface_map} or {:error, reason}.
-  """
-  @spec load(atom(), [String.t()]) :: {:ok, map()} | {:error, Vaisto.Error.t()}
-  def load(module_name, search_paths) do
-    alias Vaisto.Errors
-
-    case find_interface(module_name, search_paths) do
-      {:ok, path} ->
-        case File.read(path) do
-          {:ok, binary} ->
-            try do
-              interface = :erlang.binary_to_term(binary)
-              validate_interface(interface)
-            rescue
-              _ -> {:error, Errors.corrupt_interface(path)}
-            end
-
-          {:error, reason} ->
-            {:error, Errors.interface_read_error(path, reason)}
-        end
-
-      :not_found ->
-        {:error, Errors.interface_not_found(module_name)}
+  @doc "Build a canonical interface only after independently verifying the Core."
+  def from_core(core, sigs \\ %{}, opts \\ []) do
+    with :ok <- Vaisto.Refine.check_core(core, sigs, opts) do
+      [:module, name, [:"core-version", 0] | items] = Canonical.strip(core)
+      exports = for [:def, f, type, _] <- items, do: [f, type, if(Map.has_key?(sigs, f), do: :refined, else: :plain)]
+      types = for [:type | _] = type <- items, do: type
+      imports = for [:import, m, digest, _] <- items, do: [m, digest]
+      info = for [:meta | entries] <- core, [key | values] <- entries,
+        key in [:"function-constraints", :classes, :instances], into: %{}, do: {key, values}
+      constraints = Map.get(info, :"function-constraints", [])
+      tree = [:interface, [:module, name], [:"core-version", 0], [:"ir-version", 1],
+        [:exports | Enum.sort(exports)], [:types | Enum.sort(types)], [:imports | Enum.sort(imports)],
+        [:status, :verified], [:"core-digest", Canonical.digest(core)], [:constraints | constraints],
+        [:classes | Map.get(info, :classes, [])], [:instances | Map.get(info, :instances, [])]]
+      with {:ok, _} <- validate_core(tree), do: {:ok, tree}
     end
   end
 
-  @doc """
-  Build a type environment from loaded interfaces.
+  @doc "Validate a new interface without decoding Erlang terms or trusting unchecked signatures."
+  def validate_core([:interface, [:module, name], [:"core-version", 0], [:"ir-version", 1],
+        [:exports | exports], [:types | types], [:imports | imports], [:status, :verified], [:"core-digest", digest], [:constraints | constraints], [:classes | classes], [:instances | instances]] = tree)
+      when is_atom(name) and is_binary(digest) and is_list(exports) and is_list(types) and is_list(imports)
+        and is_list(constraints) and is_list(classes) and is_list(instances) do
+    with true <- byte_size(digest) == 64 and String.match?(digest, ~r/^[0-9a-f]+$/),
+         true <- Enum.all?(imports, fn
+           [m, d] when is_atom(m) and is_binary(d) -> byte_size(d) == 64 and String.match?(d, ~r/^[0-9a-f]+$/)
+           _ -> false
+         end),
+         true <- Enum.uniq_by(imports, &hd/1) == imports,
+         :ok <- Lint.check_module([:module, name, [:"core-version", 0] | types]),
+         true <- Enum.all?(exports, &valid_export?(&1, types)),
+         names = Enum.map(exports, &hd/1),
+         true <- Enum.uniq(names) == names,
+         {:ok, classes, schemas} <- validate_classes(classes, exports, types),
+         {:ok, constraints} <- validate_constraints(constraints, exports, types, schemas),
+         {:ok, instances} <- validate_instances(instances, exports, schemas) do
+      {:ok, %{module: name, exports: exports, types: types, imports: imports, constraints: constraints, classes: classes, instances: instances, digest: Canonical.digest(tree), tree: tree}}
+    else
+      _ -> {:error, Vaisto.Errors.interface_invalid_format()}
+    end
+  rescue
+    _ in [ArgumentError, FunctionClauseError, MatchError, KeyError] -> {:error, Vaisto.Errors.interface_invalid_format()}
+  catch
+    {:type_error, _} -> {:error, Vaisto.Errors.interface_invalid_format()}
+  end
+  def validate_core(_), do: {:error, Vaisto.Errors.interface_invalid_format()}
 
-  Given a list of loaded interfaces, creates a map suitable for
-  the TypeChecker with qualified names using ":" separator: "Math:square"
-  """
-  @spec build_env([map()], map()) :: map()
-  def build_env(interfaces, aliases \\ %{}) do
-    Enum.reduce(interfaces, %{}, fn interface, env ->
-      module_name = interface.module
-      alias_name = Map.get(aliases, module_name, module_name)
-
-      # Add each export with qualified name (using : for TypeChecker compatibility)
-      env = Enum.reduce(interface.exports, env, fn {func_name, type}, acc ->
-        qualified = :"#{alias_name}:#{func_name}"
-        Map.put(acc, qualified, type)
-      end)
-
-      # Add type constructors
-      env = Enum.reduce(interface.types, env, fn {type_name, type_def}, acc ->
-        case type_def do
-          {:sum, _name, variants} ->
-            Enum.reduce(variants, acc, fn {ctor_name, field_types}, inner_acc ->
-              qualified_ctor = :"#{alias_name}:#{ctor_name}"
-              ctor_type = {:fn, field_types, type_def}
-              Map.put(inner_acc, qualified_ctor, ctor_type)
-            end)
-
-          {:record, _name, _fields} = record_type ->
-            qualified_ctor = :"#{alias_name}:#{type_name}"
-            field_types = extract_field_types(record_type)
-            ctor_type = {:fn, field_types, record_type}
-            Map.put(acc, qualified_ctor, ctor_type)
-
-          _ ->
-            acc
+  defp validate_constraints(entries, exports, types, classes) do
+    Enum.reduce_while(entries, {:ok, %{}}, fn
+      [f | cs], {:ok, acc} when is_atom(f) and cs != [] ->
+        export = Enum.find(exports, fn [name, _, _] -> name == f end)
+        {binders, arrow} = case export do
+          [^f, [:forall, bs, a], :plain] -> {bs, a}
+          [^f, a, :plain] -> {[], a}
+          _ -> {[], nil}
         end
-      end)
-
-      # Merge imported classes and instances
-      imported_classes = Map.get(interface, :classes, %{})
-      imported_instances = Map.get(interface, :instances, %{})
-      existing_classes = Map.get(env, :__classes__, %{})
-      existing_instances = Map.get(env, :__instances__, %{})
-      # Refined functions, under every name a call may use: the module's bare
-      # name (an interface records `Elixir.A`, a call writes `A`, D9) and its alias.
-      bare = module_name |> Atom.to_string() |> String.replace_prefix("Elixir.", "") |> String.to_atom()
-      names = Enum.uniq([bare, alias_name, Map.get(aliases, bare, bare)])
-      refined = for f <- Map.get(interface, :refined, []), name <- names, into: MapSet.new(), do: :"#{name}:#{f}"
-
-      env
-      |> Map.put(:__classes__, Map.merge(existing_classes, imported_classes))
-      |> Map.put(:__instances__, Map.merge(existing_instances, imported_instances))
-      |> Map.update(:__refined_imports__, refined, &MapSet.union(&1, refined))
+        valid = case arrow do
+          [:->, dictionaries, [:eff, :closed], [:->, _, _, _]] ->
+            length(cs) == length(dictionaries) and Enum.zip(cs, dictionaries) |> Enum.all?(fn
+              {[c, t, d], expected} when is_atom(c) ->
+                target = [:->, [], [:eff, :closed], t]
+                target = if binders == [], do: target, else: [:forall, binders, target]
+                Map.has_key?(classes, c) and d == expected and
+                  d == Vaisto.Elab.Classes.dictionary_type(classes, c, t) and
+                  valid_export?([f, target, :plain], types)
+              _ -> false
+            end)
+          _ -> false
+        end
+        if valid and not Map.has_key?(acc, f) and Enum.uniq(cs) == cs do
+          {:cont, {:ok, Map.put(acc, f, Enum.map(cs, fn [c, t, d] -> {c, t, d} end))}}
+        else
+          {:halt, :error}
+        end
+      _, _ -> {:halt, :error}
     end)
   end
+
+  defp validate_classes(entries, exports, types) do
+    alias Vaisto.Elab.{Classes, Types}
+    builtins = Classes.builtin_schemas()
+    result = Enum.reduce_while(entries, {:ok, %{}, builtins}, fn
+      [c, a, methods], {:ok, public, schemas} when is_atom(c) and is_atom(a) and is_list(methods) and methods != [] ->
+        valid = Enum.all?(methods, fn
+          [m, [:->, _, _, _] = t, default] when is_atom(m) and is_atom(default) ->
+            Types.variables(t) == [{a, :Type}] and valid_export?([m, Types.generalize(t), :plain], types)
+          _ -> false
+        end)
+        names = for [m, _, _] <- methods, do: m
+        if valid and Enum.uniq(names) == names and not Map.has_key?(schemas, c) do
+          info = %{param: a, methods: Enum.map(methods, fn [m, t, d] -> {m, t, [], d} end)}
+          schemas = Map.put(schemas, c, info)
+          defaults_valid = Enum.all?(methods, fn
+            [_, _, :none] -> true
+            [_, [:->, ps, eff, ret], f] ->
+              expected = Types.generalize([:->, [Classes.dictionary_type(schemas, c, [:tvar, a]) | ps], eff, ret])
+              [f, expected, :plain] in exports
+          end)
+          if defaults_valid do
+            public_info = %{param: a, methods: Enum.map(methods, fn [m, t, d] -> {m, t, d} end)}
+            {:cont, {:ok, Map.put(public, c, public_info), schemas}}
+          else
+            {:halt, :error}
+          end
+        else
+          {:halt, :error}
+        end
+      _, _ -> {:halt, :error}
+    end)
+    case result do
+      {:ok, public, schemas} ->
+        names = for {_, info} <- schemas, {m, _, _, _} <- info.methods, do: m
+        if Enum.uniq(names) == names, do: {:ok, public, schemas}, else: :error
+      _ -> :error
+    end
+  end
+
+  defp validate_instances(entries, exports, classes) do
+    alias Vaisto.Elab.{Classes, Types}
+    Enum.reduce_while(entries, {:ok, []}, fn
+      [c, type, constraints, f], {:ok, instances} when is_atom(c) and is_atom(f) and is_list(constraints) ->
+        valid_constraints = Enum.all?(constraints, fn
+          [class, t] -> Map.has_key?(classes, class) and Enum.all?(Types.tvars(t), &(&1 in Types.tvars(type)))
+          _ -> false
+        end)
+        head_valid = case type do
+          [name | vars] when is_atom(name) and name != :tvar ->
+            Enum.all?(vars, &match?([:tvar, a] when is_atom(a), &1)) and Enum.uniq(vars) == vars
+          name when is_atom(name) -> true
+          _ -> false
+        end
+        if Map.has_key?(classes, c) and head_valid and valid_constraints and Enum.uniq(constraints) == constraints do
+          params = Enum.map(constraints, fn [class, t] -> Classes.dictionary_type(classes, class, t) end)
+          expected = Types.generalize([:->, params, [:eff, :closed], Classes.dictionary_type(classes, c, type)])
+          overlap = Enum.any?(instances, &(&1.class == c and Classes.head(&1.type) == Classes.head(type)))
+          if [f, expected, :plain] in exports and not overlap do
+            instance = %{class: c, type: type, factory: f, constraints: Enum.map(constraints, fn [class, t] -> {class, t} end)}
+            {:cont, {:ok, instances ++ [instance]}}
+          else
+            {:halt, :error}
+          end
+        else
+          {:halt, :error}
+        end
+      _, _ -> {:halt, :error}
+    end)
+  end
+
+  defp valid_export?([f, type, status], types) when is_atom(f) and status in [:plain, :refined] do
+    arrow = case type do
+      [:forall, _, arrow] -> arrow
+      arrow -> arrow
+    end
+    case arrow do
+      [:->, params, _, _] ->
+        ps = Enum.with_index(params, fn t, i ->
+          candidate = :"__interface_arg#{i}"
+          [if(candidate == f, do: :"__interface_arg#{i}_", else: candidate), t]
+        end)
+        stub = [:def, f, type, [:fn, ps, [:perform, :crash, [:inj, [:Reason], :no_match]]]]
+        Lint.check_module([:module, :Interface, [:"core-version", 0] | types ++ [stub]]) == :ok
+      _ -> false
+    end
+  end
+  defp valid_export?(_, _), do: false
+
+  @doc "Write the new canonical .vsi format; this never writes an HM type."
+  def save_core(tree, dir) do
+    with {:ok, interface} <- validate_core(tree) do
+      path = interface_path(interface.module, dir)
+      with :ok <- File.mkdir_p(Path.dirname(path)), do: File.write(path, Canonical.encode(tree))
+    end
+  end
+
+  @doc "Read only canonical interfaces. Unknown symbols fail closed unless explicitly trusted."
+  def load_core(module, paths, opts \\ []) do
+    case find_interface(module, paths) do
+      {:ok, path} ->
+        with {:ok, binary} <- File.read(path),
+             {:ok, tree} <- Canonical.decode(binary, Keyword.take(opts, [:atoms])),
+             {:ok, interface} <- validate_core(tree),
+             true <- bare_module(interface.module) == bare_module(module) do
+          {:ok, interface}
+        else
+          _ -> {:error, Vaisto.Errors.corrupt_interface(path)}
+        end
+      :not_found -> {:error, Vaisto.Errors.interface_not_found(module)}
+    end
+  end
+
+  defp bare_module(m), do: m |> Atom.to_string() |> String.replace_prefix("Elixir.", "")
 
   @doc """
   Extract module declarations from parsed AST.
@@ -175,34 +235,6 @@ defmodule Vaisto.Interface do
       path = Path.join(dir, "#{filename}.vsi")
       if File.exists?(path), do: {:ok, path}
     end)
-  end
-
-  defp validate_interface(%{module: _, version: v, exports: _, types: _} = interface)
-       when v in [1, @version] do
-    {:ok, interface}
-  end
-
-  defp validate_interface(%{version: v}) do
-    {:error, Vaisto.Errors.interface_version_mismatch(v, @version)}
-  end
-
-  defp validate_interface(_) do
-    {:error, Vaisto.Errors.interface_invalid_format()}
-  end
-
-  defp extract_exports(type_env) do
-    # Filter to only include function types (not primitives)
-    type_env
-    |> Enum.filter(fn
-      {_name, {:fn, _, _}} -> true
-      {_name, {:forall, _, _}} -> true
-      _ -> false
-    end)
-    |> Map.new()
-  end
-
-  defp extract_field_types({:record, _name, fields}) do
-    Enum.map(fields, fn {_field_name, type} -> type end)
   end
 
   defp find_ns(ast) do

@@ -37,6 +37,35 @@ defmodule Vaisto.TypeFormatter do
   """
   @spec format(term()) :: String.t()
 
+  # Native Core types. The formatter is a display boundary, not an inference engine.
+  def format([:forall, binders, type]) do
+    "forall " <> Enum.map_join(binders, ", ", fn [a, _] -> Atom.to_string(a) end) <> ". " <> format(type)
+  end
+  def format([:->, args, eff, ret]) do
+    suffix = case eff do
+      [:eff, :closed] -> ""
+      [:eff, [:evar, e]] -> " !#{e}"
+      [:eff | labels] ->
+        {labels, [tail]} = Enum.split(labels, -1)
+        tail = case tail do :closed -> ""; [:evar, e] -> " | #{e}" end
+        " !{" <> Enum.map_join(labels, ", ", &Atom.to_string/1) <> tail <> "}"
+    end
+    "(" <> Enum.map_join(args, ", ", &format/1) <> ") -> " <> format(ret) <> suffix
+  end
+  def format([:tvar, a]), do: Atom.to_string(a)
+  def format([:List, element]), do: "List(#{format(element)})"
+  def format([:Map, key, value]), do: "Map(#{format(key)}, #{format(value)})"
+  def format([:Pid, protocol]), do: "Pid(#{format(protocol)})"
+  def format([:Tuple | fields]), do: "(" <> Enum.map_join(fields, ", ", &format/1) <> ")"
+  def format([:Record, [:row | items]]) do
+    {fields, [tail]} = Enum.split(items, -1)
+    fields = Enum.map_join(fields, ", ", fn [name, type] -> "#{name}: #{format(type)}" end)
+    suffix = case tail do :closed -> ""; [:rvar, r] -> " | #{r}" end
+    "{" <> fields <> suffix <> "}"
+  end
+  def format([name]) when is_atom(name), do: Atom.to_string(name)
+  def format([name | args]) when is_atom(name), do: Atom.to_string(name) <> "(" <> Enum.map_join(args, ", ", &format/1) <> ")"
+
   # Primitives
   def format(:int), do: "Int"
   def format(:float), do: "Float"

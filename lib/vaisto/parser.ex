@@ -49,6 +49,68 @@ defmodule Vaisto.Parser do
     |> do_parse([])
   end
 
+  @doc "Parse top-level forms together with their original source, using the same tokenizer."
+  def parse_with_source(code, opts \\ []) do
+    tokens = tokenize(code, Keyword.get(opts, :file))
+    forms = tokens |> do_parse([]) |> List.wrap()
+    {starts, _depth} = Enum.reduce(tokens, {[], 0}, fn {token, loc}, {starts, depth} ->
+      starts = if depth == 0, do: [loc | starts], else: starts
+      depth = cond do
+        token in ["(", "[", "{", "\#{"] -> depth + 1
+        token in [")", "]", "}"] -> depth - 1
+        true -> depth
+      end
+      {starts, depth}
+    end)
+    {line_offsets, _} = code |> String.split("\n") |> Enum.map_reduce(0, fn line, offset ->
+      {offset, offset + String.length(line) + 1}
+    end)
+    locations = Enum.reverse(starts)
+    starts = Enum.map(locations, fn loc -> Enum.at(line_offsets, loc.line - 1) + loc.col - 1 end)
+    case starts do
+      [] -> []
+      [_ | rest] ->
+        if Keyword.get(opts, :locations, false) do
+          %{spans: spans} = token_source_map(code, tokens)
+          Enum.zip(forms, locations) |> Enum.map(fn {form, loc} ->
+            span = Map.fetch!(spans, {loc.line, loc.col})
+            {form, String.slice(code, span.offset, span.length), %{loc | length: span.length}}
+          end)
+        else
+          Enum.zip([forms, starts, rest ++ [String.length(code)]])
+          |> Enum.map(fn {form, start, finish} -> {form, code |> String.slice(start, finish - start) |> String.trim()} end)
+        end
+    end
+  end
+
+  @doc "Source tokens and balanced expression ranges, in the tokenizer's grapheme coordinates."
+  def source_map(code, opts \\ []), do: token_source_map(code, tokenize(code, Keyword.get(opts, :file)))
+
+  defp token_source_map(code, tokens) do
+    {lines, _} = code |> String.split("\n") |> Enum.map_reduce(0, fn line, n -> {n, n + String.length(line) + 1} end)
+    {spans, stack} = Enum.reduce(tokens, {%{}, []}, fn {token, loc}, {spans, stack} ->
+      offset = Enum.at(lines, loc.line - 1) + loc.col - 1
+      key = {loc.line, loc.col}
+      cond do
+        token in ["(", "[", "{", "\#{"] ->
+          {spans, [{token, key, offset, loc} | stack]}
+        token in [")", "]", "}"] ->
+          case stack do
+            [{open, first_key, first, first_loc} | rest] ->
+              unless {open, token} in [{"(", ")"}, {"[", "]"}, {"{", "}"}, {"\#{", "}"}], do: raise("Mismatched source delimiters")
+              length = offset + loc.length - first
+              span = %{offset: first, length: length, loc: %{first_loc | length: length}}
+              {Map.put(spans, first_key, span), rest}
+            [] -> raise "Unexpected source delimiter"
+          end
+        true ->
+          {Map.put(spans, key, %{offset: offset, length: loc.length, loc: loc}), stack}
+      end
+    end)
+    if stack != [], do: raise("Unclosed source delimiter")
+    %{tokens: tokens, spans: spans}
+  end
+
   # Position-tracking tokenizer
   # Returns list of {token_string, %Loc{}} tuples
   defp tokenize(code, file) do
@@ -811,6 +873,9 @@ defmodule Vaisto.Parser do
     {:ok, wrap_bodies(exprs, loc)}
   end
 
+  defp parse_process([_name, _initial_state | handlers], loc) when rem(length(handlers), 2) != 0 do
+    {:error, Errors.parse_error("process handlers must be message/body pairs", span: Error.span_from_loc(loc)), loc}
+  end
   defp parse_process([name, initial_state | handlers], loc) when handlers != [] do
     {:process, name, initial_state, parse_handlers(handlers), loc}
   end
@@ -831,9 +896,15 @@ defmodule Vaisto.Parser do
     {:error, Errors.parse_error("supervise requires a strategy: (supervise :one_for_one child ...)", span: Error.span_from_loc(loc)), loc}
   end
 
-  # Function definition: (def name [args] body)
-  defp parse_def([name, {:bracket, args}, body], loc) do
-    {:def, name, {:bracket, args}, body, loc}
+  # Function alias: use the same signature/guard parsing as defn.
+  defp parse_def([name, {:bracket, _} = args, first | rest], loc),
+    do: parse_defn([name, args, first | rest], loc)
+  defp parse_def([name, type, value], loc) do
+    if is_type_annotation?(type) do
+      {:defval, name, {:call, :the, [type, value], loc}, loc}
+    else
+      {:error, Errors.parse_error("a value signature is (def name TYPE value)", span: Error.span_from_loc(loc)), loc}
+    end
   end
   # Value binding: (def name value) - no args
   defp parse_def([name, value], loc) do
@@ -910,6 +981,18 @@ defmodule Vaisto.Parser do
   #   [[h | t] (+ 1 (len t))])
   # All clauses are brackets: [pattern body]
   # This clause only matches when ALL remaining elements are brackets (multi-clause style)
+  defp parse_defn([name, {:call, :Fn, [_, _], _} = signature | clauses], loc) do
+    parse_multi_defn(name, clauses, signature, loc)
+  end
+
+  defp parse_defn([name, {:call, :Fn, [_, _, {:atom, :effects}, _], _} = signature | clauses], loc) do
+    parse_multi_defn(name, clauses, signature, loc)
+  end
+
+  defp parse_defn([_name, {:call, :Fn, _, _} | _], loc) do
+    {:error, Errors.parse_error("a multi-clause signature must be (Fn argument-type result-type): clauses match one argument", span: Error.span_from_loc(loc)), loc}
+  end
+
   defp parse_defn([name | clauses], loc) when is_list(clauses) and length(clauses) >= 1 do
     # Check if this is multi-clause style (all elements are brackets)
     all_brackets? = Enum.all?(clauses, fn
@@ -919,14 +1002,23 @@ defmodule Vaisto.Parser do
 
     if all_brackets? do
       # Multi-clause function - each clause is [pattern body]
-      parsed_clauses = Enum.map(clauses, fn {:bracket, clause_content} ->
-        extract_pattern_body(clause_content)
-      end)
-      {:defn_multi, name, parsed_clauses, loc}
+      parse_multi_defn(name, clauses, nil, loc)
     else
       # Not multi-clause - fall through to single-clause patterns
       parse_defn_single(name, clauses, loc)
     end
+  end
+
+  defp parse_multi_defn(name, clauses, signature, loc) do
+    if clauses == [], do: throw({:parse_error, "a multi-clause definition requires at least one clause"})
+    parsed = Enum.map(clauses, fn
+      {:bracket, clause} -> extract_pattern_body(clause, loc)
+      _ -> throw({:parse_error, "each multi-clause definition clause must be [pattern body]"})
+    end)
+    if signature, do: {:defn_multi, name, parsed, signature, loc}, else: {:defn_multi, name, parsed, loc}
+  catch
+    {:parse_error, message} ->
+      {:error, Errors.parse_error("in definition of `#{name}`: #{message}", span: Error.span_from_loc(loc)), loc}
   end
 
   # Helper for single-clause defn to avoid pattern match conflicts
@@ -956,8 +1048,28 @@ defmodule Vaisto.Parser do
 
   defp parse_defn_params(name, param_tokens, guard, rest, loc) do
     typed_params = parse_typed_params(param_tokens)
+    rest = case rest do
+      [ret, {:atom, :effects}, row | bodies] when bodies != [] ->
+        [{:effectful_result, unwrap_type(ret), row, loc} | bodies]
+      _ -> rest
+    end
 
     case rest do
+      [ret_type, :where, {:bracket, constraints} | bodies] when bodies != [] ->
+        unless is_type_annotation?(ret_type) or match?({:effectful_result, _, _, _}, ret_type),
+          do: throw({:parse_error, "a constrained function requires a result type"})
+        constraints = Enum.map(constraints, fn
+          {:call, class, [type], _} when is_atom(class) -> {class, type}
+          _ -> throw({:parse_error, "a function constraint is (Class type)"})
+        end)
+        {:defn_constrained, name, typed_params, wrap_bodies(bodies, loc), unwrap_type(ret_type), guard, constraints, loc}
+
+      [_ret_type, :where | _] ->
+        throw({:parse_error, "where requires a constraint list and a function body"})
+
+      [{:effectful_result, _, _, _} = ret | bodies] when bodies != [] ->
+        make_defn(name, typed_params, wrap_bodies(bodies, loc), ret, guard, loc)
+
       # Single element is always the body - even if it looks like a type
       # This allows (defn foo [] :int) to return the keyword :int
       [single_body] ->
@@ -1029,15 +1141,17 @@ defmodule Vaisto.Parser do
 
   # Extract pattern, optional guard, and body from a clause
   # Clause content is [pattern, body] or [pattern, :when, guard, body...]
-  defp extract_pattern_body([pattern, {:atom, :when}, guard | bodies]) when bodies != [] do
-    body = wrap_bodies(bodies, %Vaisto.Parser.Loc{file: "defn_multi", line: 0, col: 0, length: 0})
+  defp extract_pattern_body([pattern, {:atom, :when}, guard | bodies], loc) when bodies != [] do
+    body = wrap_bodies(bodies, loc)
     {pattern, guard, body}
   end
-  defp extract_pattern_body([pattern, body]), do: {pattern, nil, body}
-  defp extract_pattern_body([pattern | bodies]) when length(bodies) > 1 do
-    body = wrap_bodies(bodies, %Vaisto.Parser.Loc{file: "defn_multi", line: 0, col: 0, length: 0})
+  defp extract_pattern_body([_pattern, {:atom, :when} | _], _loc), do: throw({:parse_error, "a clause guard requires a predicate and body"})
+  defp extract_pattern_body([pattern, body], _loc), do: {pattern, nil, body}
+  defp extract_pattern_body([pattern | bodies], loc) when length(bodies) > 1 do
+    body = wrap_bodies(bodies, loc)
     {pattern, nil, body}
   end
+  defp extract_pattern_body(_, _loc), do: throw({:parse_error, "a clause requires a pattern and body"})
 
   # Type annotation checks for param parsing
   defp is_type_annotation?({:atom, t}) when t in [:int, :float, :num, :string, :bool, :any, :atom, :unit], do: true
@@ -1045,6 +1159,8 @@ defmodule Vaisto.Parser do
   # Parameterized types: (List :int), (Result :int :string). Only a capitalized
   # head names a type, so (defn f [x] (println x) x) keeps the call in its body (D6).
   defp is_type_annotation?({:call, type_name, _args, _loc}) when is_atom(type_name), do: capitalized?(type_name)
+  defp is_type_annotation?({:call, {:module_path, ["Core", "Result"]}, _args, _loc}), do: true
+  defp is_type_annotation?({:call, {:module_path, path}, _args, _loc}), do: String.match?(List.last(path), ~r/^[A-Z]/)
   # User-defined types (capitalized atoms), and type variables (any other
   # lowercase keyword, as in defclass): [x :a] is one parameter of type a.
   defp is_type_annotation?({:atom, t}) when is_atom(t), do: capitalized?(t) or String.match?(Atom.to_string(t), ~r/^[a-z]/)
@@ -1302,15 +1418,11 @@ defmodule Vaisto.Parser do
   # For use in token parsing (takes string)
   defp normalize_module_name_str(str), do: String.to_atom(str)
 
-  defp parse_handlers(handlers) when rem(length(handlers), 2) == 0 do
+  # parse_process has already checked that every message has a body.
+  defp parse_handlers(handlers) do
     handlers
     |> Enum.chunk_every(2)
     |> Enum.map(fn [msg, body] -> {msg, body} end)
-  end
-  defp parse_handlers(_handlers) do
-    # Odd number of handlers - return empty and let type checker catch it
-    # (Better: return error, but handlers are nested inside process so propagation is complex)
-    []
   end
 
   # Token conversion

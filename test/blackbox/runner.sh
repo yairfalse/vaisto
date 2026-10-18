@@ -181,7 +181,7 @@ else
   log_fail "POS-017" "Subtraction" "exit=$BB_EXIT"
 fi
 
-run_cmd --eval "(/ 10 2)"
+run_cmd --eval "(/ 10.0 2.0)"
 if [[ $BB_EXIT -eq 0 ]] && echo "$BB_OUTPUT" | grep -q "5"; then
   log_pass "POS-018" "Division = 5"
 else
@@ -319,7 +319,7 @@ else
 fi
 
 run_cmd --eval "(deftype Color (Red) (Green) (Blue)) (match (Red) [(Red) 1] [(Green) 2])"
-if [[ $BB_EXIT -ne 0 ]] && echo "$BB_OUTPUT" | grep -qi "non-exhaustive"; then
+if [[ $BB_EXIT -ne 0 ]] && echo "$BB_OUTPUT" | grep -qi "not exhaustive"; then
   log_pass "NEG-007" "Non-exhaustive match detected"
 else
   log_fail "NEG-007" "Non-exhaustive match" "exit=$BB_EXIT out=$BB_OUTPUT"
@@ -531,7 +531,7 @@ echo ""
 # ── ABNORMAL TESTS ──────────────────────────────────────────────────
 echo "${BOLD}── Abnormal Tests ──${NC}"
 
-run_cmd --eval "(/ 1 0)"
+run_cmd --eval "(div 1 0)"
 if [[ $BB_EXIT -ne 0 ]] && ! has_stacktrace "$BB_OUTPUT"; then
   log_pass "ABN-001" "Division by zero: clean error"
 elif has_stacktrace "$BB_OUTPUT"; then

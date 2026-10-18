@@ -1,227 +1,166 @@
 defmodule Vaisto.LSP.InlayHints do
   @moduledoc """
-  Generates LSP inlay hints from Vaisto source code.
-
-  Shows inferred types for:
-  - Let bindings: (let [x 42] ...) → x: Int
-  - Unannotated function parameters: (defn f [x y] ...) → x: Int, y: Int
+  Inferred local binding and lambda-parameter hints from verified native Core.
+  Every hint comes from the expression's actual lexical context, not a name scan.
   """
 
-  alias Vaisto.{Parser, TypeChecker, TypeFormatter}
-  alias Vaisto.LSP.Position
+  alias Vaisto.{Compilation, Parser, TypeFormatter}
+  alias Vaisto.LSP.{Hover, Position}
 
-  @doc """
-  Collect inlay hints for the given source text.
-  Returns a list of LSP InlayHint objects.
-  """
-  def collect(text, file \\ nil) do
-    with {:ok, raw_ast} <- safe_parse(text, file),
-         {:ok, _type, typed_ast} <- safe_check(raw_ast) do
-      lines = String.split(text, ~r/\r\n|\r|\n/)
-      forms = if is_list(typed_ast), do: typed_ast, else: [typed_ast]
-      raw_forms = if is_list(raw_ast), do: raw_ast, else: [raw_ast]
+  def collect(source, file \\ nil) do
+    with {:ok, ast} <- Compilation.parse(source, file: file) do
+      source_map = Parser.source_map(source, file: file)
+      candidates = candidates(ast, source, source_map)
 
-      Enum.zip(raw_forms, forms)
-      |> Enum.flat_map(fn {raw, typed} -> collect_hints(raw, typed, lines) end)
+      ranges =
+        candidates
+        |> Enum.map(& &1.range)
+        |> Enum.uniq_by(&{&1.offset, &1.length})
+        |> Enum.with_index(fn range, id -> Map.put(range, :id, id) end)
+
+      ids = Map.new(ranges, &{{&1.offset, &1.length}, &1.id})
+
+      if ranges == [] do
+        []
+      else
+        with {:ok, types, _} <- Hover.infer_ranges(source, ranges, file) do
+          candidates
+          |> Enum.flat_map(fn candidate ->
+            id = Map.fetch!(ids, {candidate.range.offset, candidate.range.length})
+
+            with %{type: type} <- Map.get(types, id),
+                 type when type != nil <- hinted_type(type, candidate.mode) do
+              [
+                %{
+                  "position" => Position.from_offset(source, candidate.position),
+                  "label" => ": " <> TypeFormatter.format(type),
+                  "kind" => 1,
+                  "paddingLeft" => false,
+                  "paddingRight" => true
+                }
+              ]
+            else
+              _ -> []
+            end
+          end)
+          |> Enum.uniq()
+          |> Enum.sort_by(&{&1["position"]["line"], &1["position"]["character"]})
+        else
+          _ -> []
+        end
+      end
     else
       _ -> []
     end
+  rescue
+    _ -> []
   end
 
-  defp safe_parse(text, file) do
-    try do
-      {:ok, Parser.parse(text, file: file)}
-    rescue
-      _ -> :error
-    end
+  defp hinted_type(type, :value), do: type
+
+  defp hinted_type([:->, params, _, _], {:parameter, index, count}) when length(params) == count,
+    do: Enum.at(params, index)
+
+  defp hinted_type(_, _), do: nil
+
+  defp candidates({:let, bindings, _, loc} = node, source, source_map) do
+    own =
+      case parameter_source(node, "let", loc, source, source_map) do
+        {:ok, content, start} ->
+          entries = Parser.parse_with_source(content, locations: true)
+
+          Enum.zip(bindings, Enum.chunk_every(entries, 2))
+          |> Enum.flat_map(fn
+            {{name, _}, [{name, _, name_loc}, {_, _, value_loc}]}
+            when is_atom(name) and name not in [:_, true, false, nil] ->
+              [
+                %{
+                  range: %{offset: start + offset(content, value_loc), length: value_loc.length},
+                  position: start + offset(content, name_loc) + name_loc.length,
+                  mode: :value
+                }
+              ]
+
+            _ ->
+              []
+          end)
+
+        _ ->
+          []
+      end
+
+    own ++ descendants(node, source, source_map)
   end
 
-  defp safe_check(ast) do
-    try do
-      TypeChecker.check(ast)
-    rescue
-      _ -> :error
-    end
-  end
+  defp candidates({:fn, params, _, loc} = node, source, source_map) do
+    own =
+      if Enum.all?(params, &(is_atom(&1) and &1 not in [:_, true, false, nil])) do
+        with {:ok, content, start} <- parameter_source(node, "fn", loc, source, source_map),
+             range when not is_nil(range) <- Map.get(source_map.spans, {loc.line, loc.col}) do
+          entries = Parser.parse_with_source(content, locations: true)
 
-  # ============================================================================
-  # Hint collection
-  # ============================================================================
+          if length(entries) == length(params) do
+            entries
+            |> Enum.with_index()
+            |> Enum.flat_map(fn
+              {{name, _, name_loc}, index} when is_atom(name) ->
+                [
+                  %{
+                    range: range,
+                    position: start + offset(content, name_loc) + name_loc.length,
+                    mode: {:parameter, index, length(params)}
+                  }
+                ]
 
-  # defn without return type annotation
-  defp collect_hints(
-    {:defn, name, params, _body, %Parser.Loc{} = loc},
-    {:defn, _tname, _tparams, tbody, {:fn, param_types, _ret}},
-    lines
-  ) do
-    param_hints(name, params, param_types, loc, lines) ++
-      collect_body_hints(tbody, lines)
-  end
-
-  # defn with return type annotation
-  defp collect_hints(
-    {:defn, name, params, _body, _ret_ann, %Parser.Loc{} = loc},
-    {:defn, _tname, _tparams, tbody, {:fn, param_types, _ret}},
-    lines
-  ) do
-    param_hints(name, params, param_types, loc, lines) ++
-      collect_body_hints(tbody, lines)
-  end
-
-  # Top-level let
-  defp collect_hints(
-    {:let, raw_bindings, _body_raw, %Parser.Loc{} = loc},
-    {:let, typed_bindings, body_typed, _type},
-    lines
-  ) do
-    let_hints(raw_bindings, typed_bindings, loc, lines) ++
-      collect_body_hints(body_typed, lines)
-  end
-
-  defp collect_hints(_, _, _lines), do: []
-
-  # Walk typed AST body for nested let bindings
-  defp collect_body_hints({:let, typed_bindings, body, _type}, lines) do
-    # For nested lets in typed AST, we only have typed bindings (no raw positions)
-    # We use name scanning to find positions
-    nested = typed_bindings
-    |> Enum.flat_map(fn
-      {name, _value, type} when is_atom(name) ->
-        type_str = TypeFormatter.format(type)
-        find_let_binding_hints(name, type_str, lines)
-      _ -> []
-    end)
-    nested ++ collect_body_hints(body, lines)
-  end
-
-  defp collect_body_hints({:do, exprs, _type}, lines) when is_list(exprs) do
-    Enum.flat_map(exprs, &collect_body_hints(&1, lines))
-  end
-
-  defp collect_body_hints({:if, _cond, then_br, else_br, _type}, lines) do
-    collect_body_hints(then_br, lines) ++ collect_body_hints(else_br, lines)
-  end
-
-  defp collect_body_hints(_, _lines), do: []
-
-  # ============================================================================
-  # Parameter hints — unannotated params only
-  # ============================================================================
-
-  defp param_hints(_name, params, param_types, loc, lines) when is_list(params) do
-    # Find the parameter list in source by locating "[" after defn name on the same line
-    line_text = Enum.at(lines, loc.line - 1, "")
-
-    params
-    |> Enum.zip(param_types)
-    |> Enum.flat_map(fn
-      # Annotated param like {name, :int} — skip
-      {{_name, _ann}, _type} -> []
-      # Unannotated param — show hint
-      {name, type} when is_atom(name) ->
-        name_str = Atom.to_string(name)
-        type_str = TypeFormatter.format(type)
-        # Find param position in the line
-        case find_token_in_line(line_text, name_str, loc.line) do
-          nil -> []
-          {line_num, col} ->
-            [make_hint(type_str, line_num, col + String.length(name_str))]
-        end
-      _ -> []
-    end)
-  end
-  defp param_hints(_, _, _, _, _), do: []
-
-  # ============================================================================
-  # Let binding hints
-  # ============================================================================
-
-  defp let_hints(raw_bindings, typed_bindings, loc, lines) when is_list(typed_bindings) do
-    line_text = Enum.at(lines, loc.line - 1, "")
-
-    typed_bindings
-    |> Enum.flat_map(fn
-      {name, _value, type} when is_atom(name) ->
-        # Check if the raw binding has an annotation
-        has_annotation = Keyword.keyword?(raw_bindings) and
-          not is_nil(Keyword.get(raw_bindings, name))
-
-        if has_annotation do
-          # Let bindings in raw AST are keyword-style [name: value]
-          # They never have type annotations, so always show hint
-          name_str = Atom.to_string(name)
-          type_str = TypeFormatter.format(type)
-          case find_token_in_line(line_text, name_str, loc.line) do
-            nil ->
-              # Try scanning all lines for multiline let
-              find_let_binding_hints(name, type_str, lines)
-            {line_num, col} ->
-              [make_hint(type_str, line_num, col + String.length(name_str))]
+              _ ->
+                []
+            end)
+          else
+            []
           end
         else
-          []
-        end
-      _ -> []
-    end)
-  end
-  defp let_hints(_, _, _, _), do: []
-
-  # Scan source lines for a let-binding variable name
-  defp find_let_binding_hints(name, type_str, lines) do
-    name_str = Atom.to_string(name)
-    lines
-    |> Enum.with_index(1)
-    |> Enum.flat_map(fn {line_text, line_num} ->
-      # Look for the name inside a let binding context (after "[")
-      if String.contains?(line_text, name_str) do
-        case find_token_in_line(line_text, name_str, line_num) do
-          nil -> []
-          {ln, col} -> [make_hint(type_str, ln, col + String.length(name_str))]
+          _ -> []
         end
       else
         []
       end
-    end)
-    |> Enum.take(1)  # Only first occurrence
+
+    own ++ descendants(node, source, source_map)
   end
 
-  # ============================================================================
-  # Position helpers
-  # ============================================================================
+  defp candidates(node, source, source_map) when is_tuple(node),
+    do: descendants(node, source, source_map)
 
-  # Find a token in a line, ensuring it's a whole word (not part of a larger name)
-  defp find_token_in_line(line_text, token, line_num) do
-    case :binary.match(line_text, token) do
-      {pos, len} ->
-        before_ok = pos == 0 or not word_char?(String.at(line_text, pos - 1))
-        after_ok = (pos + len) >= String.length(line_text) or
-          not word_char?(String.at(line_text, pos + len))
+  defp candidates(nodes, source, source_map) when is_list(nodes),
+    do: Enum.flat_map(nodes, &candidates(&1, source, source_map))
 
-        if before_ok and after_ok do
-          {line_num, pos}  # 1-based line, 0-based col
-        else
-          # Try searching further in the string
-          rest = String.slice(line_text, (pos + len)..-1//1)
-          case find_token_in_line(rest, token, line_num) do
-            nil -> nil
-            {ln, col} -> {ln, col + pos + len}
-          end
-        end
-      :nomatch -> nil
+  defp candidates(_, _, _), do: []
+
+  defp descendants(node, source, source_map),
+    do: node |> Tuple.to_list() |> Enum.flat_map(&candidates(&1, source, source_map))
+
+  defp parameter_source(_node, head, loc, source, source_map) do
+    tokens =
+      Enum.drop_while(source_map.tokens, fn {_, token_loc} ->
+        token_loc.line != loc.line or token_loc.col != loc.col
+      end)
+
+    case tokens do
+      [{"(", _}, {^head, _}, {"[", bracket} | _] ->
+        %{offset: start, length: length} =
+          Map.fetch!(source_map.spans, {bracket.line, bracket.col})
+
+        {:ok, String.slice(source, start + 1, length - 2), start + 1}
+
+      _ ->
+        :not_found
     end
   end
 
-  defp word_char?(nil), do: false
-  defp word_char?(ch), do: Regex.match?(~r/[a-zA-Z0-9_\-]/, ch)
-
-  defp make_hint(type_str, line, col) do
-    {lsp_line, lsp_col} = Position.vaisto_to_lsp(line, col)
-    %{
-      "position" => %{"line" => lsp_line, "character" => lsp_col},
-      "label" => ": #{type_str}",
-      "kind" => 1,  # Type
-      "paddingLeft" => false,
-      "paddingRight" => true
-    }
+  defp offset(source, loc) do
+    source
+    |> String.split("\n")
+    |> Enum.take(loc.line - 1)
+    |> Enum.reduce(loc.col - 1, fn line, n -> n + String.length(line) + 1 end)
   end
 end

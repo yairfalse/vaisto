@@ -3,9 +3,8 @@ defmodule Vaisto.CLI do
   Command-line interface for the Vaisto compiler.
 
   Usage:
-    vaistoc file.va                     # Compile to file.beam (Core Erlang backend)
+    vaistoc file.va                     # Compile verified Core to native BEAM
     vaistoc file.va -o out.beam         # Compile to specific output
-    vaistoc file.va --backend elixir    # Use Elixir backend instead
     vaistoc --eval "(+ 1 2)"            # Evaluate expression
     vaistoc repl                        # Start interactive REPL
 
@@ -21,11 +20,11 @@ defmodule Vaisto.CLI do
 
   def main(args) do
     case parse_args(args) do
-      {:compile, input, output, backend} ->
-        compile_file(input, output, backend)
+      {:compile, input, output} ->
+        compile_file(input, output)
 
-      {:build, source_dir, output_dir, backend, src_roots} ->
-        build_dir(source_dir, output_dir, backend, src_roots)
+      {:build, source_dir, output_dir, src_roots} ->
+        build_dir(source_dir, output_dir, src_roots)
 
       :build_manifest ->
         build_manifest(".")
@@ -36,8 +35,8 @@ defmodule Vaisto.CLI do
       {:add, path} ->
         add_dependency(path)
 
-      {:eval, code, backend} ->
-        eval_code(code, backend)
+      {:eval, code} ->
+        eval_code(code)
 
       :repl ->
         Vaisto.REPL.start()
@@ -65,7 +64,7 @@ defmodule Vaisto.CLI do
   defp parse_compile_or_eval(args) do
     {opts, positional, invalid} =
       OptionParser.parse(args,
-        strict: [output: :string, backend: :string, eval: :string, help: :boolean],
+        strict: [output: :string, eval: :string, help: :boolean],
         aliases: [o: :output, e: :eval, h: :help]
       )
 
@@ -77,14 +76,12 @@ defmodule Vaisto.CLI do
             :help
 
           eval = opts[:eval] ->
-            backend = parse_backend(opts[:backend] || "core")
-            {:eval, eval, backend}
+            {:eval, eval}
 
           length(positional) == 1 ->
             [input] = positional
-            backend = parse_backend(opts[:backend] || "core")
             output = opts[:output] || default_output(input)
-            {:compile, input, output, backend}
+            {:compile, input, output}
 
           true ->
             {:error, Errors.cli_error("invalid arguments", hint: "Run vaistoc --help to see available options")}
@@ -95,7 +92,7 @@ defmodule Vaisto.CLI do
   defp parse_build(args) do
     {opts, positional, invalid} =
       OptionParser.parse(args,
-        strict: [output: :string, backend: :string, src: :keep],
+        strict: [output: :string, src: :keep],
         aliases: [o: :output]
       )
 
@@ -104,13 +101,12 @@ defmodule Vaisto.CLI do
         {:error, Errors.cli_error("unknown build option: #{flag}", hint: "Run vaistoc --help to see available options")}
 
       [] ->
-        # No positional args = try manifest mode (flags like --backend apply on top)
+        # No positional args = try manifest mode.
         if positional == [] and Manifest.exists?(".") do
           :build_manifest
         else
           dir = List.first(positional) || "."
           output = opts[:output] || dir
-          backend = parse_backend(opts[:backend] || "core")
 
           src_roots =
             opts
@@ -122,7 +118,7 @@ defmodule Vaisto.CLI do
               end
             end)
 
-          {:build, dir, output, backend, src_roots}
+          {:build, dir, output, src_roots}
         end
     end
   end
@@ -133,10 +129,6 @@ defmodule Vaisto.CLI do
   defp parse_add([path | _]) when byte_size(path) > 0, do: {:add, path}
   defp parse_add([]), do: {:error, Errors.cli_error("add requires a path argument", hint: "Usage: vaistoc add ../my-dep")}
 
-  defp parse_backend("core"), do: :core
-  defp parse_backend("elixir"), do: :elixir
-  defp parse_backend(other), do: {:error, Errors.cli_error("unknown backend: #{other}", hint: "Valid backends: core, elixir")}
-
   defp default_output(input) do
     dir = Path.dirname(input)
     # Use path-based module naming
@@ -145,7 +137,7 @@ defmodule Vaisto.CLI do
     Path.join(dir, Atom.to_string(module_name) <> ".beam")
   end
 
-  defp compile_file(input, output, backend) do
+  defp compile_file(input, output) do
     unless String.ends_with?(input, ".va") do
       IO.puts(:stderr, "error: expected a .va file, got #{Path.extname(input) |> then(fn "" -> "no extension"; ext -> ext end)}: #{input}")
       System.halt(1)
@@ -156,11 +148,8 @@ defmodule Vaisto.CLI do
         # Use path-based module naming
         module_name = Vaisto.Build.infer_module_name(input)
 
-        case compile(source, module_name, backend) do
+        case Compilation.compile(source, module_name, prelude: @prelude) do
           {:ok, _module, bytecode} when is_binary(bytecode) ->
-            write_beam(input, output, bytecode)
-
-          {:ok, _module, [{_mod, bytecode} | _rest]} when is_binary(bytecode) ->
             write_beam(input, output, bytecode)
 
           {:error, reason} ->
@@ -174,34 +163,15 @@ defmodule Vaisto.CLI do
     end
   end
 
-  defp eval_code(code, backend) do
+  defp eval_code(code) do
     if String.trim(code) == "" do
       IO.puts(:stderr, "error: empty expression")
       System.halt(1)
     end
 
-    case compile(code, VaistoEval, backend) do
-      {:ok, module, bytecode} ->
-        # Load the module into the VM
-        :code.load_binary(module, ~c"vaisto_eval", bytecode)
-
-        result =
-          try do
-            module.main()
-          rescue
-            e in ArithmeticError ->
-              IO.puts(:stderr, "error: #{Exception.message(e)}")
-              System.halt(1)
-
-            e ->
-              IO.puts(:stderr, "error: runtime error: #{Exception.message(e)}")
-              System.halt(1)
-          end
-
+    case Compilation.run(code, prelude: @prelude) do
+      {:ok, result} ->
         IO.puts(inspect(result))
-        # Clean up
-        :code.purge(module)
-        :code.delete(module)
 
       {:error, reason} ->
         IO.puts(:stderr, format_error("<eval>", reason))
@@ -209,11 +179,11 @@ defmodule Vaisto.CLI do
     end
   end
 
-  defp build_dir(source_dir, output_dir, backend, src_roots) do
+  defp build_dir(source_dir, output_dir, src_roots) do
     IO.puts("  Building #{source_dir} ...")
 
     # Use custom source roots if provided, otherwise use defaults
-    opts = [output_dir: output_dir, backend: backend, prelude: @prelude]
+    opts = [output_dir: output_dir, prelude: @prelude]
     opts = if src_roots != [], do: Keyword.put(opts, :source_roots, src_roots), else: opts
 
     case Vaisto.Build.build(source_dir, opts) do
@@ -352,14 +322,18 @@ defmodule Vaisto.CLI do
     end
   end
 
-  defp compile(source, module_name, backend) do
-    Compilation.compile(source, module_name,
-      prelude: @prelude,
-      backend: backend
-    )
-  end
-
   defp start_lsp do
+    # stdout belongs exclusively to LSP frames, even with debug logging on.
+    for %{id: id, module: :logger_std_h, config: %{type: :standard_io}} = handler <- :logger.get_handler_config() do
+      config = Map.drop(handler, [:id, :module])
+      :ok = :logger.remove_handler(id)
+      case :logger.add_handler(id, :logger_std_h, put_in(config, [:config, :type], :standard_error)) do
+        :ok -> :ok
+        {:error, reason} ->
+          :ok = :logger.add_handler(id, :logger_std_h, config)
+          raise "cannot route LSP logs to stderr: #{inspect(reason)}"
+      end
+    end
     # Start LSP server on stdio
     {:ok, _pid} = Vaisto.LSP.Server.start()
     # Keep the process alive
@@ -372,9 +346,7 @@ defmodule Vaisto.CLI do
   end
 
   defp format_error(file, %Vaisto.Error{} = error) do
-    # Structured error - format it
-    # This shouldn't normally happen since check_with_source formats them
-    "#{file}: #{error.message}"
+    "#{file}: #{Vaisto.Error.to_string(error)}"
   end
 
   defp format_error(file, reason) do
@@ -411,9 +383,8 @@ defmodule Vaisto.CLI do
       With vaisto.toml:  vaistoc build       Reads manifest, resolves deps
       Without:           vaistoc build src/   Builds directory directly (no packages)
 
-    Backends:
-      core    - Direct Core Erlang compilation (default, smaller output)
-      elixir  - Compile via Elixir AST (more features, larger output)
+    Compilation:
+      Source → bidirectional elaboration → verified Liquid Core → native BEAM
 
     Module Naming:
       Module names are inferred from file paths:
@@ -424,7 +395,7 @@ defmodule Vaisto.CLI do
       (ns Vaisto.Lexer)                     Optional: validates against path
       (import Vaisto.Lexer.Types)           Import another module
       (import Std.List :as L)               Import with alias
-      (Std.List/fold xs 0 +)                Call imported function
+      (Std.List/fold + 0 [1 2 3])           Call imported function
 
     Examples:
       vaistoc counter.va

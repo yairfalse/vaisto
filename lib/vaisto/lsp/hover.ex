@@ -7,7 +7,22 @@ defmodule Vaisto.LSP.Hover do
   """
 
   alias Vaisto.Parser
-  alias Vaisto.TypeChecker
+  alias Vaisto.{Compilation, Elab, TypeFormatter}
+
+  @probe :__vaisto_type_probe__
+  @builtins Map.new([:+, :-, :*, :<, :>, :<=, :>=], fn op ->
+    result = if op in [:<, :>, :<=, :>=], do: "Bool", else: "Int"
+    float_result = if result == "Bool", do: "Bool", else: "Float"
+    {op, "(Int, Int) -> #{result} or (Float, Float) -> #{float_result}"}
+  end) |> Map.merge(%{
+    :/ => "(Float, Float) -> Float", :div => "(Int, Int) -> Int", :rem => "(Int, Int) -> Int",
+    :== => "(a, a) -> Bool (ground data or an Eq dictionary)",
+    :!= => "(a, a) -> Bool (ground data or an Eq dictionary)",
+    :not => "(Bool) -> Bool", :and => "(Bool, Bool) -> Bool", :or => "(Bool, Bool) -> Bool",
+    :length => "forall a. (List(a)) -> Int", :head => "forall a. (List(a)) -> a",
+    :tail => "forall a. (List(a)) -> List(a)", :empty? => "forall a. (List(a)) -> Bool",
+    :cons => "forall a. (a, List(a)) -> List(a)", :str => "ground data -> String"
+  })
 
   # Safe atom conversion — avoids exhausting the atom table in a long-running LSP
   defp safe_to_atom(str) do
@@ -47,8 +62,8 @@ defmodule Vaisto.LSP.Hover do
   """
   def get_hover(source, line, col, file \\ nil) do
     with {:ok, token, span} <- token_at(source, line, col),
-         {:ok, type, kind} <- lookup_type(source, token, span, file) do
-      contents = format_hover(token, type, kind: kind)
+         {:ok, type, kind, constraints} <- lookup_type(source, token, span, file) do
+      contents = format_hover(token, type, kind: kind, constraints: constraints)
       {:ok, %{contents: contents, range: span}}
     else
       :not_found -> :not_found
@@ -81,6 +96,34 @@ defmodule Vaisto.LSP.Hover do
   Extracts top-level definitions and their types.
   Returns map of name => %{type: type, loc: loc, kind: kind}
   """
+  def build_env([:module, _, _ | items]) do
+    constraints = for [:meta | entries] <- items,
+      [:"function-constraints" | cs] <- entries,
+      [f | cs] <- cs, into: %{}, do: {f, Enum.map(cs, fn [c, t, _] -> {c, t} end)}
+    Enum.reduce(items, %{}, fn
+      [:def, f, type, _], env ->
+        cs = Map.get(constraints, f, [])
+        type = if cs == [] do
+          type
+        else
+          case type do
+            [:forall, binders, [:->, _, _, user]] -> [:forall, binders, user]
+            [:->, _, _, user] -> user
+          end
+        end
+        Map.put(env, f, %{type: type, loc: nil, kind: :function, constraints: cs})
+      [:type, name, params, [kind | members]], env ->
+        type = [name | Enum.map(params, &[:tvar, &1])]
+        env = Map.put(env, name, %{type: Elab.Types.generalize(type), loc: nil, kind: :type})
+        constructors = if kind == :sum, do: members, else: [[name | Enum.map(members, fn [_, t] -> t end)]]
+        Enum.reduce(constructors, env, fn [c | args], env ->
+          signature = if args == [], do: type, else: [:->, args, [:eff, :closed], type]
+          Map.put(env, c, %{type: Elab.Types.generalize(signature), loc: nil, kind: :constructor})
+        end)
+      _, env -> env
+    end)
+  end
+
   def build_env(typed_asts) when is_list(typed_asts) do
     Enum.reduce(typed_asts, %{}, &extract_definition/2)
   end
@@ -97,7 +140,10 @@ defmodule Vaisto.LSP.Hover do
   - :kind - Symbol kind (:function, :variable, :type, :constructor)
   """
   def format_hover(name, type, opts \\ []) do
-    type_str = Error.format_type(type)
+    type_str = if is_binary(type), do: type, else: Error.format_type(type)
+    constraints = Keyword.get(opts, :constraints, [])
+    type_str = if constraints == [], do: type_str, else:
+      Enum.map_join(constraints, ", ", fn {c, t} -> "#{c} #{TypeFormatter.format(t)}" end) <> " => " <> type_str
     loc = Keyword.get(opts, :loc)
     kind = Keyword.get(opts, :kind)
 
@@ -201,15 +247,15 @@ defmodule Vaisto.LSP.Hover do
   # Type Lookup
   # ============================================================================
 
-  defp lookup_type(source, token, _span, file) do
+  defp lookup_type(source, token, span, file) do
     # First check if it's a literal
     case literal_type(token) do
       {:ok, type} ->
-        {:ok, type, :literal}
+        {:ok, type, :literal, []}
 
       :not_literal ->
         # Parse and type check, then look up in environment
-        lookup_in_checked_source(source, token, file)
+        lookup_in_checked_source(source, token, span, file)
     end
   end
 
@@ -240,8 +286,10 @@ defmodule Vaisto.LSP.Hover do
 
       # Atom/keyword
       String.starts_with?(token, ":") ->
-        atom = token |> String.trim_leading(":") |> String.to_existing_atom()
-        {:ok, {:atom, atom}}
+        case token |> String.trim_leading(":") |> safe_to_atom() do
+          nil -> {:ok, :Atom}
+          atom -> {:ok, {:atom, atom}}
+        end
 
       # Boolean
       token in ["true", "false"] ->
@@ -254,164 +302,108 @@ defmodule Vaisto.LSP.Hover do
 
   # Find the definition location for a symbol in the source
   defp find_definition_loc(source, token, file) do
-    case safe_to_atom(token) do
-      nil -> :not_found
-      token_atom ->
-        try do
-          ast = Parser.parse(source, file: file)
-          ASTAnalyzer.find_definition_at(ast, token_atom)
-        rescue
-          _ -> :not_found
-        end
-    end
-  end
-
-  # Definition finding is now handled by ASTAnalyzer
-
-  defp lookup_in_checked_source(source, token, file) do
     try do
       ast = Parser.parse(source, file: file)
-      case TypeChecker.check(ast) do
-        {:ok, _type, typed_ast} ->
-          token_atom = safe_to_atom(token)
-
-          # First, search the typed AST for variable references with this name
-          # This finds local variables in let bindings, function params, etc.
-          case find_var_type(typed_ast, token_atom) do
-            {:ok, type} ->
-              {:ok, type, :variable}
-
-            :not_found ->
-              # Check top-level definitions
-              env = build_env(typed_ast)
-              case Map.get(env, token_atom) do
-                %{type: type, kind: kind} ->
-                  {:ok, type, kind}
-
-                nil ->
-                  # Check primitives
-                  case Map.get(TypeChecker.primitives(), token_atom) do
-                    nil -> :not_found
-                    type -> {:ok, type, :builtin}
-                  end
-              end
-          end
-
-        {:error, _} ->
-          # Type check failed, try primitives only
-          token_atom = safe_to_atom(token)
-          case Map.get(TypeChecker.primitives(), token_atom) do
-            nil -> :not_found
-            type -> {:ok, type, :builtin}
-          end
+      case safe_to_atom(token) do
+        nil -> :not_found
+        token_atom ->
+          ASTAnalyzer.find_definition_at(ast, token_atom)
       end
     rescue
       _ -> :not_found
     end
   end
 
-  # Find a variable reference in the typed AST and return its type
-  defp find_var_type({:var, name, type}, name), do: {:ok, type}
-  defp find_var_type({:var, name, type, _loc}, name), do: {:ok, type}
+  # Definition finding is now handled by ASTAnalyzer
 
-  # Let bindings: search both bindings and body
-  defp find_var_type({:let, bindings, body, _type}, name) do
-    # Check bindings first
-    case find_in_bindings(bindings, name) do
-      {:ok, _} = found -> found
-      :not_found -> find_var_type(body, name)
+  defp lookup_in_checked_source(source, token, span, file) do
+    source_map = Parser.source_map(source)
+    range = Map.fetch!(source_map.spans, {span.line, span.col}) |> Map.put(:id, 0)
+    case infer_ranges(source, [range], file) do
+      {:ok, %{0 => %{type: type, kind: kind}}, _core} -> {:ok, type, kind, []}
+      _ -> lookup_declaration(source, token, file)
+    end
+  rescue
+    _ -> :not_found
+  end
+
+  @doc false
+  def infer_ranges(source, ranges, file \\ nil) do
+    size = String.length(source)
+    valid = Enum.all?(ranges, fn r -> is_integer(r.id) and is_integer(r.offset) and
+      is_integer(r.length) and r.offset >= 0 and r.length > 0 and r.offset + r.length <= size end)
+    if not valid or String.contains?(source, Atom.to_string(@probe)) do
+      {:error, :invalid_type_query}
+    else
+      openings = Enum.group_by(ranges, & &1.offset)
+      closings = Enum.group_by(ranges, &(&1.offset + &1.length))
+      transformed = (String.graphemes(source) ++ [""])
+        |> Enum.with_index()
+        |> Enum.map_join(fn {char, offset} ->
+          closing = Map.get(closings, offset, []) |> Enum.sort_by(&{&1.offset, &1.id}, :desc)
+            |> Enum.map_join(fn _ -> ")" end)
+          opening = Map.get(openings, offset, []) |> Enum.sort_by(&{-(&1.offset + &1.length), &1.id})
+            |> Enum.map_join(fn r -> "(#{@probe} #{r.id} " end)
+          closing <> opening <> char
+        end)
+      with {:ok, core} <- Compilation.check_liquid(transformed, :EditorQuery,
+             Keyword.put(native_opts(file), :type_probe, true)) do
+        {:ok, query_types(core, %{}), core}
+      end
+    end
+  rescue
+    _ -> {:error, :invalid_type_query}
+  end
+
+  defp query_types([:meta, [:"type-at", id, type, kind]], types), do: Map.put(types, id, %{type: type, kind: kind})
+  defp query_types(items, types) when is_list(items), do: Enum.reduce(items, types, &query_types/2)
+  defp query_types(_, types), do: types
+
+  defp native_opts(file) do
+    path = if is_binary(file), do: (URI.parse(file).path || file), else: "."
+    [file: file, format_errors: false, search_paths: Enum.uniq([Path.dirname(URI.decode(path)), "."])]
+  end
+
+  defp lookup_declaration(source, token, file) do
+    name = safe_to_atom(token)
+    case Compilation.check_liquid(source, :EditorDeclarations, native_opts(file)) do
+      {:ok, core} -> declaration_info(build_env(core), name)
+      _ ->
+        # A declared datatype is still useful when an incomplete expression
+        # leaves a phantom parameter undetermined. This is declaration lookup,
+        # not acceptance of the incomplete program.
+        with {:ok, ast} <- Compilation.parse(source, file: file) do
+          declarations = Enum.flat_map(List.wrap(ast), fn
+            {:deftype, _, _, _} = form -> [form]
+            {:deftype_deriving, n, body, _, loc} -> [{:deftype, n, body, loc}]
+            {:import, _, _, _} = form -> [form]
+            _ -> []
+          end)
+          with {:ok, core} <- Elab.module(declarations, Keyword.take(native_opts(file), [:search_paths])),
+               :ok <- Vaisto.Liquid.Lint.check_module(core) do
+            declaration_info(build_env(core), name)
+          else
+            _ -> builtin_info(name)
+          end
+        else
+          _ -> builtin_info(name)
+        end
     end
   end
 
-  # Function call: search function and args
-  defp find_var_type({:call, func, args, _type}, name) do
-    case find_var_type(func, name) do
-      {:ok, _} = found -> found
-      :not_found -> find_in_list(args, name)
-    end
-  end
-  defp find_var_type({:call, func, args, _type, _loc}, name) do
-    case find_var_type(func, name) do
-      {:ok, _} = found -> found
-      :not_found -> find_in_list(args, name)
+  defp declaration_info(env, name) do
+    case Map.fetch(env, name) do
+      {:ok, info} -> {:ok, info.type, info.kind, Map.get(info, :constraints, [])}
+      :error -> builtin_info(name)
     end
   end
 
-  # If expression: search condition, then, else
-  defp find_var_type({:if, cond, then_b, else_b, _type}, name) do
-    find_in_list([cond, then_b, else_b], name)
-  end
-
-  # Do block: search all expressions
-  defp find_var_type({:do, exprs, _type}, name) do
-    find_in_list(exprs, name)
-  end
-
-  # Function/lambda: search body
-  defp find_var_type({:fn, _params, body, _type}, name) do
-    find_var_type(body, name)
-  end
-
-  # Module: search all definitions
-  defp find_var_type({:module, defs}, name) do
-    find_in_list(defs, name)
-  end
-
-  # defn: search body
-  defp find_var_type({:defn, _name, _params, body, _type}, search_name) do
-    find_var_type(body, search_name)
-  end
-
-  # Match expression
-  defp find_var_type({:match, expr, clauses, _type}, name) do
-    case find_var_type(expr, name) do
-      {:ok, _} = found -> found
-      :not_found -> Enum.find_value(clauses, :not_found, fn {pat, body, _} ->
-        case find_var_type(pat, name) do {:ok, _} = f -> f; _ -> find_var_type(body, name) end
-      end)
+  defp builtin_info(name) do
+    case Map.fetch(@builtins, name) do
+      {:ok, text} -> {:ok, text, :builtin, []}
+      :error -> :not_found
     end
   end
-
-  # Multi-clause defn
-  defp find_var_type({:defn_multi, _name, _arity, clauses, _type}, search_name) do
-    Enum.find_value(clauses, :not_found, fn clause ->
-      body = elem(clause, tuple_size(clause) - 2)
-      find_var_type(body, search_name)
-    end)
-  end
-
-  # List literal
-  defp find_var_type({:list, elements, _type}, name), do: find_in_list(elements, name)
-
-  # Tuple literal
-  defp find_var_type({:tuple, elements, _type}, name), do: find_in_list(elements, name)
-
-  # Field access
-  defp find_var_type({:field_access, expr, _field, _type}, name), do: find_var_type(expr, name)
-  defp find_var_type({:field_access, expr, _f, _ft, _rt}, name), do: find_var_type(expr, name)
-
-  # List: search all elements
-  defp find_var_type(list, name) when is_list(list) do
-    find_in_list(list, name)
-  end
-
-  # Literals and other nodes: not found
-  defp find_var_type(_, _), do: :not_found
-
-  defp find_in_list([], _name), do: :not_found
-  defp find_in_list([head | tail], name) do
-    case find_var_type(head, name) do
-      {:ok, _} = found -> found
-      :not_found -> find_in_list(tail, name)
-    end
-  end
-
-  # Find in let bindings: [{name, typed_expr, type}, ...]
-  defp find_in_bindings([], _name), do: :not_found
-  defp find_in_bindings([{bind_name, _expr, type} | _rest], name) when bind_name == name do
-    {:ok, type}
-  end
-  defp find_in_bindings([_ | rest], name), do: find_in_bindings(rest, name)
 
   # ============================================================================
   # Environment Building

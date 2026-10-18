@@ -8,27 +8,25 @@ defmodule Vaisto.Refine.SurfaceTest do
   alias Vaisto.{Compilation, Parser}
   alias Vaisto.Refine.Surface
 
-  defp strip(ast), do: Vaisto.LocationStripper.strip(ast) |> elem(0)
-
   describe "parsing refined types" do
     test "a refined parameter type" do
-      assert {:defn, :"safe-div", [{:x, :int}, {:y, {:refine, :d, :int, pred}}], _body, :int} =
-               strip(Parser.parse("(defn safe-div [x :int y {d :int | (!= d 0)}] :int (div x y))"))
+      assert {:defn, :"safe-div", [{:x, :int}, {:y, {:refine, :d, :int, pred}}], _body, :int, %Parser.Loc{}} =
+               Parser.parse("(defn safe-div [x :int y {d :int | (!= d 0)}] :int (div x y))")
 
       assert {:call, :!=, [:d, 0], _} = pred
     end
 
     test "a refined result type, and a refined list parameter" do
-      assert {:defn, :clamp0, [x: :int], {:if, _, 0, :x, _}, {:refine, :r, :int, _}} =
-               strip(Parser.parse("(defn clamp0 [x :int] {r :int | (>= r 0)} (if (< x 0) 0 x))"))
+      assert {:defn, :clamp0, [x: :int], {:if, _, 0, :x, _}, {:refine, :r, :int, _}, %Parser.Loc{}} =
+               Parser.parse("(defn clamp0 [x :int] {r :int | (>= r 0)} (if (< x 0) 0 x))")
 
-      assert {:defn, :at, [{:xs, {:refine, :v, {:call, :List, _, _}, _}}], _, :int} =
-               strip(Parser.parse("(defn at [xs {v (List :int) | (> (len v) 0)}] :int (head xs))"))
+      assert {:defn, :at, [{:xs, {:refine, :v, {:call, :List, _, _}, _}}], _, :int, %Parser.Loc{}} =
+               Parser.parse("(defn at [xs {v (List :int) | (> (len v) 0)}] :int (head xs))")
     end
 
     test "a guarded defn keeps its guard" do
-      assert {:defn, :f, [{:n, {:refine, :v, :int, _}}], 1, :int, {:call, :>, _, _}} =
-               strip(Parser.parse("(defn f [n {v :int | (> v 0)} :when (> n 1)] :int 1)"))
+      assert {:defn, :f, [{:n, {:refine, :v, :int, _}}], 1, :int, {:call, :>, _, _}, %Parser.Loc{}} =
+               Parser.parse("(defn f [n {v :int | (> v 0)} :when (> n 1)] :int 1)")
     end
 
     test "braces in a parameter list are only ever a refined type (RFC §4.4 hazard)" do
@@ -41,15 +39,15 @@ defmodule Vaisto.Refine.SurfaceTest do
     end
 
     test "a tuple body is still a body" do
-      assert {:defn, :f, [], {:tuple_pattern, [1, 2]}, :any} = strip(Parser.parse("(defn f [] {1 2})"))
-      assert {:defn, :g, [], {:do, [{:tuple_pattern, [1, 2]}, 3], _}, :any} = strip(Parser.parse("(defn g [] {1 2} 3)"))
+      assert {:defn, :f, [], {:tuple_pattern, [1, 2]}, :any, %Parser.Loc{}} = Parser.parse("(defn f [] {1 2})")
+      assert {:defn, :g, [], {:do, [{:tuple_pattern, [1, 2]}, 3], _}, :any, %Parser.Loc{}} = Parser.parse("(defn g [] {1 2} 3)")
     end
 
     test "D6: only a capitalized head is a return type, so a call stays in the body (P0-5)" do
-      assert {:defn, :f, [x: :any], {:do, [{:call, :println, _, _}, :x], _}, :any} =
-               strip(Parser.parse("(defn f [x] (println x) x)"))
+      assert {:defn, :f, [x: :any], {:do, [{:call, :println, _, _}, :x], _}, :any, %Parser.Loc{}} =
+               Parser.parse("(defn f [x] (println x) x)")
 
-      assert {:defn, :g, [], {:list, [], _}, {:call, :List, _, _}} = strip(Parser.parse("(defn g [] (List :int) (list))"))
+      assert {:defn, :g, [], {:list, [], _}, {:call, :List, _, _}, %Parser.Loc{}} = Parser.parse("(defn g [] (List :int) (list))")
     end
 
     test "D27: a match clause with :when is refused, not silently ignored" do
@@ -59,7 +57,7 @@ defmodule Vaisto.Refine.SurfaceTest do
   end
 
   describe "split/1" do
-    test "gives HM the base types and the checker the signatures" do
+    test "gives the elaborator base types and the verifier the refinements" do
       ast = Parser.parse("(defn safe-div [x :int y {d :int | (!= d 0)}] :int (div x y))\n(defn plain [x :int] :int x)")
       {plain, sigs} = Surface.split(ast)
 
@@ -76,10 +74,18 @@ defmodule Vaisto.Refine.SurfaceTest do
     end
   end
 
-  test "entry points that do not check refinements refuse refined code instead of dropping it" do
+  test "public entry points verify refinements instead of dropping them" do
     source = "(defn f [x {v :int | (> v 0)}] :int x)"
-    assert {:error, %Vaisto.Error{message: "refinement types are not checked on this path"}} = Vaisto.check(source)
-    assert_raise RuntimeError, ~r/refinement types are not checked/, fn -> Vaisto.compile_string(source) end
+    assert {:ok, core} = Vaisto.check(source)
+    assert :ok = Vaisto.Liquid.Lint.check_module(core)
+    assert {:ok, :SurfacePublicProbe, beam} = Vaisto.compile_string(source, :SurfacePublicProbe)
+    assert is_binary(beam)
+    :code.purge(:SurfacePublicProbe)
+    :code.delete(:SurfacePublicProbe)
+    unsafe = "(defn f [x :int] {v :int | (> v 0)} x)"
+    assert {:error, [_ | _]} = Vaisto.check(unsafe)
+    assert {:error, _} = Vaisto.compile_string(unsafe, :SurfaceRejectedProbe)
+    assert :code.is_loaded(:SurfaceRejectedProbe) == false
     assert {:error, _} = Compilation.compile(source, :SurfaceProbe, load: false, format_errors: false, z3: "/nonexistent/z3")
   end
 end

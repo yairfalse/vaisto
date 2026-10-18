@@ -1,6 +1,6 @@
-(deftype Tree (Leaf v) (Node left right))
+(deftype Tree (Leaf :int) (Node Tree Tree))
 
-(defn tree-sum [t]
+(defn tree-sum [t :Tree] :int
   (match t
     [(Leaf v) v]
     [(Node l r) (+ (tree-sum l) (tree-sum r))]))

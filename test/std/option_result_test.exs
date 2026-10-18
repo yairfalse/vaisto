@@ -52,7 +52,7 @@ defmodule Vaisto.Std.OptionResultTest do
 
     test "option-then returns None when chained on None" do
       source = """
-      (option-then (None) (fn [x] (Some x)))
+      (option-then (the (Option :int) (None)) (fn [x] (Some x)))
       """
       assert {:ok, mod} = Runner.compile_and_load(with_prelude(source), :OptionThenNone)
       assert Runner.call(mod, :main) == {:None}
@@ -68,7 +68,7 @@ defmodule Vaisto.Std.OptionResultTest do
 
     test "option-some? returns false for None" do
       source = """
-      (option-some? (None))
+      (option-some? (the (Option :int) (None)))
       """
       assert {:ok, mod} = Runner.compile_and_load(with_prelude(source), :OptionSomeFalse)
       assert Runner.call(mod, :main) == false
@@ -78,7 +78,7 @@ defmodule Vaisto.Std.OptionResultTest do
   describe "Result type" do
     test "result-unwrap returns value for Ok" do
       source = """
-      (result-unwrap (Ok 42) 0)
+      (result-unwrap (the (Result :int :string) (Ok 42)) 0)
       """
       assert {:ok, mod} = Runner.compile_and_load(with_prelude(source), :ResultUnwrapOk)
       assert Runner.call(mod, :main) == 42
@@ -94,7 +94,7 @@ defmodule Vaisto.Std.OptionResultTest do
 
     test "result-map applies function to Ok" do
       source = """
-      (result-map (Ok 5) (fn [x] (* x 2)))
+      (result-map (the (Result :int :string) (Ok 5)) (fn [x] (* x 2)))
       """
       assert {:ok, mod} = Runner.compile_and_load(with_prelude(source), :ResultMapOk)
       assert Runner.call(mod, :main) == {:Ok, 10}
@@ -110,11 +110,11 @@ defmodule Vaisto.Std.OptionResultTest do
 
     test "result-then chains successful operations" do
       source = """
-      (defn safe-divide [n d]
-        (if (== d 0)
+      (defn safe-divide [n :float d :float] (Result :float :string)
+        (if (== d 0.0)
           (Err "division by zero")
           (Ok (/ n d))))
-      (result-then (Ok 10) (fn [x] (safe-divide x 2)))
+      (result-then (Ok 10.0) (fn [x] (safe-divide x 2.0)))
       """
       assert {:ok, mod} = Runner.compile_and_load(with_prelude(source), :ResultThenOk)
       assert Runner.call(mod, :main) == {:Ok, 5.0}
@@ -130,7 +130,7 @@ defmodule Vaisto.Std.OptionResultTest do
 
     test "result-ok? returns true for Ok" do
       source = """
-      (result-ok? (Ok 42))
+      (result-ok? (the (Result :int :string) (Ok 42)))
       """
       assert {:ok, mod} = Runner.compile_and_load(with_prelude(source), :ResultOkTrue)
       assert Runner.call(mod, :main) == true
@@ -138,7 +138,7 @@ defmodule Vaisto.Std.OptionResultTest do
 
     test "result-ok? returns false for Err" do
       source = """
-      (result-ok? (Err "nope"))
+      (result-ok? (the (Result :int :string) (Err "nope")))
       """
       assert {:ok, mod} = Runner.compile_and_load(with_prelude(source), :ResultOkFalse)
       assert Runner.call(mod, :main) == false
@@ -148,7 +148,7 @@ defmodule Vaisto.Std.OptionResultTest do
   describe "Erlang interop" do
     test "from-erlang-result converts {:ok, v} to Ok" do
       source = """
-      (from-erlang-result {:ok 42})
+      (from-erlang-result (up (Tuple :atom :int) {:ok 42}))
       """
       assert {:ok, mod} = Runner.compile_and_load(with_prelude(source), :FromErlangOk)
       assert Runner.call(mod, :main) == {:Ok, 42}
@@ -156,7 +156,7 @@ defmodule Vaisto.Std.OptionResultTest do
 
     test "from-erlang-result converts {:error, e} to Err" do
       source = """
-      (from-erlang-result {:error "bad"})
+      (from-erlang-result (up (Tuple :atom :string) {:error "bad"}))
       """
       assert {:ok, mod} = Runner.compile_and_load(with_prelude(source), :FromErlangErr)
       assert Runner.call(mod, :main) == {:Err, "bad"}
@@ -164,7 +164,7 @@ defmodule Vaisto.Std.OptionResultTest do
 
     test "from-erlang-result converts :ok atom to Ok(:ok)" do
       source = """
-      (from-erlang-result :ok)
+      (from-erlang-result (up :atom :ok))
       """
       assert {:ok, mod} = Runner.compile_and_load(with_prelude(source), :FromErlangAtom)
       assert Runner.call(mod, :main) == {:Ok, :ok}
@@ -172,7 +172,7 @@ defmodule Vaisto.Std.OptionResultTest do
 
     test "to-erlang-result converts Ok to {:ok, v}" do
       source = """
-      (to-erlang-result (Ok 42))
+      (to-erlang-result (Ok (up :int 42)))
       """
       assert {:ok, mod} = Runner.compile_and_load(with_prelude(source), :ToErlangOk)
       assert Runner.call(mod, :main) == {:ok, 42}
@@ -180,7 +180,7 @@ defmodule Vaisto.Std.OptionResultTest do
 
     test "to-erlang-result converts Err to {:error, e}" do
       source = """
-      (to-erlang-result (Err "failed"))
+      (to-erlang-result (Err (up :string "failed")))
       """
       assert {:ok, mod} = Runner.compile_and_load(with_prelude(source), :ToErlangErr)
       assert Runner.call(mod, :main) == {:error, "failed"}
@@ -191,7 +191,7 @@ defmodule Vaisto.Std.OptionResultTest do
     test "not negation works via if" do
       # Test boolean negation pattern used in prelude
       source = """
-      (defn my-not [b]
+      (defn my-not [b :bool] :bool
         (if b false true))
       (list (my-not true) (my-not false))
       """

@@ -1,229 +1,102 @@
 defmodule Vaisto.Build.Compiler do
   @moduledoc """
-  Single-file compilation orchestration for Vaisto.
-
-  Responsible for compiling a single source file through the pipeline:
-  parse → type check → emit → write outputs (.beam + .vsi)
-
-  This is a domain service that coordinates the compilation phases
-  without owning state.
-
-  ## Compilation Result
-
-  A successful compilation returns:
-
-      {:ok, %{
-        module: :"Elixir.Foo",
-        beam: "/path/to/Foo.beam",
-        interface: %{exports: %{...}, types: %{...}}
-      }}
+  Compile one source file to native BEAM and a verified canonical interface.
+  Imported signatures are Core interfaces, never an HM environment.
   """
 
   require Logger
-
-  alias Vaisto.{Parser, TypeChecker, Interface, Compilation}
+  alias Vaisto.{Compilation, Elab, Error, ErrorFormatter, Errors, Interface, Refine}
   alias Vaisto.Build.ModuleNaming
+  alias Vaisto.Liquid.Lower
 
-  @type compilation_result :: %{
-          module: atom(),
-          beam: String.t(),
-          interface: map()
-        }
-
-  @type compile_opts :: [
-          output_dir: String.t(),
-          backend: :core | :elixir,
-          prelude: String.t() | nil,
-          source_roots: [ModuleNaming.source_root()],
-          search_paths: [String.t()],
-          auto_import: boolean()
-        ]
+  @type compilation_result :: %{module: atom(), beam: String.t(), interface: map()}
 
   @doc """
-  Compile a single Vaisto source file.
+  Compile a source file without loading it. The second argument maps source
+  module names to canonical interface trees. With auto_import enabled,
+  missing supplied interfaces are read from search_paths.
 
-  ## Options
-
-    * `:output_dir` - where to write .beam and .vsi files (default: source directory)
-    * `:backend` - `:core` or `:elixir` (default: `:core`)
-    * `:prelude` - prelude source to prepend (default: nil)
-    * `:source_roots` - module naming configuration
-    * `:search_paths` - directories to search for .vsi interfaces
-    * `:auto_import` - automatically load .vsi files for imports (default: true)
-
-  ## Returns
-
-    * `{:ok, result}` - compilation result with module, beam path, interface
-    * `{:error, reason}` - compilation error with formatted message
+  Options include output_dir, prelude, source_roots, search_paths,
+  auto_import and refinement solver options.
   """
-  @spec compile(String.t(), map(), compile_opts()) ::
-          {:ok, compilation_result()} | {:error, String.t()}
-  def compile(source_path, import_env, opts \\ []) do
-    output_dir = Keyword.get(opts, :output_dir, Path.dirname(source_path))
-    backend = Keyword.get(opts, :backend, :core)
+  @spec compile(String.t(), map(), keyword()) :: {:ok, compilation_result()} | {:error, term()}
+  def compile(source_path, interfaces, opts \\ []) do
+    case File.read(source_path) do
+      {:ok, source} -> compile_source(source, source_path, interfaces, opts)
+      {:error, reason} -> {:error, Errors.source_read_error(source_path, reason)}
+    end
+  end
+
+  defp compile_source(source, path, interfaces, opts) do
+    if ctx = Keyword.get(opts, :build_context),
+      do: Logger.debug("build[#{ctx.build_id}]: compiling #{path}")
+
+    output_dir = Keyword.get(opts, :output_dir, Path.dirname(path))
     prelude = Keyword.get(opts, :prelude)
-    search_paths = Keyword.get(opts, :search_paths, [output_dir])
-    auto_import = Keyword.get(opts, :auto_import, true)
+    full_source = if prelude, do: prelude <> "\n\n" <> source, else: source
     source_roots = Keyword.get(opts, :source_roots, ModuleNaming.default_source_roots())
-    ctx = Keyword.get(opts, :build_context)
 
-    if ctx, do: Logger.debug("build[#{ctx.build_id}]: compiling #{source_path}")
+    search_paths =
+      if Keyword.get(opts, :auto_import, true),
+        do: Keyword.get(opts, :search_paths, [output_dir]),
+        else: []
 
-    with {:ok, source} <- read_source(source_path),
-         full_source = prepend_prelude(source, prelude),
-         {ast, sigs} = Vaisto.Refine.Surface.split(Parser.parse(full_source, file: source_path)),
-         {:ok, module_name} <- resolve_module_name(ast, source_path, source_roots),
-         env = build_environment(ast, import_env, search_paths, auto_import),
-         {:ok, typed_ast} <- typecheck(ast, env, full_source),
-         :ok <- check_refinements(typed_ast, sigs, ast, full_source, Keyword.put(opts, :env, env)),
-         {:ok, bytecode} <- emit(typed_ast, module_name, backend),
-         :ok <- write_outputs(module_name, bytecode, typed_ast, Map.keys(sigs), output_dir) do
-      {:ok,
-       %{
-         module: module_name,
-         beam: Path.join(output_dir, "#{module_name}.beam"),
-         interface: %{
-           exports: extract_exports(typed_ast),
-           types: extract_types(typed_ast)
-         }
-       }}
-    end
-  end
+    interfaces = Map.merge(interfaces, Keyword.get(opts, :interfaces, %{}))
 
-  @doc """
-  Load type environment for a list of imports.
-
-  Searches for .vsi interface files and builds the type environment.
-  """
-  @spec load_import_env([{atom(), atom() | nil}], [String.t()] | String.t()) :: map()
-  def load_import_env(imports, search_paths) when is_list(search_paths) do
-    Enum.reduce(imports, %{}, fn {module, alias_name}, acc ->
-      case Interface.load(module, search_paths) do
-        {:ok, interface} ->
-          aliases = if alias_name, do: %{module => alias_name}, else: %{}
-          Map.merge(acc, Interface.build_env([interface], aliases))
-
-        {:error, _reason} ->
-          # Interface not found - module may be external
-          acc
-      end
-    end)
-  end
-
-  def load_import_env(imports, search_dir) when is_binary(search_dir) do
-    load_import_env(imports, [search_dir])
-  end
-
-  # Private helpers
-
-  defp read_source(path) do
-    case File.read(path) do
-      {:ok, source} -> {:ok, source}
-      {:error, reason} -> {:error, Vaisto.Errors.source_read_error(path, reason)}
-    end
-  end
-
-  defp prepend_prelude(source, nil), do: source
-  defp prepend_prelude(source, prelude), do: prelude <> "\n\n" <> source
-
-  defp resolve_module_name(ast, source_path, source_roots) do
-    {declared_ns, _imports} = Interface.extract_declarations(ast)
-    ModuleNaming.validate_namespace(declared_ns, source_path, source_roots: source_roots)
-  end
-
-  defp build_environment(ast, import_env, search_paths, auto_import) do
-    {_ns, imports} = Interface.extract_declarations(ast)
-
-    auto_import_env =
-      if auto_import do
-        load_import_env(imports, search_paths)
+    result =
+      with :error <- Keyword.fetch(opts, :backend),
+           {:ok, ast} <- Compilation.parse(full_source, file: path),
+           {plain, sigs} = Refine.Surface.split(ast),
+           {declared, _} = Interface.extract_declarations(plain),
+           {:ok, module} <-
+             ModuleNaming.validate_namespace(declared, path, source_roots: source_roots),
+           {:ok, core} <-
+             Elab.module(plain,
+               name: module,
+               interfaces: interfaces,
+               search_paths: search_paths,
+               atoms: Keyword.get(opts, :atoms, :existing)
+             ),
+           locs =
+             for(
+               form <- List.wrap(plain),
+               is_tuple(form),
+               elem(form, 0) == :defn,
+               into: %{},
+               do: {elem(form, 1), elem(form, tuple_size(form) - 1)}
+             ),
+           {:ok, tree} <-
+             Interface.from_core(core, sigs, Keyword.merge(opts, source: full_source, locs: locs)),
+           {:ok, ^module, binary} <- Lower.compile(core, module, load: false),
+           {:ok, interface} <- Interface.validate_core(tree),
+           :ok <- write_outputs(module, binary, tree, output_dir) do
+        {:ok,
+         %{module: module, beam: Path.join(output_dir, "#{module}.beam"), interface: interface}}
       else
-        %{}
+        {:ok, _backend} -> {:error, Errors.backend_selection_removed()}
+        other -> other
       end
 
-    TypeChecker.primitives()
-    |> merge_env(auto_import_env)
-    |> merge_env(import_env)
-  end
-
-  # Imported class and instance registries extend the built-in ones. A plain
-  # merge would replace them, and Show, Eq and the numeric classes with them.
-  defp merge_env(env, imported) do
-    Map.merge(env, imported, fn
-      key, base, extra when key in [:__classes__, :__instances__] -> Map.merge(base, extra)
-      :__refined_imports__, base, extra -> MapSet.union(base, extra)
-      _key, _base, extra -> extra
-    end)
-  end
-
-  defp typecheck(ast, env, source) do
-    case Compilation.typecheck(ast, env) do
-      {:ok, _type, typed_ast} ->
-        {:ok, typed_ast}
-
+    case result do
       {:error, errors} when is_list(errors) ->
-        formatted = Vaisto.ErrorFormatter.format_all(errors, source)
-        {:error, formatted}
+        {:error, ErrorFormatter.format_all(Enum.map(errors, &Error.normalize/1), full_source)}
 
-      {:error, %Vaisto.Error{} = error} ->
-        formatted = Vaisto.ErrorFormatter.format(error, source)
-        {:error, formatted}
+      {:error, %Error{} = error} ->
+        {:error, ErrorFormatter.format(error, full_source)}
+
+      {:outside, reason} ->
+        {:error, "the compiler does not support #{reason}"}
+
+      result ->
+        result
     end
   end
 
-  defp check_refinements(typed_ast, sigs, ast, source, opts) do
-    case Compilation.check_refinements(typed_ast, sigs, ast, source, Keyword.take(opts, [:solver, :rlimit, :z3, :env])) do
-      :ok -> :ok
-      {:error, errors} -> {:error, Vaisto.ErrorFormatter.format_all(errors, source)}
+  defp write_outputs(module, binary, tree, dir) do
+    with :ok <- File.mkdir_p(dir),
+         :ok <- File.write(Path.join(dir, "#{module}.beam"), binary),
+         :ok <- Interface.save_core(tree, dir) do
+      :ok
     end
   end
-
-  defp emit(typed_ast, module_name, backend) do
-    case Compilation.emit(typed_ast, module_name, backend, load: false) do
-      {:ok, _mod, bytecode} -> {:ok, bytecode}
-      {:error, reason} -> {:error, Vaisto.Errors.compilation_error(inspect(reason))}
-    end
-  end
-
-  defp write_outputs(module_name, bytecode, typed_ast, refined, output_dir) do
-    # Write .beam
-    beam_path = Path.join(output_dir, "#{module_name}.beam")
-    File.mkdir_p!(Path.dirname(beam_path))
-    File.write!(beam_path, extract_bytecode(bytecode))
-
-    # Write .vsi interface
-    types = extract_types(typed_ast)
-    exports = extract_exports(typed_ast)
-    Interface.save(module_name, Map.put(exports, :__refined__, refined), types, output_dir)
-
-    :ok
-  end
-
-  defp extract_bytecode(bytecode) when is_binary(bytecode), do: bytecode
-  defp extract_bytecode([{_mod, bytecode} | _]) when is_binary(bytecode), do: bytecode
-
-  defp extract_types({:module, forms}) do
-    forms
-    |> Enum.filter(&match?({:deftype, _, _, _}, &1))
-    |> Enum.reduce(%{}, fn {:deftype, name, _kind, type}, acc ->
-      Map.put(acc, name, type)
-    end)
-  end
-
-  defp extract_types(_), do: %{}
-
-  defp extract_exports({:module, forms}) do
-    forms
-    |> Enum.filter(fn
-      {:defn, _, _, _, _} -> true
-      {:defn_multi, _, _, _, _} -> true
-      _ -> false
-    end)
-    |> Enum.reduce(%{}, fn
-      {:defn, name, _params, _body, type}, acc -> Map.put(acc, name, type)
-      {:defn_multi, name, _arity, _clauses, type}, acc -> Map.put(acc, name, type)
-    end)
-  end
-
-  defp extract_exports(_), do: %{}
 end

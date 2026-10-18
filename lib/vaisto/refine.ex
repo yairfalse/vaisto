@@ -1,122 +1,52 @@
 defmodule Vaisto.Refine do
   @moduledoc """
-  Refinement checking, Phase 2.1 (RFC §4.4, §21): `Int`, `Bool` and `List`
-  refinements on the parameters and results of single-clause functions,
-  checked with Z3.
+  Refinements on Int, Bool and List parameters/results, checked with Z3.
 
-  It runs through the bridge of RFC §21.1. HM checks the plain program, the
-  Phase 0 adapter turns HM's output into Liquid Core, and the refined
-  signatures are attached to that Core. The program then runs on today's
-  backends, so the bridge is gated:
-
-    1. every definition that has refinements, or uses a function that does,
-       must be in the Core fragment, pass Core Lint, and use only constructs
-       the backends agree on (no externs, no effects but `crash`, no `==` on
-       Float);
-    2. the square must commute: erasing the refined Core gives back the Core
-       the backends' program came from (K11);
-    3. any failure is a build error, never "runs unchecked".
-
-  A program without refinements never reaches this module, and never starts
-  the solver.
+  `check_core/3` verifies elaborated Core directly. Every definition passes
+  independent Core Lint, and refinement erasure must match its actual type.
+  Unsupported verification fails closed. Programs without refinements never
+  start the solver.
   """
 
+
   alias Vaisto.Error
-  alias Vaisto.Liquid.{Adapter, Lint}
+  alias Vaisto.Liquid.Lint
   alias Vaisto.Refine.{IR, Render, Solver, Surface, VC, VCGen}
 
   @doc """
-  Check a program's refinements. `typed` is HM's output for the plain
-  program and `sigs` the refined signatures from `Surface.split/1`.
+  Check refined signatures against elaborated Core, without HM or the adapter.
 
-  Options: `:solver` (default `Solver.Z3`), `:source` (for error spans),
-  `:locs` (definition name to `%Loc{}`), and solver options such as `:rlimit`.
+  Lint checks the whole module; each supplied signature must name a definition
+  and erase to its actual type. The same verification conditions, solver and
+  diagnostics are used. A module with no refinements never
+  starts a solver. Unsupported verification constructs remain build errors.
   """
-  @spec check(term(), %{atom() => Surface.Sig.t()}, keyword()) :: :ok | {:error, [Error.t()]}
-  def check(typed, sigs, opts) do
-    with :ok <- imported_calls(typed, Keyword.get(opts, :env, %{}), opts) do
-      if map_size(sigs) == 0, do: :ok, else: check_refined(typed, sigs, opts)
-    end
-  end
+  @spec check_core(term(), %{atom() => Surface.Sig.t()}, keyword()) :: :ok | {:error, [Error.t()]}
+  def check_core(core, sigs, opts \\ []) do
+    with :ok <- gate_lint(core, opts) do
+      defs = for [:def, f, _, _] <- core, into: MapSet.new(), do: f
+      missing = Map.keys(sigs) |> Enum.reject(&MapSet.member?(defs, &1))
 
-  # Interfaces do not carry refinements until Phase 1b (§8.1), so a call to an
-  # imported refined function could not be checked. It is refused, and
-  # refinements are checked within one module (§21.2, C12).
-  defp imported_calls(typed, env, opts) do
-    refined = Map.get(env, :__refined_imports__, MapSet.new())
+      cond do
+        missing != [] ->
+          {:error, Enum.map(missing, &gate_error({&1, "refined signature has no definition: `#{&1}`"}, opts))}
 
-    calls =
-      if MapSet.size(refined) == 0, do: [], else: qualified_calls(typed) |> Enum.filter(&MapSet.member?(refined, &1)) |> Enum.uniq()
+        map_size(sigs) == 0 -> :ok
 
-    case calls do
-      [] ->
-        :ok
-
-      calls ->
-        {:error,
-         for call <- calls do
-           [mod, f] = call |> Atom.to_string() |> String.split(":", parts: 2)
-           Error.new("`#{mod}/#{f}` has refinements, and calls across modules are not checked yet",
-             hint: "call it from inside `#{mod}`; checking imported refinements needs refined interfaces (RFC C12)",
-             span: Keyword.get(opts, :span)
-           )
-         end}
-    end
-  end
-
-  defp qualified_calls({:qualified, mod, f}), do: [:"#{mod}:#{f}"]
-  defp qualified_calls(term) when is_tuple(term), do: term |> Tuple.to_list() |> qualified_calls()
-  defp qualified_calls(term) when is_list(term), do: Enum.flat_map(term, &qualified_calls/1)
-  defp qualified_calls(_term), do: []
-
-  defp check_refined(typed, sigs, opts) do
-    {:ok, core, skipped} = Adapter.module(typed)
-    refined = MapSet.new(Map.keys(sigs))
-
-    with :ok <- gate_forms(typed, core, skipped, refined, opts),
-         involved = involved(core, refined),
-         :ok <- gate_lint(core, opts),
-         :ok <- commutes(core, sigs, opts),
-         {:ok, lsigs} <- logic_sigs(sigs, core, opts),
-         {vcs, []} <- VCGen.generate(core, lsigs, involved) do
-      solve(vcs, opts)
-    else
-      {:error, _} = error -> error
-      {_vcs, gate} -> {:error, Enum.map(Enum.uniq(gate), &gate_error(&1, opts))}
-    end
-  end
-
-  # --- Gates (§21.1) -----------------------------------------------------------------
-
-  # A form the adapter did not translate is not checked, so it must not use a
-  # refined function: its calls would otherwise run unchecked.
-  defp gate_forms(typed, core, skipped, refined, opts) do
-    adapted = for [:def, f | _] <- core, into: MapSet.new(), do: f
-    skipped = Map.new(skipped)
-
-    unchecked =
-      typed
-      |> forms()
-      |> Enum.reject(&declaration?/1)
-      |> Enum.map(&{definition_name(&1), &1})
-      |> Enum.filter(fn {name, form} ->
-        (name == nil or not MapSet.member?(adapted, name)) and (mentions?(form, refined) or MapSet.member?(refined, name))
-      end)
-
-    problems =
-      for {name, _form} <- unchecked do
-        case Map.fetch(skipped, name) do
-          {:ok, why} -> {name, "refinement checking cannot read `#{name}` yet (#{why}), and it has or uses refinements"}
-          :error -> {name, "this form uses a refined function, but only calls inside a `defn` are checked"}
-        end
+        true ->
+          with :ok <- commutes(core, sigs, opts),
+               {:ok, lsigs} <- logic_sigs(sigs, core, opts),
+               {vcs, []} <- VCGen.generate(core, lsigs, involved(core, MapSet.new(Map.keys(sigs)))) do
+            solve(vcs, opts)
+          else
+            {:error, _} = error -> error
+            {_vcs, problems} -> {:error, Enum.map(Enum.uniq(problems), &gate_error(&1, opts))}
+          end
       end
-
-    if problems == [], do: :ok, else: {:error, Enum.map(problems, &gate_error(&1, opts))}
+    end
   end
 
-  # A1 (§4.4): Core Lint's rules hold for the program. Every definition, not
-  # only the refined ones and their callers: a value HM mistyped elsewhere
-  # (a Float typed Int, D17) reaches refined code through ordinary calls.
+  # Independent Core Lint checks every definition, not only refined ones.
   defp gate_lint(core, opts) do
     case Lint.check_module(core) do
       :ok ->
@@ -128,10 +58,7 @@ defmodule Vaisto.Refine do
     end
   end
 
-  # K11: erase(elaborate_refined(P)) = adapter(HM(P)). The refined elaboration
-  # writes each refined position's type from the signature's own base type,
-  # independently of HM, so erasure gives back the adapter's Core exactly when
-  # every refinement is attached to the term HM typed (RFC §21.1).
+  # K11: refinement erasure agrees with the actual elaborated signature.
   defp commutes(core, sigs, opts) do
     defs = for [:def, f, type, _] <- core, into: %{}, do: {f, type}
 
@@ -186,20 +113,6 @@ defmodule Vaisto.Refine do
     users = for [:def, f, _type, fun] <- core, mentions?(fun, refined), into: MapSet.new(), do: f
     MapSet.union(refined, users)
   end
-
-  defp forms({:module, forms}), do: forms
-  defp forms(form), do: [form]
-
-  # Forms without code. Classes and instances have method bodies, so they are
-  # not declarations here: the adapter does not translate them, and they must
-  # not use refined functions.
-  defp declaration?(form) when is_tuple(form), do: elem(form, 0) in [:deftype, :extern, :ns, :import, :defprompt]
-  defp declaration?(_form), do: false
-
-  # The name a top-level form defines, or nil for an expression. Only these
-  # forms define anything; elem(form, 1) of a call is its callee.
-  defp definition_name(form) when is_tuple(form) and elem(form, 0) in [:defn, :defn_multi, :defval, :process], do: elem(form, 1)
-  defp definition_name(_form), do: nil
 
   # Whether a term mentions any of the names, anywhere. Conservative: a local
   # binder spelled like a refined function counts too.

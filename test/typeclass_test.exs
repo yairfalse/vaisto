@@ -1,7 +1,8 @@
 defmodule Vaisto.TypeClassTest do
   use ExUnit.Case
   alias Vaisto.Parser
-  alias Vaisto.TypeChecker
+  alias Vaisto.Elab
+  alias Vaisto.Liquid.{Canonical, Eval, Lint}
   alias Vaisto.Runner
   alias Vaisto.Error
 
@@ -57,26 +58,28 @@ defmodule Vaisto.TypeClassTest do
     test "eq with matching int types succeeds" do
       code = "(eq 1 2)"
       ast = Parser.parse(code)
-      assert {:ok, :bool, _typed_ast} = TypeChecker.check(ast)
+      assert {:ok, _typed_ast} = Elab.module(ast)
     end
 
     test "eq with matching string types succeeds" do
       code = ~s|(eq "a" "b")|
       ast = Parser.parse(code)
-      assert {:ok, :bool, _typed_ast} = TypeChecker.check(ast)
+      assert {:ok, _typed_ast} = Elab.module(ast)
     end
 
     test "eq with matching bool types succeeds" do
       code = "(eq true false)"
       ast = Parser.parse(code)
-      assert {:ok, :bool, _typed_ast} = TypeChecker.check(ast)
+      assert {:ok, _typed_ast} = Elab.module(ast)
     end
 
-    test "eq resolves to class_call in typed AST" do
+    test "eq resolves to checked Core dictionaries" do
       code = "(eq 1 2)"
       ast = Parser.parse(code)
-      {:ok, :bool, typed_ast} = TypeChecker.check(ast)
-      assert {:class_call, :Eq, :eq, :int, _args, :bool} = typed_ast
+      assert {:ok, core} = Elab.module(ast)
+      assert :ok = Lint.check_module(core)
+      assert Canonical.render(core) =~ "Instance.Eq.Int"
+      assert {:ok, false} = Eval.run(core, :main, [])
     end
   end
 
@@ -88,20 +91,22 @@ defmodule Vaisto.TypeClassTest do
     test "show with int succeeds" do
       code = "(show 42)"
       ast = Parser.parse(code)
-      assert {:ok, :string, _typed_ast} = TypeChecker.check(ast)
+      assert {:ok, _typed_ast} = Elab.module(ast)
     end
 
     test "show with string succeeds" do
       code = ~s|(show "hello")|
       ast = Parser.parse(code)
-      assert {:ok, :string, _typed_ast} = TypeChecker.check(ast)
+      assert {:ok, _typed_ast} = Elab.module(ast)
     end
 
-    test "show resolves to class_call" do
+    test "show resolves to a checked dictionary call" do
       code = "(show 42)"
       ast = Parser.parse(code)
-      {:ok, :string, typed_ast} = TypeChecker.check(ast)
-      assert {:class_call, :Show, :show, :int, _args, :string} = typed_ast
+      assert {:ok, core} = Elab.module(ast)
+      assert :ok = Lint.check_module(core)
+      assert Canonical.render(core) =~ "Instance.Show.Int"
+      assert {:ok, "42"} = Eval.run(core, :main, [])
     end
   end
 
@@ -119,13 +124,13 @@ defmodule Vaisto.TypeClassTest do
       (to-str 42)
       """
       ast = Parser.parse(code)
-      assert {:ok, _, _typed_ast} = TypeChecker.check(ast)
+      assert {:ok, _typed_ast} = Elab.module(ast)
     end
 
     test "missing instance produces error" do
       code = "(eq (list 1 2) (list 3 4))"
       ast = Parser.parse(code)
-      result = TypeChecker.check(ast)
+      result = Elab.module(ast)
       assert {:error, _} = result
     end
 
@@ -138,9 +143,9 @@ defmodule Vaisto.TypeClassTest do
         (method1 [x] x))
       """
       ast = Parser.parse(code)
-      result = TypeChecker.check(ast)
+      result = Elab.module(ast)
       assert {:error, err} = result
-      assert error_text(err) =~ "missing methods"
+      assert error_text(err) =~ "missing instance method `method2`"
     end
   end
 
@@ -150,32 +155,32 @@ defmodule Vaisto.TypeClassTest do
 
   describe "codegen: eq" do
     test "(eq 1 1) => true" do
-      {:ok, mod} = Runner.compile_and_load("(eq 1 1)", :EqIntTrue, backend: :core)
+      {:ok, mod} = Runner.compile_and_load("(eq 1 1)", :EqIntTrue)
       assert true == Runner.call(mod, :main)
     end
 
     test "(eq 1 2) => false" do
-      {:ok, mod} = Runner.compile_and_load("(eq 1 2)", :EqIntFalse, backend: :core)
+      {:ok, mod} = Runner.compile_and_load("(eq 1 2)", :EqIntFalse)
       assert false == Runner.call(mod, :main)
     end
 
     test "(eq true true) => true" do
-      {:ok, mod} = Runner.compile_and_load("(eq true true)", :EqBoolTrue, backend: :core)
+      {:ok, mod} = Runner.compile_and_load("(eq true true)", :EqBoolTrue)
       assert true == Runner.call(mod, :main)
     end
 
     test "(eq true false) => false" do
-      {:ok, mod} = Runner.compile_and_load("(eq true false)", :EqBoolFalse, backend: :core)
+      {:ok, mod} = Runner.compile_and_load("(eq true false)", :EqBoolFalse)
       assert false == Runner.call(mod, :main)
     end
 
     test ~s|(eq "hello" "hello") => true| do
-      {:ok, mod} = Runner.compile_and_load(~s|(eq "hello" "hello")|, :EqStrTrue, backend: :core)
+      {:ok, mod} = Runner.compile_and_load(~s|(eq "hello" "hello")|, :EqStrTrue)
       assert true == Runner.call(mod, :main)
     end
 
     test ~s|(eq "hello" "world") => false| do
-      {:ok, mod} = Runner.compile_and_load(~s|(eq "hello" "world")|, :EqStrFalse, backend: :core)
+      {:ok, mod} = Runner.compile_and_load(~s|(eq "hello" "world")|, :EqStrFalse)
       assert false == Runner.call(mod, :main)
     end
   end
@@ -186,19 +191,19 @@ defmodule Vaisto.TypeClassTest do
 
   describe "codegen: show" do
     test "(show 42) => string" do
-      {:ok, mod} = Runner.compile_and_load("(show 42)", :ShowInt, backend: :core)
+      {:ok, mod} = Runner.compile_and_load("(show 42)", :ShowInt)
       result = Runner.call(mod, :main)
       assert result == "42"
     end
 
     test "(show true) => string" do
-      {:ok, mod} = Runner.compile_and_load("(show true)", :ShowBool, backend: :core)
+      {:ok, mod} = Runner.compile_and_load("(show true)", :ShowBool)
       result = Runner.call(mod, :main)
       assert result == "true"
     end
 
     test ~s|(show "hi") => "hi"| do
-      {:ok, mod} = Runner.compile_and_load(~s|(show "hi")|, :ShowStr, backend: :core)
+      {:ok, mod} = Runner.compile_and_load(~s|(show "hi")|, :ShowStr)
       result = Runner.call(mod, :main)
       assert result == "hi"
     end
@@ -217,7 +222,7 @@ defmodule Vaisto.TypeClassTest do
         (describe [x] (str "number:" x)))
       (describe 42)
       """
-      {:ok, mod} = Runner.compile_and_load(code, :DescribableE2E, backend: :core)
+      {:ok, mod} = Runner.compile_and_load(code, :DescribableE2E)
       assert "number:42" == Runner.call(mod, :main)
     end
   end
@@ -232,7 +237,7 @@ defmodule Vaisto.TypeClassTest do
       (defn same? [x :int y :int] :bool (eq x y))
       (same? 5 5)
       """
-      {:ok, mod} = Runner.compile_and_load(code, :EqInDefn, backend: :core)
+      {:ok, mod} = Runner.compile_and_load(code, :EqInDefn)
       assert true == Runner.call(mod, :main)
     end
 
@@ -241,7 +246,7 @@ defmodule Vaisto.TypeClassTest do
       (defn same? [x :int y :int] :bool (eq x y))
       (same? 5 3)
       """
-      {:ok, mod} = Runner.compile_and_load(code, :EqInDefnFalse, backend: :core)
+      {:ok, mod} = Runner.compile_and_load(code, :EqInDefnFalse)
       assert false == Runner.call(mod, :main)
     end
   end
@@ -256,7 +261,7 @@ defmodule Vaisto.TypeClassTest do
       (let [s (show 99)]
         s)
       """
-      {:ok, mod} = Runner.compile_and_load(code, :ShowInLet, backend: :core)
+      {:ok, mod} = Runner.compile_and_load(code, :ShowInLet)
       assert "99" == Runner.call(mod, :main)
     end
   end
@@ -293,14 +298,16 @@ defmodule Vaisto.TypeClassTest do
     test "neq with int types succeeds" do
       code = "(neq 1 2)"
       ast = Parser.parse(code)
-      assert {:ok, :bool, _typed_ast} = TypeChecker.check(ast)
+      assert {:ok, _typed_ast} = Elab.module(ast)
     end
 
-    test "neq resolves to class_call" do
+    test "neq resolves to a checked dictionary call" do
       code = "(neq 1 2)"
       ast = Parser.parse(code)
-      {:ok, :bool, typed_ast} = TypeChecker.check(ast)
-      assert {:class_call, :Eq, :neq, :int, _args, :bool} = typed_ast
+      assert {:ok, core} = Elab.module(ast)
+      assert :ok = Lint.check_module(core)
+      assert Canonical.render(core) =~ "Instance.Eq.Int"
+      assert {:ok, true} = Eval.run(core, :main, [])
     end
 
     test "instance without neq inherits default" do
@@ -313,7 +320,7 @@ defmodule Vaisto.TypeClassTest do
       (cmp-neq 1 2)
       """
       ast = Parser.parse(code)
-      assert {:ok, :module, _typed_ast} = TypeChecker.check(ast)
+      assert {:ok, _typed_ast} = Elab.module(ast)
     end
 
     test "instance can override default" do
@@ -327,7 +334,7 @@ defmodule Vaisto.TypeClassTest do
       (cmp-neq2 1 2)
       """
       ast = Parser.parse(code)
-      assert {:ok, :module, _typed_ast} = TypeChecker.check(ast)
+      assert {:ok, _typed_ast} = Elab.module(ast)
     end
   end
 
@@ -337,12 +344,12 @@ defmodule Vaisto.TypeClassTest do
 
   describe "codegen: neq" do
     test "(neq 1 2) => true" do
-      {:ok, mod} = Runner.compile_and_load("(neq 1 2)", :NeqIntTrue, backend: :core)
+      {:ok, mod} = Runner.compile_and_load("(neq 1 2)", :NeqIntTrue)
       assert true == Runner.call(mod, :main)
     end
 
     test "(neq 1 1) => false" do
-      {:ok, mod} = Runner.compile_and_load("(neq 1 1)", :NeqIntFalse, backend: :core)
+      {:ok, mod} = Runner.compile_and_load("(neq 1 1)", :NeqIntFalse)
       assert false == Runner.call(mod, :main)
     end
 
@@ -355,7 +362,7 @@ defmodule Vaisto.TypeClassTest do
         (is-ok [x] (> x 0)))
       (is-bad 5)
       """
-      {:ok, mod} = Runner.compile_and_load(code, :DefaultMethodE2E, backend: :core)
+      {:ok, mod} = Runner.compile_and_load(code, :DefaultMethodE2E)
       assert false == Runner.call(mod, :main)
     end
 
@@ -369,7 +376,7 @@ defmodule Vaisto.TypeClassTest do
         (is-bad2 [x] (<= x 0)))
       (is-bad2 5)
       """
-      {:ok, mod} = Runner.compile_and_load(code, :OverrideDefaultE2E, backend: :core)
+      {:ok, mod} = Runner.compile_and_load(code, :OverrideDefaultE2E)
       assert false == Runner.call(mod, :main)
     end
   end
@@ -387,7 +394,7 @@ defmodule Vaisto.TypeClassTest do
       (eq (Red) (Blue))
       """
       ast = Parser.parse(code)
-      assert {:ok, :module, _typed_ast} = TypeChecker.check(ast)
+      assert {:ok, _typed_ast} = Elab.module(ast)
     end
 
     test "ADT neq works via default method" do
@@ -398,18 +405,18 @@ defmodule Vaisto.TypeClassTest do
       (neq (Red) (Blue))
       """
       ast = Parser.parse(code)
-      assert {:ok, :module, _typed_ast} = TypeChecker.check(ast)
+      assert {:ok, _typed_ast} = Elab.module(ast)
     end
 
     test "parametric ADT instance type checks" do
       code = """
       (deftype Maybe (Just v) (Nothing))
-      (instance Eq Maybe
-        (eq [x y] (== x y)))
+      (instance Eq (Maybe a) where [(Eq a)]
+        (eq [x y] (match (tuple x y) [{(Just a) (Just b)} (eq a b)] [{(Nothing) (Nothing)} true] [_ false])))
       (eq (Just 1) (Just 2))
       """
       ast = Parser.parse(code)
-      assert {:ok, :module, _typed_ast} = TypeChecker.check(ast)
+      assert {:ok, _typed_ast} = Elab.module(ast)
     end
 
     test "missing ADT instance errors" do
@@ -418,11 +425,11 @@ defmodule Vaisto.TypeClassTest do
       (eq (Red) (Blue))
       """
       ast = Parser.parse(code)
-      result = TypeChecker.check(ast)
+      result = Elab.module(ast)
       assert {:error, _} = result
     end
 
-    test "ADT instance resolves to class_call with atom key" do
+    test "ADT instance resolves to a checked dictionary call with atom key" do
       code = """
       (deftype Color (Red) (Green) (Blue))
       (instance Eq Color
@@ -430,10 +437,10 @@ defmodule Vaisto.TypeClassTest do
       (eq (Red) (Blue))
       """
       ast = Parser.parse(code)
-      {:ok, :module, {:module, forms}} = TypeChecker.check(ast)
-      # The last form should be a class_call with :Color as the instance key
-      last = List.last(forms)
-      assert {:class_call, :Eq, :eq, :Color, _args, :bool} = last
+      {:ok, [:module, _, _ | _forms] = core} = Elab.module(ast)
+      assert :ok = Lint.check_module(core)
+      assert Canonical.render(core) =~ "Instance.Eq.Color"
+      assert {:ok, false} = Eval.run(core, :main, [])
     end
   end
 
@@ -449,7 +456,7 @@ defmodule Vaisto.TypeClassTest do
         (eq [x y] (== x y)))
       (eq (Red) (Red))
       """
-      {:ok, mod} = Runner.compile_and_load(code, :AdtEqTrue, backend: :core)
+      {:ok, mod} = Runner.compile_and_load(code, :AdtEqTrue)
       assert true == Runner.call(mod, :main)
     end
 
@@ -460,7 +467,7 @@ defmodule Vaisto.TypeClassTest do
         (eq [x y] (== x y)))
       (eq (Red) (Blue))
       """
-      {:ok, mod} = Runner.compile_and_load(code, :AdtEqFalse, backend: :core)
+      {:ok, mod} = Runner.compile_and_load(code, :AdtEqFalse)
       assert false == Runner.call(mod, :main)
     end
 
@@ -471,7 +478,7 @@ defmodule Vaisto.TypeClassTest do
         (eq [x y] (== x y)))
       (neq (Red) (Blue))
       """
-      {:ok, mod} = Runner.compile_and_load(code, :AdtNeqDefault, backend: :core)
+      {:ok, mod} = Runner.compile_and_load(code, :AdtNeqDefault)
       assert true == Runner.call(mod, :main)
     end
 
@@ -485,18 +492,18 @@ defmodule Vaisto.TypeClassTest do
           [(Blue) "blue"])))
       (show (Green))
       """
-      {:ok, mod} = Runner.compile_and_load(code, :AdtShowMatch, backend: :core)
+      {:ok, mod} = Runner.compile_and_load(code, :AdtShowMatch)
       assert "green" == Runner.call(mod, :main)
     end
 
     test "parametric ADT eq" do
       code = """
       (deftype Maybe (Just v) (Nothing))
-      (instance Eq Maybe
-        (eq [x y] (== x y)))
+      (instance Eq (Maybe a) where [(Eq a)]
+        (eq [x y] (match (tuple x y) [{(Just a) (Just b)} (eq a b)] [{(Nothing) (Nothing)} true] [_ false])))
       (eq (Just 1) (Just 1))
       """
-      {:ok, mod} = Runner.compile_and_load(code, :AdtParamEq, backend: :core)
+      {:ok, mod} = Runner.compile_and_load(code, :AdtParamEq)
       assert true == Runner.call(mod, :main)
     end
   end
@@ -538,7 +545,7 @@ defmodule Vaisto.TypeClassTest do
       (eq (Red) (Blue))
       """
       ast = Parser.parse(code)
-      assert {:ok, :module, _} = TypeChecker.check(ast)
+      assert {:ok, _} = Elab.module(ast)
     end
 
     test "enum with deriving Show type checks" do
@@ -547,7 +554,7 @@ defmodule Vaisto.TypeClassTest do
       (show (Green))
       """
       ast = Parser.parse(code)
-      assert {:ok, :module, _} = TypeChecker.check(ast)
+      assert {:ok, _} = Elab.module(ast)
     end
 
     test "enum with deriving [Eq Show] type checks both" do
@@ -557,7 +564,7 @@ defmodule Vaisto.TypeClassTest do
       (show (Green))
       """
       ast = Parser.parse(code)
-      assert {:ok, :module, _} = TypeChecker.check(ast)
+      assert {:ok, _} = Elab.module(ast)
     end
 
     test "parametric ADT deriving Eq works" do
@@ -566,16 +573,16 @@ defmodule Vaisto.TypeClassTest do
       (eq (Just 1) (Nothing))
       """
       ast = Parser.parse(code)
-      assert {:ok, :module, _} = TypeChecker.check(ast)
+      assert {:ok, _} = Elab.module(ast)
     end
 
     test "parametric ADT deriving Show errors (has fields)" do
       code = """
       (deftype Maybe (Just v) (Nothing) deriving [Show])
-      (show (Nothing))
+      (show (the (Maybe :int) (Nothing)))
       """
       ast = Parser.parse(code)
-      result = TypeChecker.check(ast)
+      result = Elab.module(ast)
       assert {:error, _} = result
     end
 
@@ -585,7 +592,7 @@ defmodule Vaisto.TypeClassTest do
       (eq (Point 1 2) (Point 3 4))
       """
       ast = Parser.parse(code)
-      assert {:ok, :module, _} = TypeChecker.check(ast)
+      assert {:ok, _} = Elab.module(ast)
     end
 
     test "record deriving Show errors" do
@@ -593,7 +600,7 @@ defmodule Vaisto.TypeClassTest do
       (deftype Point [x :int y :int] deriving [Show])
       """
       ast = Parser.parse(code)
-      result = TypeChecker.check(ast)
+      result = Elab.module(ast)
       assert {:error, _} = result
     end
 
@@ -602,7 +609,7 @@ defmodule Vaisto.TypeClassTest do
       (deftype Color (Red) (Blue) deriving [Foo])
       """
       ast = Parser.parse(code)
-      result = TypeChecker.check(ast)
+      result = Elab.module(ast)
       assert {:error, _} = result
     end
   end
@@ -617,7 +624,7 @@ defmodule Vaisto.TypeClassTest do
       (deftype Color (Red) (Green) (Blue) deriving [Eq])
       (eq (Red) (Red))
       """
-      {:ok, mod} = Runner.compile_and_load(code, :DeriveEqTrue, backend: :core)
+      {:ok, mod} = Runner.compile_and_load(code, :DeriveEqTrue)
       assert true == Runner.call(mod, :main)
     end
 
@@ -626,7 +633,7 @@ defmodule Vaisto.TypeClassTest do
       (deftype Color (Red) (Green) (Blue) deriving [Eq])
       (eq (Red) (Blue))
       """
-      {:ok, mod} = Runner.compile_and_load(code, :DeriveEqFalse, backend: :core)
+      {:ok, mod} = Runner.compile_and_load(code, :DeriveEqFalse)
       assert false == Runner.call(mod, :main)
     end
 
@@ -635,7 +642,7 @@ defmodule Vaisto.TypeClassTest do
       (deftype Point [x :int y :int] deriving [Eq])
       (eq (Point 1 2) (Point 1 2))
       """
-      {:ok, mod} = Runner.compile_and_load(code, :DeriveEqRecord, backend: :core)
+      {:ok, mod} = Runner.compile_and_load(code, :DeriveEqRecord)
       assert true == Runner.call(mod, :main)
     end
 
@@ -644,7 +651,7 @@ defmodule Vaisto.TypeClassTest do
       (deftype Point [x :int y :int] deriving [Eq])
       (eq (Point 1 2) (Point 3 4))
       """
-      {:ok, mod} = Runner.compile_and_load(code, :DeriveEqRecordNe, backend: :core)
+      {:ok, mod} = Runner.compile_and_load(code, :DeriveEqRecordNe)
       assert false == Runner.call(mod, :main)
     end
   end
@@ -655,7 +662,7 @@ defmodule Vaisto.TypeClassTest do
       (deftype Color (Red) (Green) (Blue) deriving [Show])
       (show (Green))
       """
-      {:ok, mod} = Runner.compile_and_load(code, :DeriveShowGreen, backend: :core)
+      {:ok, mod} = Runner.compile_and_load(code, :DeriveShowGreen)
       assert "Green" == Runner.call(mod, :main)
     end
 
@@ -664,7 +671,7 @@ defmodule Vaisto.TypeClassTest do
       (deftype Dir (North) (South) deriving [Show])
       (str (show (North)) "," (show (South)))
       """
-      {:ok, mod} = Runner.compile_and_load(code, :DeriveShowAll, backend: :core)
+      {:ok, mod} = Runner.compile_and_load(code, :DeriveShowAll)
       assert "North,South" == Runner.call(mod, :main)
     end
   end
@@ -675,7 +682,7 @@ defmodule Vaisto.TypeClassTest do
       (deftype Status (Active) (Inactive) deriving [Eq Show])
       (str (show (Active)) ":" (if (eq (Active) (Inactive)) "yes" "no"))
       """
-      {:ok, mod} = Runner.compile_and_load(code, :DeriveBoth, backend: :core)
+      {:ok, mod} = Runner.compile_and_load(code, :DeriveBoth)
       assert "Active:no" == Runner.call(mod, :main)
     end
   end
@@ -686,7 +693,7 @@ defmodule Vaisto.TypeClassTest do
       (deftype Color (Red) (Green) (Blue) deriving [Eq])
       (neq (Red) (Blue))
       """
-      {:ok, mod} = Runner.compile_and_load(code, :DeriveNeqDefault, backend: :core)
+      {:ok, mod} = Runner.compile_and_load(code, :DeriveNeqDefault)
       assert true == Runner.call(mod, :main)
     end
   end
@@ -730,7 +737,7 @@ defmodule Vaisto.TypeClassTest do
       (show (Just 42))
       """
       ast = Parser.parse(code)
-      assert {:ok, :module, _} = TypeChecker.check(ast)
+      assert {:ok, _} = Elab.module(ast)
     end
 
     test "constrained instance resolves to 7-element class_call" do
@@ -741,9 +748,12 @@ defmodule Vaisto.TypeClassTest do
       (show (Just 1))
       """
       ast = Parser.parse(code)
-      {:ok, :module, {:module, forms}} = TypeChecker.check(ast)
-      last = List.last(forms)
-      assert {:class_call, :Show, :show, :Maybe, _, :string, [{:Show, :int}]} = last
+      {:ok, [:module, _, _ | _forms] = core} = Elab.module(ast)
+      assert :ok = Lint.check_module(core)
+      rendered = Canonical.render(core)
+      assert rendered =~ "Instance.Show.Maybe"
+      assert rendered =~ "Instance.Show.Int"
+      assert {:ok, "hi"} = Eval.run(core, :main, [])
     end
 
     test "constraint_call emitted inside constrained instance body" do
@@ -756,18 +766,10 @@ defmodule Vaisto.TypeClassTest do
       (show (Just 1))
       """
       ast = Parser.parse(code)
-      {:ok, :module, {:module, forms}} = TypeChecker.check(ast)
-      # The instance_constrained form should contain a constraint_call in its body
-      instance_form = Enum.find(forms, fn
-        {:instance_constrained, _, _, _, _, _, _} -> true
-        _ -> false
-      end)
-      assert {:instance_constrained, :Show, :Maybe, [:a], _, methods, :instance} = instance_form
-      [{:show, [:x], body}] = methods
-      # The body has a match, and the Just branch calls constraint_call
-      {:match, _, clauses, _} = body
-      [{_, just_body, _} | _] = clauses
-      assert {:constraint_call, 0, :show, _, :string} = just_body
+      {:ok, [:module, _, _ | _forms] = core} = Elab.module(ast)
+      assert :ok = Lint.check_module(core)
+      assert Canonical.render(core) =~ "(select"
+      assert {:ok, "1"} = Eval.run(core, :main, [])
     end
 
     test "constraint not satisfied produces error" do
@@ -779,7 +781,7 @@ defmodule Vaisto.TypeClassTest do
       (show (Just (Wrap 1)))
       """
       ast = Parser.parse(code)
-      result = TypeChecker.check(ast)
+      result = Elab.module(ast)
       assert {:error, _} = result
     end
   end
@@ -798,20 +800,20 @@ defmodule Vaisto.TypeClassTest do
           [(Nothing) "Nothing"])))
       (show (Just 42))
       """
-      {:ok, mod} = Runner.compile_and_load(code, :ConstrainedShowJustInt, backend: :core)
+      {:ok, mod} = Runner.compile_and_load(code, :ConstrainedShowJustInt)
       assert "Just(42)" == Runner.call(mod, :main)
     end
 
-    test "(show (Nothing)) => \"Nothing\"" do
+    test "(show (the (Maybe :int) (Nothing))) => \"Nothing\"" do
       code = """
       (deftype Maybe (Just v) (Nothing))
       (instance Show (Maybe a) where [(Show a)]
         (show [x] (match x
           [(Just v) (str "Just(" (show v) ")")]
           [(Nothing) "Nothing"])))
-      (show (Nothing))
+      (show (the (Maybe :int) (Nothing)))
       """
-      {:ok, mod} = Runner.compile_and_load(code, :ConstrainedShowNothing, backend: :core)
+      {:ok, mod} = Runner.compile_and_load(code, :ConstrainedShowNothing)
       assert "Nothing" == Runner.call(mod, :main)
     end
 
@@ -824,7 +826,7 @@ defmodule Vaisto.TypeClassTest do
           [(Nothing) "Nothing"])))
       (show (Just "hello"))
       """
-      {:ok, mod} = Runner.compile_and_load(code, :ConstrainedShowJustStr, backend: :core)
+      {:ok, mod} = Runner.compile_and_load(code, :ConstrainedShowJustStr)
       assert "Just(hello)" == Runner.call(mod, :main)
     end
 
@@ -837,7 +839,7 @@ defmodule Vaisto.TypeClassTest do
           [(Nothing) "Nothing"])))
       (show (Just true))
       """
-      {:ok, mod} = Runner.compile_and_load(code, :ConstrainedShowJustBool, backend: :core)
+      {:ok, mod} = Runner.compile_and_load(code, :ConstrainedShowJustBool)
       assert "Just(true)" == Runner.call(mod, :main)
     end
   end
@@ -847,10 +849,10 @@ defmodule Vaisto.TypeClassTest do
       code = """
       (deftype Maybe (Just v) (Nothing))
       (instance Eq (Maybe a) where [(Eq a)]
-        (eq [x y] (== x y)))
+        (eq [x y] (match (tuple x y) [{(Just a) (Just b)} (eq a b)] [{(Nothing) (Nothing)} true] [_ false])))
       (eq (Just 1) (Just 1))
       """
-      {:ok, mod} = Runner.compile_and_load(code, :ConstrainedEqTrue, backend: :core)
+      {:ok, mod} = Runner.compile_and_load(code, :ConstrainedEqTrue)
       assert true == Runner.call(mod, :main)
     end
 
@@ -858,10 +860,10 @@ defmodule Vaisto.TypeClassTest do
       code = """
       (deftype Maybe (Just v) (Nothing))
       (instance Eq (Maybe a) where [(Eq a)]
-        (eq [x y] (== x y)))
+        (eq [x y] (match (tuple x y) [{(Just a) (Just b)} (eq a b)] [{(Nothing) (Nothing)} true] [_ false])))
       (eq (Just 1) (Just 2))
       """
-      {:ok, mod} = Runner.compile_and_load(code, :ConstrainedEqFalse, backend: :core)
+      {:ok, mod} = Runner.compile_and_load(code, :ConstrainedEqFalse)
       assert false == Runner.call(mod, :main)
     end
   end
@@ -882,7 +884,7 @@ defmodule Vaisto.TypeClassTest do
           [(Nothing) "Nothing"])))
       (show (Just (Green)))
       """
-      {:ok, mod} = Runner.compile_and_load(code, :ConstrainedShowJustColor, backend: :core)
+      {:ok, mod} = Runner.compile_and_load(code, :ConstrainedShowJustColor)
       assert "Just(green)" == Runner.call(mod, :main)
     end
   end
@@ -896,10 +898,10 @@ defmodule Vaisto.TypeClassTest do
       code = """
       (deftype Maybe (Just v) (Nothing))
       (instance Eq (Maybe a) where [(Eq a)]
-        (eq [x y] (== x y)))
+        (eq [x y] (match (tuple x y) [{(Just a) (Just b)} (eq a b)] [{(Nothing) (Nothing)} true] [_ false])))
       (neq (Just 1) (Just 2))
       """
-      {:ok, mod} = Runner.compile_and_load(code, :ConstrainedNeqDefault, backend: :core)
+      {:ok, mod} = Runner.compile_and_load(code, :ConstrainedNeqDefault)
       assert true == Runner.call(mod, :main)
     end
 
@@ -907,10 +909,10 @@ defmodule Vaisto.TypeClassTest do
       code = """
       (deftype Maybe (Just v) (Nothing))
       (instance Eq (Maybe a) where [(Eq a)]
-        (eq [x y] (== x y)))
+        (eq [x y] (match (tuple x y) [{(Just a) (Just b)} (eq a b)] [{(Nothing) (Nothing)} true] [_ false])))
       (neq (Just 1) (Just 1))
       """
-      {:ok, mod} = Runner.compile_and_load(code, :ConstrainedNeqSame, backend: :core)
+      {:ok, mod} = Runner.compile_and_load(code, :ConstrainedNeqSame)
       assert false == Runner.call(mod, :main)
     end
   end
@@ -931,7 +933,7 @@ defmodule Vaisto.TypeClassTest do
         (show (Just x)))
       (show-int-maybe 99)
       """
-      {:ok, mod} = Runner.compile_and_load(code, :ConstrainedInDefn, backend: :core)
+      {:ok, mod} = Runner.compile_and_load(code, :ConstrainedInDefn)
       assert "Just(99)" == Runner.call(mod, :main)
     end
   end
@@ -946,7 +948,7 @@ defmodule Vaisto.TypeClassTest do
           [(Nothing) "Nothing"])))
       (let [s (show (Just 42))] s)
       """
-      {:ok, mod} = Runner.compile_and_load(code, :ConstrainedInLet, backend: :core)
+      {:ok, mod} = Runner.compile_and_load(code, :ConstrainedInLet)
       assert "Just(42)" == Runner.call(mod, :main)
     end
   end
@@ -964,7 +966,7 @@ defmodule Vaisto.TypeClassTest do
       (show (Just 1))
       """
       ast = Parser.parse(code)
-      result = TypeChecker.check(ast)
+      result = Elab.module(ast)
       assert {:error, _} = result
     end
 
@@ -979,11 +981,11 @@ defmodule Vaisto.TypeClassTest do
       (show (Just (Wrap 1)))
       """
       ast = Parser.parse(code)
-      result = TypeChecker.check(ast)
+      result = Elab.module(ast)
       {:error, errs} = result
       err = if is_list(errs), do: hd(errs), else: errs
       msg = error_text(err)
-      assert msg =~ "no instance of"
+      assert msg =~ "no instance for"
     end
 
     test "unsatisfied constraint includes context message" do
@@ -995,10 +997,10 @@ defmodule Vaisto.TypeClassTest do
       (show (Just (Wrap 1)))
       """
       ast = Parser.parse(code)
-      {:error, errs} = TypeChecker.check(ast)
+      {:error, errs} = Elab.module(ast)
       err = if is_list(errs), do: hd(errs), else: errs
       msg = error_text(err)
-      assert msg =~ "no instance of"
+      assert msg =~ "no instance for"
       assert msg =~ "required by constrained instance"
     end
   end
@@ -1017,7 +1019,7 @@ defmodule Vaisto.TypeClassTest do
           [(Nothing) "Nothing"])))
       (show (Just (Just 42)))
       """
-      {:ok, mod} = Runner.compile_and_load(code, :ChainedShowJustJust, backend: :core)
+      {:ok, mod} = Runner.compile_and_load(code, :ChainedShowJustJust)
       assert "Just(Just(42))" == Runner.call(mod, :main)
     end
 
@@ -1030,20 +1032,20 @@ defmodule Vaisto.TypeClassTest do
           [(Nothing) "Nothing"])))
       (show (Just (Just (Just 42))))
       """
-      {:ok, mod} = Runner.compile_and_load(code, :ChainedShowTriple, backend: :core)
+      {:ok, mod} = Runner.compile_and_load(code, :ChainedShowTriple)
       assert "Just(Just(Just(42)))" == Runner.call(mod, :main)
     end
 
-    test "(show (Just (Nothing))) => chained with nullary" do
+    test "(show (Just (the (Maybe :int) (Nothing)))) => chained with nullary" do
       code = """
       (deftype Maybe (Just v) (Nothing))
       (instance Show (Maybe a) where [(Show a)]
         (show [x] (match x
           [(Just v) (str "Just(" (show v) ")")]
           [(Nothing) "Nothing"])))
-      (show (Just (Nothing)))
+      (show (Just (the (Maybe :int) (Nothing))))
       """
-      {:ok, mod} = Runner.compile_and_load(code, :ChainedShowJustNothing, backend: :core)
+      {:ok, mod} = Runner.compile_and_load(code, :ChainedShowJustNothing)
       assert "Just(Nothing)" == Runner.call(mod, :main)
     end
   end
@@ -1053,10 +1055,10 @@ defmodule Vaisto.TypeClassTest do
       code = """
       (deftype Maybe (Just v) (Nothing))
       (instance Eq (Maybe a) where [(Eq a)]
-        (eq [x y] (== x y)))
+        (eq [x y] (match (tuple x y) [{(Just a) (Just b)} (eq a b)] [{(Nothing) (Nothing)} true] [_ false])))
       (eq (Just (Just 1)) (Just (Just 1)))
       """
-      {:ok, mod} = Runner.compile_and_load(code, :ChainedEqTrue, backend: :core)
+      {:ok, mod} = Runner.compile_and_load(code, :ChainedEqTrue)
       assert true == Runner.call(mod, :main)
     end
 
@@ -1064,10 +1066,10 @@ defmodule Vaisto.TypeClassTest do
       code = """
       (deftype Maybe (Just v) (Nothing))
       (instance Eq (Maybe a) where [(Eq a)]
-        (eq [x y] (== x y)))
+        (eq [x y] (match (tuple x y) [{(Just a) (Just b)} (eq a b)] [{(Nothing) (Nothing)} true] [_ false])))
       (eq (Just (Just 1)) (Just (Just 2)))
       """
-      {:ok, mod} = Runner.compile_and_load(code, :ChainedEqFalse, backend: :core)
+      {:ok, mod} = Runner.compile_and_load(code, :ChainedEqFalse)
       assert false == Runner.call(mod, :main)
     end
   end
@@ -1083,19 +1085,15 @@ defmodule Vaisto.TypeClassTest do
       (show (Just (Just 42)))
       """
       ast = Parser.parse(code)
-      {:ok, _type, typed_ast} = TypeChecker.check(ast)
-      # The typed AST should contain a 7-element class_call with constrained_ref in resolved constraints
-      class_call = find_class_call(typed_ast)
-      assert {:class_call, :Show, :show, :Maybe, _args, _ret, resolved} = class_call
-      assert [{:constrained_ref, :Show, :Maybe, sub}] = resolved
-      # The sub-constraint should resolve to a flat Show :int
-      assert [{:Show, :int}] = sub
+      assert {:ok, core} = Elab.module(ast)
+      assert :ok = Lint.check_module(core)
+      rendered = Canonical.render(core)
+      assert rendered =~ "Instance.Show.Maybe"
+      assert rendered =~ "Instance.Show.Int"
+      assert {:ok, "Just(Just(42))"} = Eval.run(core, :main, [])
     end
   end
 
-  defp find_class_call(ast) when is_list(ast) do
-    Enum.find_value(ast, &find_class_call/1)
-  end
   describe "multi-constraint resolution" do
     test "instance with two where constraints type checks" do
       code = """
@@ -1111,17 +1109,10 @@ defmodule Vaisto.TypeClassTest do
       (show (MkBox (Pair 1 2)))
       """
       ast = Parser.parse(code)
-      assert {:ok, :module, _} = TypeChecker.check(ast)
+      assert {:ok, _} = Elab.module(ast)
     end
   end
 
-  defp find_class_call({:class_call, _, _, _, _, _, _} = call), do: call
-  defp find_class_call(tuple) when is_tuple(tuple) do
-    tuple
-    |> Tuple.to_list()
-    |> Enum.find_value(&find_class_call/1)
-  end
-  defp find_class_call(_), do: nil
 
   # =========================================================================
   # Structured Type Class Errors
@@ -1215,46 +1206,46 @@ defmodule Vaisto.TypeClassTest do
   # Elixir Backend — Typeclass Runtime
   # =========================================================================
 
-  describe "elixir backend: built-in Eq" do
+  describe "native regression: built-in Eq" do
     test "eq on ints" do
-      {:ok, mod} = Runner.compile_and_load("(eq 1 1)", :EqIntElxB, backend: :elixir)
+      {:ok, mod} = Runner.compile_and_load("(eq 1 1)", :EqIntElxB)
       assert true == Runner.call(mod, :main)
     end
 
     test "neq on ints" do
-      {:ok, mod} = Runner.compile_and_load("(neq 1 2)", :NeqIntElxB, backend: :elixir)
+      {:ok, mod} = Runner.compile_and_load("(neq 1 2)", :NeqIntElxB)
       assert true == Runner.call(mod, :main)
     end
 
     test "eq on strings" do
-      {:ok, mod} = Runner.compile_and_load(~s|(eq "hello" "hello")|, :EqStrElxB, backend: :elixir)
+      {:ok, mod} = Runner.compile_and_load(~s|(eq "hello" "hello")|, :EqStrElxB)
       assert true == Runner.call(mod, :main)
     end
 
     test "eq on bools" do
-      {:ok, mod} = Runner.compile_and_load("(eq true true)", :EqBoolElxB, backend: :elixir)
+      {:ok, mod} = Runner.compile_and_load("(eq true true)", :EqBoolElxB)
       assert true == Runner.call(mod, :main)
     end
   end
 
-  describe "elixir backend: built-in Show" do
+  describe "native regression: built-in Show" do
     test "show int" do
-      {:ok, mod} = Runner.compile_and_load("(show 42)", :ShowIntElxB, backend: :elixir)
+      {:ok, mod} = Runner.compile_and_load("(show 42)", :ShowIntElxB)
       assert "42" == Runner.call(mod, :main)
     end
 
     test "show string" do
-      {:ok, mod} = Runner.compile_and_load(~s|(show "hi")|, :ShowStrElxB, backend: :elixir)
+      {:ok, mod} = Runner.compile_and_load(~s|(show "hi")|, :ShowStrElxB)
       assert "hi" == Runner.call(mod, :main)
     end
 
     test "show bool" do
-      {:ok, mod} = Runner.compile_and_load("(show true)", :ShowBoolElxB, backend: :elixir)
+      {:ok, mod} = Runner.compile_and_load("(show true)", :ShowBoolElxB)
       assert "true" == Runner.call(mod, :main)
     end
   end
 
-  describe "elixir backend: ADT instance" do
+  describe "native regression: ADT instance" do
     test "eq on ADT true" do
       code = """
       (deftype Color (Red) (Green) (Blue))
@@ -1262,7 +1253,7 @@ defmodule Vaisto.TypeClassTest do
         (eq [x y] (== x y)))
       (eq (Red) (Red))
       """
-      {:ok, mod} = Runner.compile_and_load(code, :AdtEqTrueElxB, backend: :elixir)
+      {:ok, mod} = Runner.compile_and_load(code, :AdtEqTrueElxB)
       assert true == Runner.call(mod, :main)
     end
 
@@ -1273,12 +1264,12 @@ defmodule Vaisto.TypeClassTest do
         (eq [x y] (== x y)))
       (eq (Red) (Blue))
       """
-      {:ok, mod} = Runner.compile_and_load(code, :AdtEqFalseElxB, backend: :elixir)
+      {:ok, mod} = Runner.compile_and_load(code, :AdtEqFalseElxB)
       assert false == Runner.call(mod, :main)
     end
   end
 
-  describe "elixir backend: default methods" do
+  describe "native regression: default methods" do
     test "neq via default eq" do
       code = """
       (deftype Color (Red) (Green) (Blue))
@@ -1286,7 +1277,7 @@ defmodule Vaisto.TypeClassTest do
         (eq [x y] (== x y)))
       (neq (Red) (Blue))
       """
-      {:ok, mod} = Runner.compile_and_load(code, :AdtNeqDefElxB, backend: :elixir)
+      {:ok, mod} = Runner.compile_and_load(code, :AdtNeqDefElxB)
       assert true == Runner.call(mod, :main)
     end
 
@@ -1295,12 +1286,12 @@ defmodule Vaisto.TypeClassTest do
       (deftype Color (Red) (Green) (Blue) deriving [Eq])
       (neq (Red) (Red))
       """
-      {:ok, mod} = Runner.compile_and_load(code, :DerNeqDefElxB, backend: :elixir)
+      {:ok, mod} = Runner.compile_and_load(code, :DerNeqDefElxB)
       assert false == Runner.call(mod, :main)
     end
   end
 
-  describe "elixir backend: constrained instance" do
+  describe "native regression: constrained instance" do
     test "Show Maybe Just" do
       code = """
       (deftype Maybe (Just v) (Nothing))
@@ -1310,7 +1301,7 @@ defmodule Vaisto.TypeClassTest do
           [(Nothing) "Nothing"])))
       (show (Just 42))
       """
-      {:ok, mod} = Runner.compile_and_load(code, :ShowMaybeJustElxB, backend: :elixir)
+      {:ok, mod} = Runner.compile_and_load(code, :ShowMaybeJustElxB)
       assert "Just(42)" == Runner.call(mod, :main)
     end
 
@@ -1321,9 +1312,9 @@ defmodule Vaisto.TypeClassTest do
         (show [x] (match x
           [(Just v) (str "Just(" (show v) ")")]
           [(Nothing) "Nothing"])))
-      (show (Nothing))
+      (show (the (Maybe :int) (Nothing)))
       """
-      {:ok, mod} = Runner.compile_and_load(code, :ShowMaybeNothElxB, backend: :elixir)
+      {:ok, mod} = Runner.compile_and_load(code, :ShowMaybeNothElxB)
       assert "Nothing" == Runner.call(mod, :main)
     end
   end

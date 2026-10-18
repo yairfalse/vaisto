@@ -54,8 +54,8 @@ defmodule Vaisto.TypeSystemRedesignTest do
 
     test "function returning atom should work" do
       code = """
-      (defn get_status [] :ok)
-      (defn main [] (get_status))
+      (defn get_status [] :atom :ok)
+      (defn main [] :atom (get_status))
       """
       assert {:ok, :ok} = Runner.run(code)
     end
@@ -78,7 +78,8 @@ defmodule Vaisto.TypeSystemRedesignTest do
       code = """
       (match :yes
         [:yes 1]
-        [:no 0])
+        [:no 0]
+        [_ -1])
       """
       assert {:ok, 1} = Runner.run(code)
     end
@@ -91,17 +92,15 @@ defmodule Vaisto.TypeSystemRedesignTest do
       assert {:ok, :hello} = Runner.run(code)
     end
 
-    test "match rejects wrong atom at runtime" do
+    test "non-exhaustive atom matches are rejected before execution" do
       # This should compile but fail at runtime (pattern match error)
       code = """
       (match :wrong
         [:yes 1]
         [:no 0])
       """
-      # Should compile...
-      assert {:ok, mod} = Runner.compile_and_load(code, :AtomMatchFail)
-      # ...but fail at runtime (CaseClauseError since match compiles to case)
-      assert_raise CaseClauseError, fn -> Runner.call(mod, :main) end
+      assert {:error, %Vaisto.Error{message: message}} = Runner.compile_and_load(code, :AtomMatchFail)
+      assert message == "this match is not exhaustive"
     end
   end
 
@@ -126,14 +125,14 @@ defmodule Vaisto.TypeSystemRedesignTest do
     end
 
     test "int / int = float (division always produces float)" do
-      code = "(/ 10 3)"
+      code = "(/ (int-to-float 10) (int-to-float 3))"
       {:ok, result} = Runner.run(code)
       assert is_float(result)
       assert_in_delta result, 3.333, 0.01
     end
 
     test "exact division still returns float" do
-      code = "(/ 10 2)"
+      code = "(/ (int-to-float 10) (int-to-float 2))"
       {:ok, result} = Runner.run(code)
       assert is_float(result)
       assert result == 5.0
@@ -168,21 +167,21 @@ defmodule Vaisto.TypeSystemRedesignTest do
     # CURRENT: Fails
     # GOAL: Mixed should widen to float
     test "int + float = float" do
-      code = "(+ 1 2.5)"
+      code = "(+ (int-to-float 1) 2.5)"
       {:ok, result} = Runner.run(code)
       assert is_float(result)
       assert result == 3.5
     end
 
     test "float + int = float" do
-      code = "(+ 2.5 1)"
+      code = "(+ 2.5 (int-to-float 1))"
       {:ok, result} = Runner.run(code)
       assert is_float(result)
       assert result == 3.5
     end
 
     test "nested mixed arithmetic" do
-      code = "(+ (* 2 3.0) (/ 10 4))"
+      code = "(+ (* (int-to-float 2) 3.0) (/ (int-to-float 10) (int-to-float 4)))"
       {:ok, result} = Runner.run(code)
       assert is_float(result)
       assert result == 8.5  # 6.0 + 2.5
@@ -203,9 +202,9 @@ defmodule Vaisto.TypeSystemRedesignTest do
     end
 
     test "mixed comparisons" do
-      assert {:ok, true} = Runner.run("(< 1 2.0)")
-      assert {:ok, true} = Runner.run("(> 2.5 2)")
-      assert {:ok, true} = Runner.run("(== 5 5.0)")
+      assert {:ok, true} = Runner.run("(< (int-to-float 1) 2.0)")
+      assert {:ok, true} = Runner.run("(> 2.5 (int-to-float 2))")
+      assert {:ok, true} = Runner.run("(== (int-to-float 5) 5.0)")
     end
   end
 
@@ -213,7 +212,7 @@ defmodule Vaisto.TypeSystemRedesignTest do
     test "function with int param accepts int" do
       code = """
       (defn double [x :int] :int (* x 2))
-      (defn main [] (double 21))
+      (defn main [] :int (double 21))
       """
       assert {:ok, 42} = Runner.run(code)
     end
@@ -221,16 +220,16 @@ defmodule Vaisto.TypeSystemRedesignTest do
     test "function with int param rejects float" do
       code = """
       (defn double [x :int] :int (* x 2))
-      (defn main [] (double 21.0))
+      (defn main [] :int (double 21.0))
       """
       result = Runner.compile_and_load(code, :IntRejectsFloat)
       assert {:error, %Vaisto.Error{}} = result
     end
 
-    test "function with num param accepts both" do
+    test "Num-constrained function accepts Int and Float separately" do
       code = """
-      (defn double [x :num] :num (* x 2))
-      (defn main [] (+ (double 21) (double 21.0)))
+      (defn double [x :a] :a where [(Num a)] (* x 2))
+      (defn main [] :float (+ (int-to-float (double 21)) (double 21.0)))
       """
       assert {:ok, 84.0} = Runner.run(code)
     end
@@ -247,7 +246,7 @@ defmodule Vaisto.TypeSystemRedesignTest do
         :inc (+ state 1)
         :get state)
 
-      (defn main []
+      (defn main [] :unit
         (let [pid (spawn counter 0)]
           (! pid :inc)))
       """
@@ -259,11 +258,11 @@ defmodule Vaisto.TypeSystemRedesignTest do
       (process counter 0
         :inc (+ state 1))
 
-      (defn main []
+      (defn main [] :unit
         (! (spawn counter 0) :invalid))
       """
       result = Runner.compile_and_load(code, :SafeSendInvalid)
-      assert {:error, %Vaisto.Error{note: note}} = result
+      assert {:error, %Vaisto.Error{message: note}} = result
       assert note =~ "does not accept"
     end
 
@@ -274,7 +273,7 @@ defmodule Vaisto.TypeSystemRedesignTest do
         :dec (- state 1)
         :reset 0)
 
-      (defn main []
+      (defn main [] :unit
         (let [pid (spawn counter 0)]
           (do
             (! pid :inc)
@@ -290,21 +289,21 @@ defmodule Vaisto.TypeSystemRedesignTest do
       code = "(! 42 :msg)"
       result = Runner.compile_and_load(code, :SendToInt)
       assert {:error, %Vaisto.Error{message: msg}} = result
-      assert msg =~ "non-pid"
+      assert msg =~ "PID"
     end
 
     test "sending to string fails" do
       code = "(! \"not a pid\" :msg)"
       result = Runner.compile_and_load(code, :SendToString)
       assert {:error, %Vaisto.Error{message: msg}} = result
-      assert msg =~ "non-pid"
+      assert msg =~ "PID"
     end
 
     test "sending to list fails" do
       code = "(! (list 1 2 3) :msg)"
       result = Runner.compile_and_load(code, :SendToList)
       assert {:error, %Vaisto.Error{message: msg}} = result
-      assert msg =~ "non-pid"
+      assert msg =~ "PID"
     end
   end
 
@@ -314,22 +313,22 @@ defmodule Vaisto.TypeSystemRedesignTest do
       (process counter 0
         :inc (+ state 1))
 
-      (defn main []
+      (defn main [] :unit
         (!! (spawn counter 0) :totally_invalid_message))
       """
       # Should compile - message not validated
       assert {:ok, _} = Runner.compile_and_load(code, :UnsafeSendAny)
     end
 
-    test "allows untyped PID parameter" do
+    test "allows an explicitly typed PID parameter" do
       code = """
       (process echo 0
         :ping state)
 
-      (defn send_to [pid]
+      (defn send_to [pid (Pid :Process.echo.Message)] :unit
         (!! pid :anything))
 
-      (defn main []
+      (defn main [] :unit
         (send_to (spawn echo 0)))
       """
       assert {:ok, _} = Runner.compile_and_load(code, :UnsafeSendUntyped)
@@ -339,27 +338,27 @@ defmodule Vaisto.TypeSystemRedesignTest do
       code = "(!! 42 :msg)"
       result = Runner.compile_and_load(code, :UnsafeSendInt)
       assert {:error, %Vaisto.Error{message: msg}} = result
-      assert msg =~ "non-pid"
+      assert msg =~ "PID"
     end
 
     test "rejects string as PID" do
       code = "(!! \"nope\" :msg)"
       result = Runner.compile_and_load(code, :UnsafeSendString)
       assert {:error, %Vaisto.Error{message: msg}} = result
-      assert msg =~ "non-pid"
+      assert msg =~ "PID"
     end
 
-    test "accepts :any typed parameter" do
+    test "accepts an explicit Dyn message boundary" do
       # When a function takes an untyped param, !! should allow it
       code = """
-      (defn broadcast [target msg]
+      (defn broadcast [target (Pid :Process.server.Message) msg :dyn] :unit
         (!! target msg))
 
       (process server 0
         :ping state)
 
-      (defn main []
-        (broadcast (spawn server 0) :ping))
+      (defn main [] :unit
+        (broadcast (spawn server 0) (up :atom :ping)))
       """
       assert {:ok, _} = Runner.compile_and_load(code, :UnsafeAnyParam)
     end
@@ -371,7 +370,7 @@ defmodule Vaisto.TypeSystemRedesignTest do
       (process counter 0
         :inc (+ state 1))
 
-      (defn main []
+      (defn main [] :unit
         (! (spawn counter 0) :inc))
       """
       assert {:ok, _} = Runner.compile_and_load(valid_code, :SafeValid)
@@ -380,7 +379,7 @@ defmodule Vaisto.TypeSystemRedesignTest do
       (process counter 0
         :inc (+ state 1))
 
-      (defn main []
+      (defn main [] :unit
         (! (spawn counter 0) :wrong))
       """
       assert {:error, _} = Runner.compile_and_load(invalid_safe, :SafeInvalid)
@@ -389,7 +388,7 @@ defmodule Vaisto.TypeSystemRedesignTest do
       (process counter 0
         :inc (+ state 1))
 
-      (defn main []
+      (defn main [] :unit
         (!! (spawn counter 0) :wrong))
       """
       # !! allows it even though :wrong isn't valid
@@ -404,10 +403,10 @@ defmodule Vaisto.TypeSystemRedesignTest do
   describe "combined features" do
     test "function returning different atoms based on condition" do
       code = """
-      (defn status [x]
+      (defn status [x :int] :atom
         (if (> x 0) :positive :non_positive))
 
-      (defn main []
+      (defn main [] :atom
         (status 5))
       """
       assert {:ok, :positive} = Runner.run(code)
@@ -415,13 +414,13 @@ defmodule Vaisto.TypeSystemRedesignTest do
 
     test "numeric function with atom result" do
       code = """
-      (defn sign [x]
+      (defn sign [x :int] :atom
         (cond
           [(> x 0) :positive]
           [(< x 0) :negative]
           [:else :zero]))
 
-      (defn main []
+      (defn main [] :atom
         (sign (- 5 10)))
       """
       assert {:ok, :negative} = Runner.run(code)
@@ -430,10 +429,10 @@ defmodule Vaisto.TypeSystemRedesignTest do
     test "process with mixed numeric state" do
       code = """
       (process accumulator 0.0
-        :add_int (+ state 1)
+        :add_int (+ state (int-to-float 1))
         :add_float (+ state 0.5))
 
-      (defn main []
+      (defn main [] :unit
         (let [pid (spawn accumulator 0.0)]
           (do
             (! pid :add_int)

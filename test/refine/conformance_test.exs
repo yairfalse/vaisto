@@ -38,14 +38,14 @@ defmodule Vaisto.Refine.ConformanceTest do
   end
 
   # C11: erasing the refinements changes nothing the backends produce.
-  test "C11: a refined program and its refinement-free text compile to the same bytes on both backends" do
-    for path <- @programs, source = File.read!(path), header(source).expect == "compiles", backend <- [:core, :elixir] do
+  test "C11: refinement erasure leaves native BEAM bytes unchanged" do
+    for path <- @programs, source = File.read!(path), header(source).expect == "compiles" do
       stripped = strip_refinements(source)
       refute stripped == source
 
-      assert {:ok, _, refined} = Compilation.compile(source, :ErasureProbe, backend: backend, load: false)
-      assert {:ok, _, plain} = Compilation.compile(stripped, :ErasureProbe, backend: backend, load: false)
-      assert refined == plain, "#{Path.basename(path)} on #{backend}"
+      assert {:ok, _, refined} = Compilation.compile(source, :ErasureProbe, load: false)
+      assert {:ok, _, plain} = Compilation.compile(stripped, :ErasureProbe, load: false)
+      assert refined == plain, Path.basename(path)
     end
   end
 
@@ -66,16 +66,16 @@ defmodule Vaisto.Refine.ConformanceTest do
       "compiles" ->
         {expected, _} = Code.eval_string(header.main)
 
-        for backend <- [:core, :elixir] do
-          module = :"Conformance_#{:erlang.unique_integer([:positive])}"
-          assert {:ok, ^module, _} = Compilation.compile(source, module, backend: backend, format_errors: false)
+        module = :"Conformance_#{:erlang.unique_integer([:positive])}"
+        assert {:ok, core} = Compilation.check_liquid(source, module, format_errors: false)
+        assert Vaisto.Liquid.Eval.run(core, :main, []) == {:ok, expected}
+        assert {:ok, ^module, _} = Compilation.compile(source, module, format_errors: false)
 
-          try do
-            assert apply(module, :main, []) == expected, "#{Path.basename(path)} on #{backend}"
-          after
-            :code.purge(module)
-            :code.delete(module)
-          end
+        try do
+          assert apply(module, :main, []) == expected, Path.basename(path)
+        after
+          :code.purge(module)
+          :code.delete(module)
         end
 
       "errors" ->

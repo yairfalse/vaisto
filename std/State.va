@@ -1,172 +1,108 @@
-; Vaisto State Module
-; Provides mutable state via process dictionary
-;
-; The process dictionary is process-local mutable storage.
-; While not purely functional, it's useful for:
-; - Compiler passes that accumulate state (errors, warnings, symbol tables)
-; - Unique ID generation (gensym)
-; - Caching during traversals
-;
-; Note: This breaks referential transparency. Use sparingly and locally.
-
+; Process-local mutable state. Stored values and keys are explicitly Dyn;
+; typed utilities decode the actual stored value before using it.
 (ns Std.State)
 
-; --- Erlang FFI ---
-
-; Get value from process dictionary
-(extern erlang/get [:any] :any)
-
-; Put value in process dictionary (returns old value or :undefined)
-(extern erlang/put [:any :any] :any)
-
-; Erase key from process dictionary
-(extern erlang/erase [:any] :any)
-
-; Get all keys in process dictionary
-(extern erlang/get_keys [] (List :any))
-
-; Get entire process dictionary as list of tuples
-(extern erlang/get [] (List :any))
-
-; Erase entire process dictionary
-(extern erlang/erase [] (List :any))
-
-; Additional Erlang FFI
+(extern erlang/get [:dyn] :dyn)
+(extern erlang/put [:dyn :dyn] :dyn)
+(extern erlang/erase [:dyn] :dyn)
+(extern erlang/get_keys [] (List :dyn))
+(extern erlang/get [] (List (Tuple :dyn :dyn)))
+(extern erlang/erase [] (List (Tuple :dyn :dyn)))
 (extern erlang/binary_to_atom [:string] :atom)
-(extern erlang/iolist_to_binary [(List :any)] :string)
+(extern erlang/iolist_to_binary [(List :string)] :string)
 (extern erlang/atom_to_binary [:atom] :string)
 (extern erlang/integer_to_binary [:int] :string)
-(extern lists/reverse [(List :any)] (List :any))
+(extern lists/reverse [(List :dyn)] (List :dyn))
+(extern erlang/element [:int :dyn] :dyn)
 
-; Tuple accessors
-(extern erlang/element [:int :any] :any)
+(defn get [key :dyn] (Option :dyn)
+  (let [raw (erlang/get key)]
+    (if (== raw (up :atom :undefined)) (None) (Some raw))))
 
-; --- High-level API ---
+(defn get-or [key :dyn default :dyn] :dyn
+  (let [raw (erlang/get key)]
+    (if (== raw (up :atom :undefined)) default raw)))
 
-; Get a value by key, returning Option
-; (get :my-key) -> (Some value) | None
-(defn get [key]
-  (match (erlang/get key)
-    [:undefined (None)]
-    [val (Some val)]))
+(defn set! [key :dyn value :dyn] (Option :dyn)
+  (let [old (erlang/put key value)]
+    (if (== old (up :atom :undefined)) (None) (Some old))))
 
-; Get a value with default
-; (get-or :my-key 0) -> value or 0
-(defn get-or [key default]
-  (match (erlang/get key)
-    [:undefined default]
-    [val val]))
+(defn delete! [key :dyn] (Option :dyn)
+  (let [old (erlang/erase key)]
+    (if (== old (up :atom :undefined)) (None) (Some old))))
 
-; Set a value, returns the old value as Option
-; (set! :my-key "value") -> (Some old) | None
-(defn set! [key value]
-  (match (erlang/put key value)
-    [:undefined (None)]
-    [old (Some old)]))
+(defn has? [key :dyn] :bool
+  (!= (erlang/get key) (up :atom :undefined)))
 
-; Delete a key, returns its old value as Option
-; (delete! :my-key) -> (Some old) | None
-(defn delete! [key]
-  (match (erlang/erase key)
-    [:undefined (None)]
-    [old (Some old)]))
-
-; Check if key exists
-; (has? :my-key) -> bool
-(defn has? [key]
-  (match (erlang/get key)
-    [:undefined false]
-    [_ true]))
-
-; Update a value with a function
-; (update! :counter inc) -> new-value
-(defn update! [key f]
-  (let [old (get-or key :undefined)
+(defn update! [key :dyn f (Fn :dyn :dyn :effects (Effects [external] :fx))] :dyn :effects (Effects [external] :fx)
+  (let [old (get-or key (up :atom :undefined))
         new (f old)]
     (set! key new)
     new))
 
-; --- Compiler-specific helpers ---
+; Generate prefix_0, prefix_1, ... without trusting a stored default as proof.
+(defn unique-id [prefix :atom] :atom
+  (let [key (up (Tuple :atom :atom) {:gensym prefix})]
+    (match (decode :int (get-or key (up :int 0)))
+      [(Core.Ok n)
+        (set! key (up :int (+ n 1)))
+        (erlang/binary_to_atom
+          (erlang/iolist_to_binary
+            (list (erlang/atom_to_binary prefix) "_" (erlang/integer_to_binary n))))]
+      [(Core.Err _) (crash :bad_decode)])))
 
-; Generate unique ID (for gensym)
-; (unique-id :var) -> :var_0, :var_1, etc.
-(defn unique-id [prefix]
-  (let [key {:gensym prefix}
-        n (get-or key 0)]
-    (set! key (+ n 1))
-    ; Create symbol like prefix_N
-    (erlang/binary_to_atom
-      (erlang/iolist_to_binary
-        (list (erlang/atom_to_binary prefix)
-              "_"
-              (erlang/integer_to_binary n))))))
+(defn counter-inc! [name :atom] :int
+  (let [key (up :atom name)]
+    (match (decode :int (get-or key (up :int 0)))
+      [(Core.Ok n)
+        (set! key (up :int (+ n 1)))
+        (+ n 1)]
+      [(Core.Err _) (crash :bad_decode)])))
 
-; Simple counter
-; (counter-inc! :errors) -> new-count
-(defn counter-inc! [name]
-  (let [n (get-or name 0)]
-    (set! name (+ n 1))
-    (+ n 1)))
-
-; Reset counter
-; (counter-reset! :errors) -> 0
-(defn counter-reset! [name]
-  (set! name 0)
+(defn counter-reset! [name :atom] :int
+  (set! (up :atom name) (up :int 0))
   0)
 
-; Accumulate values (like collecting errors)
-; (accumulate! :errors {:line 1 :msg "oops"})
-(defn accumulate! [key value]
-  (let [current (get-or key (list))]
-    (set! key (cons value current))))
+(defn accumulate! [key :dyn value :dyn] (Option :dyn)
+  (match (decode (List :dyn) (get-or key (up (List :dyn) [])))
+    [(Core.Ok current) (set! key (up (List :dyn) (cons value current)))]
+    [(Core.Err _) (crash :bad_decode)]))
 
-; Get accumulated values (reversed to original order)
-; (get-accumulated :errors) -> list of errors
-(defn get-accumulated [key]
-  (lists/reverse (get-or key (list))))
+(defn get-accumulated [key :dyn] (List :dyn)
+  (match (decode (List :dyn) (get-or key (up (List :dyn) [])))
+    [(Core.Ok current) (lists/reverse current)]
+    [(Core.Err _) (crash :bad_decode)]))
 
-; Clear accumulated values
-; (clear-accumulated! :errors) -> old-values
-(defn clear-accumulated! [key]
+(defn clear-accumulated! [key :dyn] (List :dyn)
   (let [old (get-accumulated key)]
-    (set! key (list))
+    (set! key (up (List :dyn) []))
     old))
 
-; --- Tuple helpers ---
+; Arbitrary Erlang tuple projections remain a checked foreign boundary.
+; Decode the returned Dyn before treating it as a concrete type.
+(defn fst [tuple :dyn] :dyn (erlang/element 1 tuple))
+(defn snd [tuple :dyn] :dyn (erlang/element 2 tuple))
 
-; Get first element of a tuple (index 1 in Erlang)
-(defn fst [tuple]
-  (erlang/element 1 tuple))
-
-; Get second element of a tuple (index 2 in Erlang)
-(defn snd [tuple]
-  (erlang/element 2 tuple))
-
-; Apply function to each element of a list (for side effects)
-(defn for-each [f xs]
+(defn for-each [f (Fn :a :b :effects :fx) xs (List :a)] :atom :effects :fx
   (match xs
     [[] :ok]
-    [[h | t]
-      (f h)
-      (for-each f t)]))
+    [[h | t] (f h) (for-each f t)]))
 
-; --- Scoped state ---
+; State restoration is guaranteed on success and on a crash. The explicit
+; external prefix covers storage; fx is the callback's remaining effects.
+(defn with-isolated-state [f (Fn :a :effects (Effects [external] :fx))] :a :effects (Effects [external] :fx)
+  (let [saved (erlang/get)]
+    (try (f)
+      [after (do
+        (erlang/erase)
+        (for-each (fn [entry]
+          (let [{key value} entry] (erlang/put key value))) saved))])))
 
-; Run a function with isolated state
-; Any changes to process dictionary are reverted after
-; (with-isolated-state (fn [] ... ))
-(defn with-isolated-state [f]
-  (let [saved (erlang/get)
-        result (f)]
-    ; Restore old state
-    (erlang/erase)
-    (for-each (fn [kv] (erlang/put (fst kv) (snd kv))) saved)
-    result))
-
-; Run with specific initial bindings
-; (with-state {:debug true :level 0} (fn [] ...))
-(defn with-state [bindings f]
+; Initial bindings are a list of {Dyn key, Dyn value} pairs.
+(defn with-state [bindings (List (Tuple :dyn :dyn)) f (Fn :a :effects (Effects [external] :fx))] :a :effects (Effects [external] :fx)
   (with-isolated-state
-    (fn []
-      (for-each (fn [kv] (set! (fst kv) (snd kv))) bindings)
-      (f))))
+    (the (Fn :a :effects (Effects [external] :fx))
+      (fn []
+        (for-each (fn [entry]
+          (let [{key value} entry] (set! key value))) bindings)
+        (f)))))

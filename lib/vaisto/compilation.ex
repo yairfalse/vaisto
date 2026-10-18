@@ -2,13 +2,13 @@ defmodule Vaisto.Compilation do
   @moduledoc """
   Core compilation service for Vaisto.
 
-  Provides the fundamental parse → type check → emit pipeline that all
+  Provides the parse → elaborate → verify → native BEAM pipeline that all
   compilation entry points (CLI, REPL, Runner, Build) use.
 
   This module handles:
   - Parsing with error wrapping
   - Type checking with error normalization
-  - Backend emission
+  - Native BEAM lowering
   - Prelude handling
 
   ## Example
@@ -19,135 +19,147 @@ defmodule Vaisto.Compilation do
       # With prelude
       {:ok, module, bytecode} = Compilation.compile(source, MyModule, prelude: prelude_source)
 
-      # With custom backend
-      {:ok, module, bytecode} = Compilation.compile(source, MyModule, backend: :elixir)
   """
 
-  require Logger
-
-  alias Vaisto.{Parser, TypeChecker, Backend, Error, Errors, ErrorFormatter, Refine}
+  alias Vaisto.{Parser, Error, Errors, ErrorFormatter, Refine}
 
   @type compile_opts :: [
           prelude: String.t() | nil,
-          backend: :core | :elixir,
-          env: map(),
           load: boolean(),
           format_errors: boolean(),
           line_offset: non_neg_integer()
         ]
 
   @doc """
-  Compiles Vaisto source code to BEAM bytecode.
+  Compile source through the bidirectional elaborator, verified Core and native BEAM lowering.
 
   ## Options
 
     * `:prelude` - Source to prepend (e.g., standard library definitions)
-    * `:backend` - `:core` (default) or `:elixir`
-    * `:env` - Initial type environment (default: primitives)
     * `:load` - Load module into VM (default: true)
     * `:format_errors` - Format errors with source context (default: true)
     * `:line_offset` - Line offset for error messages when prelude is prepended
 
-  ## Returns
-
-    * `{:ok, module_name, bytecode}` on success
-    * `{:error, reason}` on failure (reason is formatted string if format_errors: true)
+  Returns `{:ok, module, binary}` or `{:error, reason}`. Definition signatures
+  are required. There is no HM or old-emitter fallback.
   """
-  @spec compile(String.t(), atom(), compile_opts()) ::
-          {:ok, atom(), binary() | [{atom(), binary()}]} | {:error, term()}
+  @spec compile(String.t(), atom(), keyword()) :: {:ok, atom(), binary()} | {:error, term()}
   def compile(source, module_name, opts \\ []) do
-    Logger.debug("compile: parsing #{module_name}")
+    compile_liquid(source, module_name, opts)
+  end
 
-    prelude = Keyword.get(opts, :prelude)
-    backend = Keyword.get(opts, :backend, :core)
-    env = Keyword.get(opts, :env, TypeChecker.primitives())
-    load = Keyword.get(opts, :load, true)
-    format_errors = Keyword.get(opts, :format_errors, true)
-
-    full_source = prepend_prelude(source, prelude)
-    line_offset = if prelude, do: prelude_line_count(prelude), else: 0
-
-    with {:ok, ast} <- parse(full_source) do
-      Logger.debug("compile: type checking #{module_name}")
-      {plain_ast, sigs} = Refine.Surface.split(ast)
-
-      with {:ok, _type, typed_ast} <- typecheck(plain_ast, env, full_source, line_offset, format_errors),
-           :ok <- refine(typed_ast, sigs, plain_ast, full_source, line_offset, format_errors, Keyword.put(opts, :env, env)) do
-        Logger.debug("compile: emitting #{module_name} (backend: #{backend})")
-        emit(typed_ast, module_name, backend, load: load)
+  @doc "Compile verified Liquid Core to native BEAM; also used by the public compiler."
+  @spec compile_liquid(String.t(), atom(), keyword()) ::
+          {:ok, atom(), binary()} | {:error, term()}
+  def compile_liquid(source, module_name, opts \\ []) do
+    result =
+      with {:ok, core} <-
+             check_liquid(source, module_name, Keyword.put(opts, :format_errors, false)) do
+        Vaisto.Liquid.Lower.compile(core, module_name, Keyword.take(opts, [:load]))
       end
+
+    full_source = prepend_prelude(source, Keyword.get(opts, :prelude))
+
+    offset =
+      Keyword.get(
+        opts,
+        :line_offset,
+        if(prelude = Keyword.get(opts, :prelude), do: prelude_line_count(prelude), else: 0)
+      )
+
+    native_result(result, full_source, offset, opts)
+  end
+
+  @doc "Elaborate and verify source to Core, without invoking HM or emitting code."
+  @spec check_liquid(String.t(), atom(), keyword()) :: {:ok, term()} | {:error, term()}
+  def check_liquid(source, module_name \\ :Main, opts \\ []) do
+    full_source = prepend_prelude(source, Keyword.get(opts, :prelude))
+
+    offset =
+      Keyword.get(
+        opts,
+        :line_offset,
+        if(prelude = Keyword.get(opts, :prelude), do: prelude_line_count(prelude), else: 0)
+      )
+
+    result =
+      with :error <- Keyword.fetch(opts, :backend),
+           {:ok, ast} <- parse(full_source, Keyword.take(opts, [:file])) do
+        {plain, sigs} = Refine.Surface.split(ast)
+        refine_opts = Keyword.merge(opts, source: full_source, locs: definition_locs(plain))
+
+        with {:ok, core} <-
+               Vaisto.Elab.module(
+                 plain,
+                 Keyword.put(
+                   Keyword.take(opts, [
+                     :interfaces,
+                     :search_paths,
+                     :atoms,
+                     :expression_entry,
+                     :type_probe
+                   ]),
+                   :name,
+                   module_name
+                 )
+               ),
+             :ok <- Refine.check_core(core, sigs, refine_opts) do
+          {:ok, core}
+        end
+      else
+        {:ok, _backend} -> {:error, [Errors.backend_selection_removed()]}
+        other -> other
+      end
+
+    native_result(result, full_source, offset, opts)
+  end
+
+  defp native_result(result, full_source, offset, opts) do
+    case result do
+      {:outside, reason} ->
+        native_errors(
+          [Error.new("the new compiler does not support #{reason} yet")],
+          full_source,
+          offset,
+          opts
+        )
+
+      {:error, [%Error{} | _] = errors} ->
+        native_errors(errors, full_source, offset, opts)
+
+      {:error, %Error{} = error} ->
+        native_errors([error], full_source, offset, opts)
+
+      other ->
+        other
     end
   end
 
-  @doc """
-  Checks a program's refinements (`Vaisto.Refine`), given HM's output for the
-  plain program and the signatures `Vaisto.Refine.Surface.split/1` took out of
-  it. Without refinements this does nothing, and never starts the solver.
+  defp native_errors(errors, source, offset, opts) do
+    errors = Enum.map(errors, &%{&1 | file: &1.file || Keyword.get(opts, :file)})
 
-  Options are passed to `Vaisto.Refine.check/3`, such as `:solver`.
-  """
-  @spec check_refinements(term(), map(), term(), String.t(), keyword()) :: :ok | {:error, [Error.t()]}
-  def check_refinements(typed_ast, sigs, plain_ast, source, opts \\ []) do
-    Refine.check(typed_ast, sigs, Keyword.merge(opts, source: source, locs: definition_locs(plain_ast)))
+    if Keyword.get(opts, :format_errors, true),
+      do: {:error, ErrorFormatter.format_all(errors, source, line_offset: offset)},
+      else: {:error, errors}
   end
 
   @doc """
   Parses Vaisto source code into an AST.
 
   Returns `{:ok, ast}` on success or `{:error, %Error{}}` on failure.
+  With `with_source: true`, return `{form, original_source}` pairs.
   """
   @spec parse(String.t(), keyword()) :: {:ok, term()} | {:error, Error.t()}
   def parse(source, opts \\ []) do
     try do
-      {:ok, Parser.parse(source, opts)}
+      ast =
+        if Keyword.get(opts, :with_source, false),
+          do: Parser.parse_with_source(source, opts),
+          else: Parser.parse(source, opts)
+
+      {:ok, ast}
     rescue
       e -> {:error, Errors.compilation_error(Exception.message(e))}
-    end
-  end
-
-  @doc """
-  Type checks an AST.
-
-  ## Options
-
-    * `:env` - Type environment (default: primitives)
-    * `:source` - Original source for error formatting
-    * `:line_offset` - Line offset for prelude-adjusted errors
-    * `:format_errors` - Whether to format errors with source context
-
-  Returns `{:ok, type, typed_ast}` on success or `{:error, reason}` on failure.
-  """
-  @spec typecheck(term(), map()) ::
-          {:ok, term(), term()} | {:error, term()}
-  def typecheck(ast, env \\ TypeChecker.primitives()) do
-    case TypeChecker.check(ast, env) do
-      {:ok, _, _} = success -> success
-      {:error, errors} when is_list(errors) -> {:error, errors}
-      {:error, err} -> {:error, err}
-    end
-  end
-
-  @doc """
-  Emits typed AST to BEAM bytecode using the specified backend.
-
-  ## Options
-
-    * `:load` - Whether to load the module into the VM (default: true)
-
-  Returns `{:ok, module_name, bytecode}` on success.
-  """
-  @spec emit(TypeChecker.typed_ast(), atom(), :core | :elixir, keyword()) ::
-          {:ok, atom(), binary() | [{atom(), binary()}]} | {:error, term()}
-  def emit(typed_ast, module_name, backend \\ :core, opts \\ []) do
-    case backend do
-      :core ->
-        Backend.Core.compile(typed_ast, module_name, opts)
-
-      :elixir ->
-        Backend.Elixir.compile(typed_ast, module_name)
-
-      other ->
-        {:error, Errors.unknown_backend(other)}
     end
   end
 
@@ -170,11 +182,15 @@ defmodule Vaisto.Compilation do
     module_name = :"VaistoRun_#{:erlang.unique_integer([:positive])}"
 
     with {:ok, ^module_name, _bytecode} <- compile(source, module_name, opts) do
-      result = apply(module_name, :main, [])
-      # Clean up
-      :code.purge(module_name)
-      :code.delete(module_name)
-      {:ok, result}
+      try do
+        case Vaisto.Liquid.Runtime.run(module_name, :main, [], handler: :native) do
+          {:ok, value} -> {:ok, value}
+          {:crash, reason} -> {:error, Errors.runtime_error(inspect(reason))}
+        end
+      after
+        :code.purge(module_name)
+        :code.delete(module_name)
+      end
     end
   end
 
@@ -188,16 +204,6 @@ defmodule Vaisto.Compilation do
     length(String.split(prelude, "\n")) + 1
   end
 
-  defp refine(typed_ast, sigs, plain_ast, source, line_offset, format_errors, opts) do
-    refine_opts = Keyword.take(opts, [:solver, :rlimit, :z3, :env])
-
-    case check_refinements(typed_ast, sigs, plain_ast, source, refine_opts) do
-      :ok -> :ok
-      {:error, errors} when format_errors -> {:error, ErrorFormatter.format_all(errors, source, line_offset: line_offset)}
-      {:error, errors} -> {:error, errors}
-    end
-  end
-
   defp definition_locs(forms) when is_list(forms) do
     for form <- forms, is_tuple(form), elem(form, 0) == :defn, into: %{} do
       {elem(form, 1), elem(form, tuple_size(form) - 1)}
@@ -205,26 +211,4 @@ defmodule Vaisto.Compilation do
   end
 
   defp definition_locs(form), do: definition_locs([form])
-
-  # Type check with optional error formatting
-  defp typecheck(ast, env, source, line_offset, format_errors) do
-    case TypeChecker.check(ast, env) do
-      {:ok, _, _} = success ->
-        success
-
-      {:error, errors} when is_list(errors) and format_errors ->
-        formatted = ErrorFormatter.format_all(errors, source, line_offset: line_offset)
-        {:error, formatted}
-
-      {:error, errors} when is_list(errors) ->
-        {:error, errors}
-
-      {:error, %Error{} = error} when format_errors ->
-        formatted = ErrorFormatter.format(error, source, line_offset: line_offset)
-        {:error, formatted}
-
-      {:error, err} ->
-        {:error, Error.normalize(err)}
-    end
-  end
 end

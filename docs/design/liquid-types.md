@@ -1,6 +1,6 @@
 # The algebra of types in Liquid Vaisto
 
-**Status: design.** This document replaces the RFC's decision that Hindley–Milner stays as an untrusted elaborator (`liquid-vaisto-rfc.md` §0.5, §9.1). It defines the type theory that Liquid Core is moving to, and the front end that elaborates into it. `liquid-core.md` remains the normative definition of Core version 0. Where this document goes further, it describes version 1 and later, and says so.
+**Status: production front end and Core v0, with later-version design.** This document replaces the RFC's decision that Hindley–Milner stays as an untrusted elaborator (`liquid-vaisto-rfc.md` §0.5, §9.1). It defines the type theory that Liquid Core is moving to, and the front end that elaborates into it. `liquid-core.md` remains the normative definition of Core version 0. Where this document goes further, it describes version 1 and later, and says so.
 
 The aim is a type system that is algebra all the way down. There are no inference heuristics and no special cases. Every rule is read off a universal property, and every identification of two things is a stated equivalence.
 
@@ -348,7 +348,86 @@ The only inference that remains is choosing the arguments at an elimination site
 - A function type is `(Fn :a :b :c)`: two parameters of types `a` and `b`, and a result of type `c`.
 - **Type ascription** is `(the τ e)`: it checks `e` against `τ` (owner decision, 2026-10-03). This is the rule that switches synthesis to checking, and it is how a program states a type inference cannot determine: `(the (Result :int :string) (Ok 42))`. Its type variables must be those of the enclosing signature.
 - A lambda's parameters may be annotated as a definition's are: `(fn [x :int] ...)` (D20).
-- Multi-clause definitions have no syntax for a signature yet.
+- Function constraints mirror instance constraints:
+  `(defn double [x :a] :a where [(Num a)] (* x 2))`. The elaborator passes
+  explicit dictionaries, quantifies the written signature, and checks the
+  body with rigid variables. `Num`, `Ord`, `Eq` and `Show` are available.
+  Integer literals can use an explicitly bound `Num` dictionary; ordinary
+  mixed Int/Float arithmetic remains an error. Class operations elaborate
+  to function calls, not assumptions in the refinement logic. A local `let`
+  holding such a function is still monomorphic. Canonical interfaces carry
+  class signatures, constraints, default helpers and instance factories.
+  Import validation checks these against exported Core types; implicit
+  dictionary application works across imports and forwarding modules.
+- **Effect contracts** can be written after the result:
+  `(defn apply [f (Fn :a :b :effects :e) x :a] :b :effects :e (f x))`.
+  The written `e` is quantified at kind `Eff` and rigid inside the body.
+  A concrete contract is `:effects [external]`; `:effects []` is pure.
+  Omitted contracts conservatively propagate known effects. Written
+  contracts are never widened. Higher-order builtins propagate their
+  callback's effect row. A row annotation is either one variable or a
+  closed list of distinct labels. `(Effects [external] :fx)` exposes a
+  fixed prefix with an open tail. Splicing duplicate labels is an error.
+- `(Map :k :v)` is homogeneous. An expected map type checks every key and
+  value of `#{...}`; an empty map needs a context. Without a map context,
+  nonempty literal-key forms such as `#{:name "Ada" :age 42}` synthesize
+  anonymous records, written `(Record [name :string age :int])`. These
+  retain the BEAM map representation and support field selection. This
+  does not introduce width subtyping. An explicit open row is written
+  `(Record [name :string] :r)`. Its `r` is quantified at kind `Row` and
+  rigid inside the definition; calls solve only the remaining fields.
+  Local inference can combine field requirements, but local `let` values
+  remain monomorphic in their rows. Named record tuples are not implicitly
+  converted to anonymous map records.
+- Multi-clause definitions put a function type before their clauses:
+  `(defn len (Fn (List :a) :int) [[] 0] [[h | t] (+ 1 (len t))])`.
+  As before, each clause matches one argument. The signature is checked,
+  including guarded bodies, recursion and exhaustiveness; no HM suggestion
+  is needed. Malformed clauses report located parser errors.
+
+**Production status (2026-10-18).** The feature-preserving migration is
+complete in the active Elixir compiler. All production entry points use
+`Parser → Elab → Core Lint → Refine.check_core → Liquid.Lower → OTP`.
+`TypeChecker`, Algorithm W, their contexts, the Phase 0 adapter, shadow mode,
+both old emitters and backend dispatch are deleted. No suggested-signature
+option supplies a missing source contract, and there is no fallback.
+
+`Dyn` boundaries are explicit: `(up τ e)` embeds ground data and `(decode τ e)`
+returns `(Core.Result :Core.DecodeError τ)`. Extern signatures contain closed
+decodable data, and native extern results are checked before exposure. False
+declarations produce `bad_decode`. Scripted handlers check full effect order;
+observer handlers suspend at the first request without executing it. Pure
+handlers still reject effects. Typed protocols and process initial states
+are checked, actors drop unexpected messages (Q26), and general selective
+receive retains unmatched messages while dropping selected malformed data.
+OTP supervision preserves linked startup and restart ordering.
+
+Classes, constrained instances, defaults and deriving are ordinary checked
+Core dictionary functions. Defaults are checked generically even if unused.
+Canonical interfaces retain quantified signatures, effect rows, class
+schemas, instance constraints and forwarding helpers. Imported dictionary
+application works transitively. Conflicting declarations/digests fail closed;
+old HM-shaped interfaces are rejected. Imported refinements remain refused
+(C12). Digests do not authenticate an independently supplied BEAM artifact;
+module sealing, brands and row evidence remain later work.
+
+Prompt pipelines use a typed driver boundary with finite schemas, checked
+projection and deep validation. `try` handles error/throw/exit and exactly-once
+`after`; catch handlers bind Reason and are shared without duplicating Core
+binders. Values use `(def name TYPE value)` and remain recomputed accessors.
+Only expression programs synthesize a generated `main/0` contract.
+
+Build, package builds, Runner, the transactional REPL, diagnostics, scoped
+hover and inlay inference all use verified native Core. Standard-library and
+example signatures are migrated. Supported source regressions now exercise
+native compilation, with an independent reference evaluator and unchanged
+corpus/mutation ratchets. HM-internal representation tests retire with their
+implementation; native tests check local unification, kinded substitutions,
+rigid signatures, occurs checks, scopes and source diagnostics instead.
+
+This does not add higher ranks, richer refinements or a mechanized compiler
+proof. The historical non-building `src/Vaisto/` prototype remains outside
+this migration, as specified in §13.
 
 ## 10. Later: one semiring for usage and cost
 
@@ -373,7 +452,7 @@ The two compose as a product semiring. Grades come after refinements (Phase 2) a
 
 | Phase | Before | With this document |
 |---|---|---|
-| 1a | engines merged, with Hindley–Milner elaborating directly to Core | **a bidirectional elaborator** implementing §8 with local unification (§9) and required signatures (§13). The current `TypeChecker`, `TypeSystem.Infer` and the Phase 0 adapter retire when it reaches parity on the corpus |
+| 1a | engines merged, with Hindley–Milner elaborating directly to Core | **a bidirectional elaborator** implementing §8 with local unification (§9) and required signatures (§13). The production compiler uses this path; `TypeChecker`, `TypeSystem.Infer` and the Phase 0 adapter are removed |
 | 1a (spec) | | **Core version 1**: kind `Prop`, `Σ` over propositions for `refine`, `Π`, `absurd` for `0`; the definitional equalities of §4.1, closed |
 | 2.x | refinements in Core | unchanged in plan; refinements are §5.1 |
 | 3 | library theories, sealed types | free models (§5.4) and quotients (§5.3); sealed values as quotients by authenticator; `Eq` as a discreteness witness (§4.3) |
@@ -386,7 +465,7 @@ The two compose as a product semiring. Grades come after refinements (Phase 2) a
 
 **Signatures on top-level definitions.** Today, 54 of the 166 definitions in the test suite carry a full signature, and 2 of the 552 in `std/`, `examples/` and `src/` do. Every multi-clause definition lacks one. So most existing code needs a signature added.
 
-The migration can be mechanized. The old engine infers a type for each definition, and a migration tool can insert it as a *suggested* signature, which the new checker then verifies. Definitions where Hindley–Milner was wrong are exactly the ones whose suggestions fail to check: D17 and D22 surface as errors instead of being written into the code. `src/Vaisto/`, the proof-of-concept compiler that no longer type-checks (ADR-002), is out of scope for the migration.
+During migration, the old engine's inferred types could be used offline to propose written signatures, which the independent new checker then verified. That engine and the runtime suggested-signature path are now removed. Definitions where Hindley–Milner was wrong are exactly the ones whose suggestions fail to check: D17 and D22 surface as errors instead of being written into the code. `src/Vaisto/`, the proof-of-concept compiler that no longer type-checks (ADR-002), is out of scope for the migration.
 
 **Pitch.** "Hindley–Milner inference: safety without annotation tax" becomes "signatures at definitions, inference inside". Rust is the precedent: it infers types inside functions and requires them on functions.
 

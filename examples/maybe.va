@@ -1,11 +1,11 @@
 (deftype Maybe (Just v) (Nothing))
 
-(defn unwrap [m default]
+(defn unwrap [m (Maybe :a) default :a] :a
   (match m
     [(Just v) v]
     [(Nothing) default]))
 
-(defn double-maybe [m]
+(defn double-maybe [m (Maybe :int)] (Maybe :int)
   (match m
     [(Just v) (Just (* v 2))]
     [(Nothing) (Nothing)]))

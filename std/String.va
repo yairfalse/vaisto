@@ -17,7 +17,7 @@
 (extern string/split [:string :string] (List :string))
 
 ; Join list of strings with separator (note: Erlang uses lists:join)
-(extern lists/join [:string (List :string)] (List :any))
+(extern lists/join [:string (List :string)] (List :string))
 
 ; Get substring (start index, length)
 (extern binary/part [:string :int :int] :string)
@@ -28,36 +28,36 @@
 ; Higher-level helpers
 
 ; Get length of string
-(defn length [s]
+(defn length [s :string] :int
   (erlang/byte_size s))
 
 ; Check if string is empty
-(defn empty? [s]
+(defn empty? [s :string] :bool
   (== (erlang/byte_size s) 0))
 
 ; Get a substring from start position with given length
-(defn substring [s start len]
+(defn substring [s :string start :int len :int] :string
   (binary/part s start len))
 
 ; Repeat a string n times
-(defn repeat [s n]
+(defn repeat [s :string n :int] :string
   (if (<= n 0)
     ""
-    (let [half (/ n 2)
+    (let [half (div n 2)
           doubled (repeat s half)]
       (if (== (* half 2) n)
         (concat doubled doubled)
         (concat s (concat doubled doubled))))))
 
 ; Simple concat using Erlang iolist
-(extern erlang/iolist_to_binary [(List :any)] :string)
+(extern erlang/iolist_to_binary [(List :string)] :string)
 
 ; Concatenate two strings
-(defn concat [a b]
+(defn concat [a :string b :string] :string
   (erlang/iolist_to_binary (list a b)))
 
 ; Convert integer to string
-(defn from-int [n]
+(defn from-int [n :int] :string
   (erlang/integer_to_binary n))
 
 ; --- Additional functions for self-hosting ---
@@ -65,40 +65,33 @@
 ; Get first character as integer codepoint (for parsing)
 (extern binary/first [:string] :int)
 
-; Get rest of string after first character
-(extern binary/part [:string :int] :string)
-
 ; Get character at index as codepoint
 (extern binary/at [:string :int] :int)
 
 ; Check if string starts with prefix
-(extern string/prefix [:string :string] :any)
+(extern string/prefix [:string :string] :dyn)
 
 ; Check if string contains substring
-(extern string/find [:string :string] :any)
+(extern string/find [:string :string] :dyn)
 
 ; Replace all occurrences
-(extern string/replace [:string :string :string] :string)
+(extern string/replace [:string :string :string] (List :string))
 
 ; Get first byte/character (returns codepoint)
-(defn first-char [s]
+(defn first-char [s :string] :int
   (binary/first s))
 
 ; Get rest of string after first byte
-(defn rest [s]
-  (binary/part s 1))
+(defn rest [s :string] :string
+  (binary/part s 1 (- (erlang/byte_size s) 1)))
 
 ; Check if string starts with given prefix
-(defn starts-with? [s prefix]
-  (match (string/prefix s prefix)
-    [:nomatch false]
-    [_ true]))
+(defn starts-with? [s :string prefix :string] :bool
+  (!= (string/prefix s prefix) (up :atom :nomatch)))
 
 ; Check if string contains substring
-(defn contains? [s needle]
-  (match (string/find s needle)
-    [:nomatch false]
-    [_ true]))
+(defn contains? [s :string needle :string] :bool
+  (!= (string/find s needle) (up :atom :nomatch)))
 
 ; --- Trim variants ---
 
@@ -106,25 +99,25 @@
 (extern string/trim [:string :atom] :string)
 
 ; Trim whitespace from start of string
-(defn trim-leading [s]
+(defn trim-leading [s :string] :string
   (string/trim s :leading))
 
 ; Trim whitespace from end of string
-(defn trim-trailing [s]
+(defn trim-trailing [s :string] :string
   (string/trim s :trailing))
 
 ; --- Case detection ---
 
 ; Check if string is all uppercase
-(defn upper? [s]
+(defn upper? [s :string] :bool
   (== s (string/uppercase s)))
 
 ; Check if string is all lowercase
-(defn lower? [s]
+(defn lower? [s :string] :bool
   (== s (string/lowercase s)))
 
 ; Check if character (codepoint) is uppercase letter
-(defn char-upper? [c]
+(defn char-upper? [c :int] :bool
   (if (< c 65)
     false
     (if (> c 90)
@@ -132,7 +125,7 @@
       true)))
 
 ; Check if character (codepoint) is lowercase letter
-(defn char-lower? [c]
+(defn char-lower? [c :int] :bool
   (if (< c 97)
     false
     (if (> c 122)
@@ -140,7 +133,7 @@
       true)))
 
 ; Check if character (codepoint) is a digit
-(defn char-digit? [c]
+(defn char-digit? [c :int] :bool
   (if (< c 48)
     false
     (if (> c 57)
@@ -148,7 +141,7 @@
       true)))
 
 ; Check if character (codepoint) is whitespace
-(defn char-whitespace? [c]
+(defn char-whitespace? [c :int] :bool
   (if (== c 32) true     ; space
     (if (== c 9) true    ; tab
       (if (== c 10) true ; newline

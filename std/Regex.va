@@ -7,116 +7,128 @@
 
 ; --- Erlang FFI ---
 
-; List functions
-(extern erlang/hd [(List :any)] :any)
-(extern erlang/tl [(List :any)] (List :any))
-(extern erlang/length [(List :any)] :int)
+; Binary operations and checked foreign boundaries
 (extern erlang/byte_size [:binary] :int)
-(extern erlang/iolist_to_binary [(List :any)] :string)
-(extern lists/map [:any (List :any)] (List :any))
-
-; Helper: wrap lists/map for cleaner usage
-(defn map [f xs]
-  (lists/map f xs))
 
 ; Binary operations
 (extern binary/part [:binary :int :int] :binary)
 
 ; Compile a regex pattern (returns {:ok, MP} or {:error, reason})
-(extern re/compile [:string] :any)
+(extern re/compile [:string] (Core.TaskResult :dyn))
 
 ; Run compiled regex against string
 ; Returns {:match, Captured} or :nomatch
-(extern re/run [:string :any] :any)
+(extern re/run [:string :dyn] :dyn)
 
 ; Run with options (for captures, global matching, etc.)
-(extern re/run [:string :any (List :any)] :any)
+(extern re/run [:string :dyn (List :dyn)] :dyn)
 
 ; Replace matches in string
-(extern re/replace [:string :any :string] :any)
+(extern re/replace [:string :dyn :string (List :dyn)] :string)
 
 ; Replace all matches
-(extern re/replace [:string :any :string (List :atom)] :any)
-
 ; Split string by regex
-(extern re/split [:string :any] :any)
+(extern re/split [:string :dyn (List :dyn)] (List :string))
 
-; Split with options
-(extern re/split [:string :any (List :any)] :any)
+; Validate both the tag and the complete capture shape before using it.
+(defn binary-captures [string :string pattern :dyn options (List :dyn)] (Option (List :string))
+  (let [raw (re/run string pattern options)]
+    (match (decode :atom raw)
+      [(Core.Ok :nomatch) (None)]
+      [_ (match (decode (Tuple :atom (List :string)) raw)
+        [(Core.Ok {:match captures}) (Some captures)]
+        [_ (crash :bad_decode)])])))
+
+(defn index-captures [string :string pattern :dyn options (List :dyn)] (Option (List (Tuple :int :int)))
+  (let [raw (re/run string pattern options)]
+    (match (decode :atom raw)
+      [(Core.Ok :nomatch) (None)]
+      [_ (match (decode (Tuple :atom (List (Tuple :int :int))) raw)
+        [(Core.Ok {:match captures}) (Some captures)]
+        [_ (crash :bad_decode)])])))
+
+(defn global-captures [string :string pattern :dyn] (List (List :string))
+  (let [raw (re/run string pattern
+    (list (up :atom :global) (up (Tuple :atom :atom :atom) {:capture :first :binary})))]
+    (match (decode :atom raw)
+      [(Core.Ok :nomatch) []]
+      [_ (match (decode (Tuple :atom (List (List :string))) raw)
+        [(Core.Ok {:match captures}) captures]
+        [_ (crash :bad_decode)])])))
 
 ; --- High-level API ---
 
 ; Compile a regex pattern
 ; (compile "\\d+") -> (Ok compiled) | (Err reason)
-(defn compile [pattern]
+(defn compile [pattern :string] (Result :dyn :dyn)
   (match (re/compile pattern)
     [{:ok mp} (Ok mp)]
     [{:error reason} (Err reason)]))
 
 ; Test if string matches pattern (returns bool)
 ; (matches? "hello123" "\\d+") -> true
-(defn matches? [string pattern]
-  (match (re/run string pattern)
-    [{:match _} true]
-    [:nomatch false]))
+(defn matches? [string :string pattern :dyn] :bool
+  (match (index-captures string pattern [])
+    [(Some _) true]
+    [(None) false]))
 
 ; Find first match in string
 ; (find "hello123world" "\\d+") -> (Some "123") | None
-(defn find [string pattern]
-  (match (re/run string pattern (list {:capture :first :binary}))
-    [{:match captured} (Some (erlang/hd captured))]
-    [:nomatch (None)]))
+(defn find [string :string pattern :dyn] (Option :string)
+  (match (binary-captures string pattern (list (up (Tuple :atom :atom :atom) {:capture :first :binary})))
+    [(Some captured) (Some (head captured))]
+    [(None) (None)]))
 
 ; Find all matches in string
 ; (find-all "a1b2c3" "\\d") -> ["1" "2" "3"]
-(defn find-all [string pattern]
-  (match (re/run string pattern (list :global {:capture :first :binary}))
-    [{:match matches} (map (fn [x] (erlang/hd x)) matches)]
-    [:nomatch (list)]))
+(defn find-all [string :string pattern :dyn] (List :string)
+  (map (fn [x] (head x)) (global-captures string pattern)))
 
 ; Find match with position info
 ; (find-pos "hello123" "\\d+") -> (Some {:start 5 :len 3 :match "123"}) | None
-(defn find-pos [string pattern]
-  (match (re/run string pattern (list {:capture :first :index}))
-    [{:match [{start len}]}
+(defn find-pos [string :string pattern :dyn] (Option (Record [start :int len :int match :string]))
+  (match (index-captures string pattern (list (up (Tuple :atom :atom :atom) {:capture :first :index})))
+    [(Some [{start len}])
       (Some #{ :start start
                :len len
                :match (binary/part string start len) })]
-    [:nomatch (None)]))
+    [(None) (None)]
+    [_ (crash :bad_decode)]))
 
 ; Replace first match
 ; (replace "hello123" "\\d+" "XXX") -> "helloXXX"
-(defn replace [string pattern replacement]
-  (erlang/iolist_to_binary
-    (re/replace string pattern replacement)))
+(defn replace [string :string pattern :dyn replacement :string] :string
+  (re/replace string pattern replacement (list (up (Tuple :atom :atom) {:return :binary}))))
 
 ; Replace all matches
 ; (replace-all "a1b2c3" "\\d" "X") -> "aXbXcX"
-(defn replace-all [string pattern replacement]
-  (erlang/iolist_to_binary
-    (re/replace string pattern replacement (list :global))))
+(defn replace-all [string :string pattern :dyn replacement :string] :string
+  (re/replace string pattern replacement
+    (list (up :atom :global) (up (Tuple :atom :atom) {:return :binary}))))
 
 ; Split string by pattern
 ; (split "a,b,,c" ",") -> ["a" "b" "" "c"]
-(defn split [string pattern]
-  (re/split string pattern (list {:return :binary})))
+(defn split [string :string pattern :dyn] (List :string)
+  (re/split string pattern (list (up (Tuple :atom :atom) {:return :binary}))))
 
 ; Split with limit
 ; (split-n "a,b,c,d" "," 2) -> ["a" "b,c,d"]
-(defn split-n [string pattern n]
-  (re/split string pattern (list {:return :binary} {:parts n})))
+(defn split-n [string :string pattern :dyn n :int] (List :string)
+  (re/split string pattern
+    (list (up (Tuple :atom :atom) {:return :binary}) (up (Tuple :atom :int) {:parts n}))))
 
 ; --- Lexer helpers ---
 
 ; Match at start of string only (anchored)
 ; Useful for tokenizing: try each pattern until one matches at current position
 ; (match-at "123abc" "^\\d+") -> (Some {:match "123" :rest "abc"}) | None
-(defn match-at [string pattern]
-  (match (re/run string pattern (list {:capture :first :index} :anchored))
-    [{:match [{0 len}]}
+(defn match-at [string :string pattern :dyn] (Option (Record [match :string rest :string]))
+  (match (index-captures string pattern
+      (list (up (Tuple :atom :atom :atom) {:capture :first :index}) (up :atom :anchored)))
+    [(Some [{0 len}])
       (Some #{ :match (binary/part string 0 len)
                :rest (binary/part string len (- (erlang/byte_size string) len)) })]
-    [:nomatch (None)]
+    [(None) (None)]
     [_ (None)]))
 
 ; Match with capture groups at start of string
@@ -127,16 +139,17 @@
 ;   -> (Some {:full "123abc"
 ;             :groups ["123" "abc"]
 ;             :rest " rest"})
-(defn match-groups [string pattern]
-  (match (re/run string pattern (list {:capture :all :index} :anchored))
-    [{:match indices}
+(defn match-groups [string :string pattern :dyn] (Option (Record [full :string groups (List :string) rest :string]))
+  (match (index-captures string pattern
+      (list (up (Tuple :atom :atom :atom) {:capture :all :index}) (up :atom :anchored)))
+    [(Some indices)
       (let [; First element is the full match
-            {full-start full-len} (erlang/hd indices)
+            {full-start full-len} (head indices)
             ; Rest are capture groups
-            group-indices (erlang/tl indices)
+            group-indices (tail indices)
             ; Extract the actual strings
             full-match (binary/part string full-start full-len)
-            groups (map (fn [{start len}] (binary/part string start len)) group-indices)
+            groups (map (fn [pair] (let [{start len} pair] (binary/part string start len))) group-indices)
             ; Calculate rest of string
             rest-start (+ full-start full-len)
             rest-len (- (erlang/byte_size string) rest-start)
@@ -144,13 +157,12 @@
         (Some #{ :full full-match
                  :groups groups
                  :rest rest }))]
-    [:nomatch (None)]
-    [_ (None)]))
+    [(None) (None)]))
 
 ; Try multiple patterns in order, return first match
 ; (match-first "123abc" [{"number" "^\\d+"} {"ident" "^[a-z]+"}])
 ;   -> (Some {:type "number" :match "123" :rest "abc"})
-(defn match-first [string patterns]
+(defn match-first [string :string patterns (List (Tuple :t :dyn))] (Option (Record [type :t match :string rest :string]))
   (match patterns
     [[] (None)]
     [[{type pattern} | rest]
@@ -164,7 +176,7 @@
 ;
 ; (match-first-groups input
 ;   [{:string "\"([^\"]*)\""} {:number "(\\d+)"}])
-(defn match-first-groups [string patterns]
+(defn match-first-groups [string :string patterns (List (Tuple :t :dyn))] (Option (Record [type :t full :string groups (List :string) rest :string]))
   (match patterns
     [[] (None)]
     [[{type pattern} | rest]
@@ -178,23 +190,20 @@
 ; --- Position tracking for error messages ---
 
 ; Count newlines in a string (for line number tracking)
-(defn count-newlines [string]
-  (let [matches (re/run string "\n" (list :global))]
-    (match matches
-      [{:match list} (erlang/length list)]
-      [:nomatch 0])))
+(defn count-newlines [string :string] :int
+  (length (global-captures string (up :string "\n"))))
 
 ; Find column of last line (chars after last newline)
-(defn last-line-length [string]
-  (match (find-pos string "\n[^\n]*$")
+(defn last-line-length [string :string] :int
+  (match (find-pos string (up :string "\n[^\n]*$"))
     [(Some m) (- (. m :len) 1)]  ; subtract the newline itself
     [(None) (erlang/byte_size string)]))
 
 ; Skip whitespace and track position changes
 ; Returns {:skipped :rest :lines :cols}
 ; where :lines is newlines crossed, :cols is column offset
-(defn skip-whitespace [string]
-  (match (match-at string "^[ \t\n\r]+")
+(defn skip-whitespace [string :string] (Record [skipped :string rest :string lines :int cols :int])
+  (match (match-at string (up :string "^[ \t\n\r]+"))
     [(Some m)
       (let [skipped (. m :match)
             lines (count-newlines skipped)
@@ -215,12 +224,12 @@
 
 ; Look at next n characters without consuming
 ; (peek "hello" 3) -> "hel"
-(defn peek [string n]
+(defn peek [string :string n :int] :string
   (if (<= n (erlang/byte_size string))
     (binary/part string 0 n)
     string))
 
 ; Check if string starts with prefix
 ; (starts-with? "hello" "hel") -> true
-(defn starts-with? [string prefix]
+(defn starts-with? [string :string prefix :string] :bool
   (== (peek string (erlang/byte_size prefix)) prefix))

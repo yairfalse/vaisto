@@ -152,7 +152,7 @@ else
 fi
 
 # Stateful: defn then call
-repl_run "(defn double [x] (* x 2))\n(double 21)\n:quit"
+repl_run "(defn double [x :int] :int (* x 2))\n(double 21)\n:quit"
 if [[ $BB_EXIT -eq 0 ]] && echo "$BB_OUTPUT" | grep -q "=> 42"; then
   log_pass "POS-015" "Defn then call = 42"
 elif has_stacktrace "$BB_OUTPUT"; then
@@ -361,7 +361,7 @@ echo ""
 echo "${BOLD}── Abnormal Tests ──${NC}"
 
 # Division by zero
-repl_run "(/ 1 0)\n:quit"
+repl_run "(div 1 0)\n:quit"
 if [[ $BB_EXIT -eq 0 ]] && ! has_stacktrace "$BB_OUTPUT"; then
   log_pass "ABN-001" "Division by zero: clean recovery"
 elif has_stacktrace "$BB_OUTPUT"; then
@@ -371,7 +371,7 @@ else
 fi
 
 # Division by zero then continue
-repl_run "(/ 1 0)\n(+ 1 2)\n:quit"
+repl_run "(div 1 0)\n(+ 1 2)\n:quit"
 if [[ $BB_EXIT -eq 0 ]] && echo "$BB_OUTPUT" | grep -q "=> 3"; then
   log_pass "ABN-002" "Recovery after div/0"
 elif has_stacktrace "$BB_OUTPUT"; then

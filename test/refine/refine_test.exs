@@ -3,7 +3,7 @@ defmodule Vaisto.Refine.RefineTest do
   # bridge gates of §21.1, each from the requirement it states.
   use ExUnit.Case, async: true
 
-  alias Vaisto.{Compilation, Parser, TypeChecker}
+  alias Vaisto.{Compilation, Elab, Parser}
   alias Vaisto.Refine
   alias Vaisto.Refine.{Solver, Surface, VC, VCGen}
 
@@ -141,34 +141,35 @@ defmodule Vaisto.Refine.RefineTest do
     end
   end
 
-  describe "the bridge gates (§21.1)" do
-    test "a call outside a defn is refused, since only calls in definitions are checked" do
+  describe "native verification gates" do
+    test "a top-level expression's refined calls are checked too" do
       assert [message] = messages(compile(@safe_div <> "(safe-div 1 0)"))
-      assert message =~ "only calls inside a `defn` are checked"
+      assert message == "requirement not met"
+      assert {:ok, _, _} = compile(@safe_div <> "(safe-div 1 2)")
     end
 
     test "a definition the checker cannot read is refused when it uses a refined function" do
       assert [message] = messages(compile(@safe_div <> "(defn f [n :int] :string (str (safe-div 1 n)))"))
-      assert message =~ "cannot read `f`"
+      assert message == "refinement checking does not admit `up` yet"
     end
 
     test "a definition that uses a refined function must pass Core Lint" do
       # HM generalizes x over every type (D17), which Core Lint rejects.
       assert [message] = messages(compile(@safe_div <> "(defn f [x] (do (* x 2) (safe-div 1 1)))"))
-      assert message =~ "needs `f` to be well typed"
+      assert message == "`f` needs a signature"
     end
 
-    test "== on Float is refused where the backends disagree (D25)" do
+    test "unsupported Float verification fails closed even though native equality is exact" do
       assert [message] = messages(compile("(defn f [x :float y {v :int | (> v 0)}] :bool (== x 1.0))"))
-      assert message =~ "D25"
+      assert message =~ "Float is not supported by refinement verification"
     end
 
     test "a failed square is a build error, never a silent pass (K11)" do
       source = "(defn f [x :int] :int x)"
-      {:ok, _, typed} = TypeChecker.check(Parser.parse(source))
+      {:ok, core} = Elab.module(Parser.parse(source))
       # A signature that puts a Bool refinement on an Int parameter.
       sig = %Surface.Sig{name: :f, params: [{:x, :bool, {:v, true}}], result: {:int, nil}}
-      assert {:error, [error]} = Refine.check(typed, %{f: sig}, solver: Solver.Unknown)
+      assert {:error, [error]} = Refine.check_core(core, %{f: sig}, solver: Solver.Unknown)
       assert error.message =~ "does not commute"
     end
   end
@@ -181,20 +182,20 @@ defmodule Vaisto.Refine.RefineTest do
     test "1: a crashing arm's negation is used only when its selection is exact" do
       # [0 | t] is not exact (a head test on a fresh name), so the fallback arm's
       # condition len(xs) ≠ 0 is only necessary; f (list 0) returns 2.
-      source = "(defn f [xs (List :int)] {r :int | (== r 1)} (let [r (match xs [[0 | t] 2] [[] 1])] r))"
+      source = "(defn f [xs (List :int)] {r :int | (== r 1)} (let [r (match xs [[0 | t] 2] [[] 1] [_ 2])] r))"
       assert ["result does not satisfy the declared type"] = messages(compile(source))
     end
 
     test "2: every definition must pass Core Lint, not only refined code and its callers" do
       source = "(defn inc [x] (+ x 1))\n(defn f [n {v :int | (> v 0)}] :int (div 10 n))\n(defn main [] :int (let [y (inc -0.5)] (if (> y 0) (f y) 0)))"
       assert [message] = messages(compile(source))
-      assert message =~ "needs `inc` to be well typed"
+      assert message == "`inc` needs a signature"
     end
 
-    test "3: class and instance methods must not use refined functions" do
+    test "3: refined calls inside class and instance methods are checked" do
       source = @safe_div <> "(defclass Foo [a] (foo [x :a] :int))\n(instance Foo :int (foo [x] (safe-div 10 x)))"
       assert [message] = messages(compile(source))
-      assert message =~ "only calls inside a `defn` are checked"
+      assert message == "requirement not met"
     end
 
     test "4: a call to a refined function in another module is refused until interfaces carry refinements (C12)" do
@@ -206,7 +207,7 @@ defmodule Vaisto.Refine.RefineTest do
       File.write!(Path.join(dir, "RefB.va"), "(ns RefB)\n(import RefA)\n(defn main [] :int (RefA/safe-div 1 0))")
 
       assert {:error, message} = Vaisto.Build.build(dir, output_dir: Path.join(dir, "out"))
-      assert inspect(message) =~ "`RefA/safe-div` has refinements, and calls across modules are not checked yet"
+      assert inspect(message) =~ "`RefA/safe-div` has refinements, and imported refinements cannot be erased"
     end
 
     test "6: a parameter named result does not capture the result placeholder" do
@@ -241,8 +242,7 @@ defmodule Vaisto.Refine.RefineTest do
 
   describe "refinements cannot bypass the checker" do
     test "the type checker refuses a refined type on any path that skips the refinement checker" do
-      assert {:error, error} = TypeChecker.check(Parser.parse(@safe_div))
-      assert error.message == "refinement types are not checked on this path"
+      assert {:error, [_ | _]} = Elab.module(Parser.parse(@safe_div))
     end
   end
 

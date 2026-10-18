@@ -1,43 +1,44 @@
 defmodule Vaisto.CoreBackendParityTest do
   @moduledoc """
-  Tests that verify parity between :elixir and :core backends.
-  Each test runs the same code through both backends and compares results.
-
-  This catches:
-  - Missing to_core_expr clauses
-  - Semantic differences between backends
-  - Edge cases in code generation
+  Native BEAM execution agrees with the independent Core evaluator.
   """
   use ExUnit.Case, async: true
 
   alias Vaisto.Runner
 
-  # Helper to run code through both backends and compare
-  defp run_both(code, test_name) do
-    elixir_result = Runner.run(code, backend: :elixir)
-    core_result = Runner.run(code, backend: :core)
+  # No second compiler backend: compare two independent execution paths.
+  defp run_both(code, test_name, steps \\ []) do
+    evaluator_result = with {:ok, core} <- Vaisto.Compilation.check_liquid(code), do: Vaisto.Liquid.Eval.run(core, :main, [], handler: {:script, steps})
+    name = :"Parity_#{System.unique_integer([:positive])}"
+    native_result = with {:ok, module, _} <- Vaisto.Compilation.compile(code, name) do
+      try do
+        Vaisto.Liquid.Runtime.run(module, :main, [], handler: {:script, steps})
+      after
+        :code.purge(module)
+        :code.delete(module)
+      end
+    end
 
-    case {elixir_result, core_result} do
+    case {evaluator_result, native_result} do
       {{:ok, ev}, {:ok, cv}} when ev == cv ->
         {:ok, ev}
       {{:ok, ev}, {:ok, cv}} ->
-        {:mismatch, test_name, elixir: ev, core: cv}
+        {:mismatch, test_name, evaluator: ev, native: cv}
       {{:ok, _}, {:error, err}} ->
-        {:core_failed, test_name, err}
+        {:native_failed, test_name, err}
       {{:error, err}, {:ok, _}} ->
-        {:elixir_failed, test_name, err}
+        {:evaluator_failed, test_name, err}
       {{:error, e1}, {:error, e2}} ->
-        {:both_failed, test_name, elixir: e1, core: e2}
+        {:both_failed, test_name, evaluator: e1, native: e2}
     end
   end
 
-  # Helper to compile through both backends
+  # Both the Core checking gate and native compiler must reject invalid code.
   defp compile_both(code, base_name) do
-    elixir_mod = :"#{base_name}_Elixir"
     core_mod = :"#{base_name}_Core"
 
-    elixir_result = Runner.compile_and_load(code, elixir_mod, backend: :elixir)
-    core_result = Runner.compile_and_load(code, core_mod, backend: :core)
+    elixir_result = Vaisto.Compilation.check_liquid(code)
+    core_result = Runner.compile_and_load(code, core_mod)
 
     {elixir_result, core_result}
   end
@@ -95,13 +96,13 @@ defmodule Vaisto.CoreBackendParityTest do
     end
 
     test "division always returns float" do
-      result = run_both("(/ 10 4)", :div_int)
+      result = run_both("(/ (int-to-float 10) (int-to-float 4))", :div_int)
       assert {:ok, 2.5} = result
     end
 
     test "mixed int/float" do
-      assert {:ok, 5.5} = run_both("(+ 2 3.5)", :mixed_add)
-      assert {:ok, 6.0} = run_both("(* 2 3.0)", :mixed_mul)
+      assert {:ok, 5.5} = run_both("(+ (int-to-float 2) 3.5)", :mixed_add)
+      assert {:ok, 6.0} = run_both("(* (int-to-float 2) 3.0)", :mixed_mul)
     end
 
     test "nested arithmetic" do
@@ -131,8 +132,8 @@ defmodule Vaisto.CoreBackendParityTest do
     end
 
     test "mixed comparisons" do
-      assert {:ok, true} = run_both("(< 1 2.5)", :lt_mixed)
-      assert {:ok, true} = run_both("(> 3.0 2)", :gt_mixed)
+      assert {:ok, true} = run_both("(< (int-to-float 1) 2.5)", :lt_mixed)
+      assert {:ok, true} = run_both("(> 3.0 (int-to-float 2))", :gt_mixed)
     end
   end
 
@@ -189,7 +190,7 @@ defmodule Vaisto.CoreBackendParityTest do
 
   describe "lists" do
     test "empty list" do
-      assert {:ok, []} = run_both("(list)", :empty_list)
+      assert {:ok, []} = run_both("(the (List :int) (list))", :empty_list)
     end
 
     test "integer list" do
@@ -214,11 +215,11 @@ defmodule Vaisto.CoreBackendParityTest do
 
     test "length" do
       assert {:ok, 3} = run_both("(length (list 1 2 3))", :length_list)
-      assert {:ok, 0} = run_both("(length (list))", :length_empty)
+      assert {:ok, 0} = run_both("(length (the (List :int) (list)))", :length_empty)
     end
 
     test "empty?" do
-      assert {:ok, true} = run_both("(empty? (list))", :empty_true)
+      assert {:ok, true} = run_both("(empty? (the (List :int) (list)))", :empty_true)
       assert {:ok, false} = run_both("(empty? (list 1))", :empty_false)
     end
 
@@ -230,8 +231,8 @@ defmodule Vaisto.CoreBackendParityTest do
   describe "functions" do
     test "simple function" do
       code = """
-      (defn double [x] (* x 2))
-      (defn main [] (double 21))
+      (defn double [x :int] :int (* x 2))
+      (defn main [] :int (double 21))
       """
       assert {:ok, 42} = run_both(code, :simple_fn)
     end
@@ -239,50 +240,50 @@ defmodule Vaisto.CoreBackendParityTest do
     test "function with type annotation" do
       code = """
       (defn add [a :int b :int] :int (+ a b))
-      (defn main [] (add 3 4))
+      (defn main [] :int (add 3 4))
       """
       assert {:ok, 7} = run_both(code, :typed_fn)
     end
 
     test "recursive function" do
       code = """
-      (defn factorial [n]
+      (defn factorial [n :int] :int
         (if (== n 0)
           1
           (* n (factorial (- n 1)))))
-      (defn main [] (factorial 5))
+      (defn main [] :int (factorial 5))
       """
       assert {:ok, 120} = run_both(code, :recursive_fn)
     end
 
     test "mutual recursion" do
       code = """
-      (defn is-even [n]
+      (defn is-even [n :int] :bool
         (if (== n 0)
           true
           (is-odd (- n 1))))
-      (defn is-odd [n]
+      (defn is-odd [n :int] :bool
         (if (== n 0)
           false
           (is-even (- n 1))))
-      (defn main [] (is-even 10))
+      (defn main [] :bool (is-even 10))
       """
       assert {:ok, true} = run_both(code, :mutual_rec)
     end
 
     test "higher-order function" do
       code = """
-      (defn apply-twice [f x] (f (f x)))
-      (defn inc [n] (+ n 1))
-      (defn main [] (apply-twice inc 5))
+      (defn apply-twice [f (Fn :int :int) x :int] :int (f (f x)))
+      (defn inc [n :int] :int (+ n 1))
+      (defn main [] :int (apply-twice inc 5))
       """
       assert {:ok, 7} = run_both(code, :higher_order)
     end
 
     test "function returning function" do
       code = """
-      (defn make-adder [n] (fn [x] (+ x n)))
-      (defn main []
+      (defn make-adder [n :int] (Fn :int :int) (fn [x] (+ x n)))
+      (defn main [] :int
         (let [add5 (make-adder 5)]
           (add5 10)))
       """
@@ -293,7 +294,7 @@ defmodule Vaisto.CoreBackendParityTest do
   describe "anonymous functions" do
     test "simple lambda" do
       code = """
-      (defn main []
+      (defn main [] :int
         (let [f (fn [x] (* x 2))]
           (f 21)))
       """
@@ -302,7 +303,7 @@ defmodule Vaisto.CoreBackendParityTest do
 
     test "lambda with multiple args" do
       code = """
-      (defn main []
+      (defn main [] :int
         (let [f (fn [a b] (+ a b))]
           (f 3 4)))
       """
@@ -311,7 +312,7 @@ defmodule Vaisto.CoreBackendParityTest do
 
     test "closure capturing variable" do
       code = """
-      (defn main []
+      (defn main [] :int
         (let [x 10]
           (let [f (fn [y] (+ x y))]
             (f 5))))
@@ -321,7 +322,7 @@ defmodule Vaisto.CoreBackendParityTest do
 
     test "nested closures" do
       code = """
-      (defn main []
+      (defn main [] :int
         (let [x 1]
           (let [y 2]
             (let [f (fn [z] (+ x (+ y z)))]
@@ -334,7 +335,7 @@ defmodule Vaisto.CoreBackendParityTest do
   describe "match expressions" do
     test "match on integer" do
       code = """
-      (defn main []
+      (defn main [] :atom
         (match 2
           [1 :one]
           [2 :two]
@@ -345,7 +346,7 @@ defmodule Vaisto.CoreBackendParityTest do
 
     test "match on atom" do
       code = """
-      (defn main []
+      (defn main [] :atom
         (match :hello
           [:hello :greeting]
           [:bye :farewell]
@@ -356,7 +357,7 @@ defmodule Vaisto.CoreBackendParityTest do
 
     test "match with variable binding" do
       code = """
-      (defn main []
+      (defn main [] :int
         (match 42
           [x x]))
       """
@@ -365,9 +366,9 @@ defmodule Vaisto.CoreBackendParityTest do
 
     test "match on list" do
       code = """
-      (defn main []
+      (defn main [] :int
         (match (list 1 2 3)
-          [[] :empty]
+          [[] 0]
           [[h | t] h]))
       """
       assert {:ok, 1} = run_both(code, :match_list)
@@ -375,16 +376,17 @@ defmodule Vaisto.CoreBackendParityTest do
 
     test "match with nested pattern" do
       code = """
-      (defn main []
+      (defn main [] :int
         (match (list 1 2 3)
-          [[a | [b | rest]] (+ a b)]))
+          [[a | [b | rest]] (+ a b)]
+          [_ 0]))
       """
       assert {:ok, 3} = run_both(code, :match_nested)
     end
 
     test "match wildcard" do
       code = """
-      (defn main []
+      (defn main [] :atom
         (match 999
           [1 :one]
           [_ :other]))
@@ -396,7 +398,7 @@ defmodule Vaisto.CoreBackendParityTest do
   describe "cond expressions" do
     test "simple cond" do
       code = """
-      (defn main []
+      (defn main [] :atom
         (cond
           [(< 1 0) :nope]
           [(> 1 0) :yes]
@@ -407,7 +409,7 @@ defmodule Vaisto.CoreBackendParityTest do
 
     test "cond falls through" do
       code = """
-      (defn main []
+      (defn main [] :atom
         (cond
           [false :a]
           [false :b]
@@ -418,7 +420,7 @@ defmodule Vaisto.CoreBackendParityTest do
 
     test "cond with expressions" do
       code = """
-      (defn main []
+      (defn main [] :atom
         (let [x 5]
           (cond
             [(< x 0) :negative]
@@ -432,7 +434,7 @@ defmodule Vaisto.CoreBackendParityTest do
   describe "do blocks" do
     test "simple do" do
       code = """
-      (defn main []
+      (defn main [] :int
         (do
           1
           2
@@ -443,7 +445,7 @@ defmodule Vaisto.CoreBackendParityTest do
 
     test "do with side effects simulation" do
       code = """
-      (defn main []
+      (defn main [] :int
         (let [x 1]
           (do
             (+ x 1)
@@ -467,10 +469,11 @@ defmodule Vaisto.CoreBackendParityTest do
 
     test "tuple in match" do
       code = """
-      (defn main []
+      (defn main [] :int
         (match (tuple :ok 42)
-          [(tuple :ok val) val]
-          [(tuple :error _) 0]))
+          [{:ok val} val]
+          [{:error _} 0]
+          [_ 0]))
       """
       assert {:ok, 42} = run_both(code, :tuple_match)
     end
@@ -479,51 +482,51 @@ defmodule Vaisto.CoreBackendParityTest do
   describe "map/filter/fold" do
     test "map over list" do
       code = """
-      (defn double [x] (* x 2))
-      (defn main [] (map double (list 1 2 3)))
+      (defn double [x :int] :int (* x 2))
+      (defn main [] (List :int) (map double (list 1 2 3)))
       """
       assert {:ok, [2, 4, 6]} = run_both(code, :map_list)
     end
 
     test "map with lambda" do
       code = """
-      (defn main [] (map (fn [x] (+ x 1)) (list 1 2 3)))
+      (defn main [] (List :int) (map (fn [x] (+ x 1)) (list 1 2 3)))
       """
       assert {:ok, [2, 3, 4]} = run_both(code, :map_lambda)
     end
 
     test "filter list" do
       code = """
-      (defn is-positive [x] (> x 0))
-      (defn main [] (filter is-positive (list -1 2 -3 4 0)))
+      (defn is-positive [x :int] :bool (> x 0))
+      (defn main [] (List :int) (filter is-positive (list -1 2 -3 4 0)))
       """
       assert {:ok, [2, 4]} = run_both(code, :filter_list)
     end
 
     test "filter with lambda" do
       code = """
-      (defn main [] (filter (fn [x] (> x 2)) (list 1 2 3 4 5)))
+      (defn main [] (List :int) (filter (fn [x] (> x 2)) (list 1 2 3 4 5)))
       """
       assert {:ok, [3, 4, 5]} = run_both(code, :filter_lambda)
     end
 
     test "fold left" do
       code = """
-      (defn main [] (fold + 0 (list 1 2 3 4 5)))
+      (defn main [] :int (fold + 0 (list 1 2 3 4 5)))
       """
       assert {:ok, 15} = run_both(code, :fold_sum)
     end
 
     test "fold with lambda" do
       code = """
-      (defn main [] (fold (fn [acc x] (+ acc (* x x))) 0 (list 1 2 3)))
+      (defn main [] :int (fold (fn [acc x] (+ acc (* x x))) 0 (list 1 2 3)))
       """
       assert {:ok, 14} = run_both(code, :fold_lambda)
     end
 
     test "chained operations" do
       code = """
-      (defn main []
+      (defn main [] :int
         (fold + 0
           (map (fn [x] (* x 2))
             (filter (fn [x] (> x 0)) (list -1 2 3 -4 5)))))
@@ -536,7 +539,7 @@ defmodule Vaisto.CoreBackendParityTest do
     test "simple sum type" do
       code = """
       (deftype Color (Red) (Green) (Blue))
-      (defn main [] (Red))
+      (defn main [] :Color (Red))
       """
       assert {:ok, {:Red}} = run_both(code, :simple_adt)
     end
@@ -544,7 +547,7 @@ defmodule Vaisto.CoreBackendParityTest do
     test "sum type with data" do
       code = """
       (deftype Result (Ok value) (Err msg))
-      (defn main [] (Ok 42))
+      (defn main [] (Result :int :string) (Ok 42))
       """
       assert {:ok, {:Ok, 42}} = run_both(code, :adt_with_data)
     end
@@ -552,11 +555,11 @@ defmodule Vaisto.CoreBackendParityTest do
     test "match on sum type" do
       code = """
       (deftype Maybe (Just value) (Nothing))
-      (defn unwrap-or [m default]
+      (defn unwrap-or [m (Maybe :a) default :a] :a
         (match m
           [(Just v) v]
           [(Nothing) default]))
-      (defn main [] (unwrap-or (Just 42) 0))
+      (defn main [] :int (unwrap-or (Just 42) 0))
       """
       assert {:ok, 42} = run_both(code, :match_adt)
     end
@@ -564,7 +567,7 @@ defmodule Vaisto.CoreBackendParityTest do
     test "product type (record)" do
       code = """
       (deftype Point [x :int y :int])
-      (defn main [] (Point 3 4))
+      (defn main [] :Point (Point 3 4))
       """
       result = run_both(code, :product_type)
       # Records might be represented differently
@@ -580,14 +583,14 @@ defmodule Vaisto.CoreBackendParityTest do
   describe "string operations" do
     test "string concatenation" do
       code = """
-      (defn main [] (str "hello" " " "world"))
+      (defn main [] :string (str "hello" " " "world"))
       """
       assert {:ok, "hello world"} = run_both(code, :str_concat)
     end
 
     test "string from int" do
       code = """
-      (defn main [] (str "value: " 42))
+      (defn main [] :string (str "value: " 42))
       """
       assert {:ok, "value: 42"} = run_both(code, :str_int)
     end
@@ -605,8 +608,8 @@ defmodule Vaisto.CoreBackendParityTest do
   describe "edge cases" do
     test "deeply nested function calls" do
       code = """
-      (defn id [x] x)
-      (defn main [] (id (id (id (id (id 42))))))
+      (defn id [x :int] :int x)
+      (defn main [] :int (id (id (id (id (id 42))))))
       """
       assert {:ok, 42} = run_both(code, :deep_calls)
     end
@@ -620,30 +623,30 @@ defmodule Vaisto.CoreBackendParityTest do
 
     test "complex expression" do
       code = """
-      (defn fib [n]
+      (defn fib [n :int] :int
         (if (< n 2)
           n
           (+ (fib (- n 1)) (fib (- n 2)))))
-      (defn main [] (fib 10))
+      (defn main [] :int (fib 10))
       """
       assert {:ok, 55} = run_both(code, :fibonacci)
     end
 
     test "multiple function definitions" do
       code = """
-      (defn a [] 1)
-      (defn b [] (+ (a) 1))
-      (defn c [] (+ (b) 1))
-      (defn d [] (+ (c) 1))
-      (defn e [] (+ (d) 1))
-      (defn main [] (e))
+      (defn a [] :int 1)
+      (defn b [] :int (+ (a) 1))
+      (defn c [] :int (+ (b) 1))
+      (defn d [] :int (+ (c) 1))
+      (defn e [] :int (+ (d) 1))
+      (defn main [] :int (e))
       """
       assert {:ok, 5} = run_both(code, :multi_fns)
     end
 
     test "variable shadowing in match" do
       code = """
-      (defn main []
+      (defn main [] :int
         (let [x 10]
           (match 5
             [x (+ x 100)])))
@@ -682,11 +685,13 @@ defmodule Vaisto.CoreBackendParityTest do
 
   describe "try/catch" do
     test "catch error" do
-      assert {:ok, :caught} = run_both(~s|(try (erlang:error :boom) [catch [:error e :caught]])|, "try_catch_error")
+      code = "(extern erlang:error [:atom] :atom) (try (erlang:error :boom) [catch [:error e :caught]])"
+      assert {:ok, :caught} = run_both(code, "try_catch_error", [{:external, [:erlang, :error, [:boom]], {:raised, :error, :boom}}])
     end
 
     test "catch throw" do
-      assert {:ok, 42} = run_both(~s|(try (erlang:throw 42) [catch [:throw v v]])|, "try_catch_throw")
+      code = "(extern erlang:throw [:int] :int) (try (erlang:throw 42) [catch [:throw v (match (decode (Tuple :atom :atom :int) (up :Reason v)) [(Core.Ok {_ _ n}) n] [_ (crash :bad_decode)])]])"
+      assert {:ok, 42} = run_both(code, "try_catch_throw", [{:external, [:erlang, :throw, [42]], {:raised, :throw, 42}}])
     end
 
     test "no exception passes through" do
@@ -694,8 +699,9 @@ defmodule Vaisto.CoreBackendParityTest do
     end
 
     test "try/catch/after" do
-      code = "(do (erlang:put :after_ran false) (try 42 [catch [:error e 0]] [after (erlang:put :after_ran true)]) (erlang:get :after_ran))"
-      assert {:ok, true} = run_both(code, "try_catch_after")
+      code = "(extern erlang:put [:atom :bool] :dyn) (extern erlang:get [:atom] :bool) (do (erlang:put :after_ran false) (try 42 [catch [:error e 0]] [after (erlang:put :after_ran true)]) (erlang:get :after_ran))"
+      steps = [{:external, [:erlang, :put, [:after_ran, false]], {:ok, :undefined}}, {:external, [:erlang, :put, [:after_ran, true]], {:ok, false}}, {:external, [:erlang, :get, [:after_ran]], {:ok, true}}]
+      assert {:ok, true} = run_both(code, "try_catch_after", steps)
     end
   end
 end

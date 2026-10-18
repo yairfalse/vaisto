@@ -9,8 +9,6 @@ defmodule Vaisto.Liquid.LintStrengthTest do
   #      Lint accepts must still not go wrong (liquid-core.md §10.15).
   use ExUnit.Case, async: true
 
-  alias Vaisto.{Elab, Parser, TypeChecker}
-  alias Vaisto.Elab.Shadow
   alias Vaisto.Liquid.{Canonical, Eval, Gen, Harness, Lint}
 
   @mutants_per_module 300
@@ -21,9 +19,7 @@ defmodule Vaisto.Liquid.LintStrengthTest do
 
     modules =
       for {_file, source} <- corpus,
-          {:ok, ast} <- [Vaisto.Compilation.parse(source)],
-          {:ok, _, typed} <- [safe(fn -> TypeChecker.check(ast) end)],
-          {:ok, core} <- [Elab.module(Parser.parse(source), suggest: Shadow.suggestions(typed))],
+          {:ok, core} <- [Vaisto.Compilation.check_liquid(source, :Corpus, format_errors: false)],
           Lint.check_module(core) == :ok,
           main_type(core) != nil,
           uniq: true,
@@ -91,6 +87,9 @@ defmodule Vaisto.Liquid.LintStrengthTest do
           {:went_wrong, message} -> "the evaluator stopped: #{message}"
           :did_not_end -> nil
           {:crash, reason} -> unless Eval.value_of?(reason, [:Reason]), do: "crash reason #{inspect(reason)} is not a (Reason)"
+          {:effect, op, _args} ->
+            [:def, :main, [:->, [], eff, _], _] = Enum.find(module, &match?([:def, :main, _, _], &1))
+            unless op in tl(eff), do: "undeclared effect #{op} under #{inspect(eff)}"
           {:ok, v} -> unless Eval.value_of?(v, type, types: decls), do: "#{inspect(v, limit: 8)} is not a value of #{Canonical.render(type)}"
         end
     end
@@ -115,7 +114,7 @@ defmodule Vaisto.Liquid.LintStrengthTest do
 
         result =
           try do
-            Eval.run(module, :main, [])
+            Eval.run(module, :main, [], handler: :observe)
           rescue
             e -> {:went_wrong, Exception.format(:error, e) |> String.slice(0, 300)}
           end
@@ -164,12 +163,6 @@ defmodule Vaisto.Liquid.LintStrengthTest do
 
   defp leaf do
     Enum.random([:def, :type, :fn, :app, :match, :inj, :record, :sum, :forall, :->, :eff, :closed, :Int, :Bool, :x, :_, :when, :perform, :crash, 0, -1, 2.5, "s", [], [:unit]])
-  end
-
-  defp safe(fun) do
-    fun.()
-  rescue
-    _ -> :error
   end
 
   defp report(what, failures) do

@@ -4,7 +4,6 @@
 ; --- Constants ---
 
 (extern math/pi [] :float)
-(extern math/e [] :float)
 
 ; Pi (3.14159...)
 (defn pi [] :float
@@ -12,7 +11,7 @@
 
 ; Euler's number e (2.71828...)
 (defn e [] :float
-  (math/e))
+  (math/exp 1.0))
 
 ; --- Basic Functions ---
 
@@ -24,28 +23,28 @@
 (extern math/log2 [:float] :float)
 
 ; Square root
-(defn sqrt [x] :float
-  (math/sqrt x))
+(defn sqrt [x :a] :float where [(Num a)]
+  (math/sqrt (num-to-float x)))
 
 ; Power: x^y
-(defn pow [x y] :float
-  (math/pow x y))
+(defn pow [x :a y :b] :float where [(Num a) (Num b)]
+  (math/pow (num-to-float x) (num-to-float y)))
 
 ; Natural exponential: e^x
-(defn exp [x] :float
-  (math/exp x))
+(defn exp [x :a] :float where [(Num a)]
+  (math/exp (num-to-float x)))
 
 ; Natural logarithm (base e)
-(defn log [x] :float
-  (math/log x))
+(defn log [x :a] :float where [(Num a)]
+  (math/log (num-to-float x)))
 
 ; Base-10 logarithm
-(defn log10 [x] :float
-  (math/log10 x))
+(defn log10 [x :a] :float where [(Num a)]
+  (math/log10 (num-to-float x)))
 
 ; Base-2 logarithm
-(defn log2 [x] :float
-  (math/log2 x))
+(defn log2 [x :a] :float where [(Num a)]
+  (math/log2 (num-to-float x)))
 
 ; --- Trigonometric Functions ---
 
@@ -58,32 +57,32 @@
 (extern math/atan2 [:float :float] :float)
 
 ; Sine
-(defn sin [x] :float
-  (math/sin x))
+(defn sin [x :a] :float where [(Num a)]
+  (math/sin (num-to-float x)))
 
 ; Cosine
-(defn cos [x] :float
-  (math/cos x))
+(defn cos [x :a] :float where [(Num a)]
+  (math/cos (num-to-float x)))
 
 ; Tangent
-(defn tan [x] :float
-  (math/tan x))
+(defn tan [x :a] :float where [(Num a)]
+  (math/tan (num-to-float x)))
 
 ; Arc sine (inverse sine)
-(defn asin [x] :float
-  (math/asin x))
+(defn asin [x :a] :float where [(Num a)]
+  (math/asin (num-to-float x)))
 
 ; Arc cosine (inverse cosine)
-(defn acos [x] :float
-  (math/acos x))
+(defn acos [x :a] :float where [(Num a)]
+  (math/acos (num-to-float x)))
 
 ; Arc tangent (inverse tangent)
-(defn atan [x] :float
-  (math/atan x))
+(defn atan [x :a] :float where [(Num a)]
+  (math/atan (num-to-float x)))
 
 ; Two-argument arc tangent (atan2)
-(defn atan2 [y x] :float
-  (math/atan2 y x))
+(defn atan2 [y :a x :b] :float where [(Num a) (Num b)]
+  (math/atan2 (num-to-float y) (num-to-float x)))
 
 ; --- Hyperbolic Functions ---
 
@@ -95,69 +94,66 @@
 (extern math/atanh [:float] :float)
 
 ; Hyperbolic sine
-(defn sinh [x] :float
-  (math/sinh x))
+(defn sinh [x :a] :float where [(Num a)]
+  (math/sinh (num-to-float x)))
 
 ; Hyperbolic cosine
-(defn cosh [x] :float
-  (math/cosh x))
+(defn cosh [x :a] :float where [(Num a)]
+  (math/cosh (num-to-float x)))
 
 ; Hyperbolic tangent
-(defn tanh [x] :float
-  (math/tanh x))
+(defn tanh [x :a] :float where [(Num a)]
+  (math/tanh (num-to-float x)))
 
 ; Inverse hyperbolic sine
-(defn asinh [x] :float
-  (math/asinh x))
+(defn asinh [x :a] :float where [(Num a)]
+  (math/asinh (num-to-float x)))
 
 ; Inverse hyperbolic cosine
-(defn acosh [x] :float
-  (math/acosh x))
+(defn acosh [x :a] :float where [(Num a)]
+  (math/acosh (num-to-float x)))
 
 ; Inverse hyperbolic tangent
-(defn atanh [x] :float
-  (math/atanh x))
+(defn atanh [x :a] :float where [(Num a)]
+  (math/atanh (num-to-float x)))
 
 ; --- Rounding ---
 
 (extern math/floor [:float] :float)
 (extern math/ceil [:float] :float)
-(extern erlang/round [:float] :int)
-(extern erlang/trunc [:float] :int)
-(extern erlang/abs [:any] :any)
 
 ; Floor: largest integer <= x
-(defn floor [x] :float
-  (math/floor x))
+(defn floor [x :a] :float where [(Num a)]
+  (math/floor (num-to-float x)))
 
 ; Ceiling: smallest integer >= x
-(defn ceil [x] :float
-  (math/ceil x))
+(defn ceil [x :a] :float where [(Num a)]
+  (math/ceil (num-to-float x)))
 
 ; Round to nearest integer
-(defn round [x] :int
-  (erlang/round x))
+(defn round [x :a] :int where [(Num a)]
+  (num-round x))
 
 ; Truncate toward zero
-(defn trunc [x] :int
-  (erlang/trunc x))
+(defn trunc [x :a] :int where [(Num a)]
+  (num-trunc x))
 
 ; Absolute value
-(defn abs [x]
-  (erlang/abs x))
+(defn abs [x :a] :a where [(Num a) (Ord a)]
+  (if (< x 0) (- x) x))
 
 ; --- Helpers ---
 
 ; Convert degrees to radians
-(defn deg-to-rad [deg]
-  (* deg (/ (math/pi) 180.0)))
+(defn deg-to-rad [deg :a] :float where [(Num a)]
+  (* (num-to-float deg) (/ (math/pi) 180.0)))
 
 ; Convert radians to degrees
-(defn rad-to-deg [rad]
-  (* rad (/ 180.0 (math/pi))))
+(defn rad-to-deg [rad :a] :float where [(Num a)]
+  (* (num-to-float rad) (/ 180.0 (math/pi))))
 
 ; Clamp value between min and max
-(defn clamp [x min-val max-val]
+(defn clamp [x :a min-val :a max-val :a] :a where [(Ord a)]
   (if (< x min-val)
     min-val
     (if (> x max-val)

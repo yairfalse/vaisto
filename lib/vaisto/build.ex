@@ -29,7 +29,6 @@ defmodule Vaisto.Build do
   alias Vaisto.Build.{ModuleNaming, DependencyResolver, Compiler, Context}
   alias Vaisto.Errors
   alias Vaisto.Package.{Manifest, Namespace}
-  alias Vaisto.Interface
 
   @type build_opts :: keyword()
   @type build_result :: {:ok, [map()]} | {:error, term()}
@@ -45,7 +44,6 @@ defmodule Vaisto.Build do
   ## Options
 
     * `:output_dir` - where to write .beam and .vsi files (default: same as source)
-    * `:backend` - `:core` or `:elixir` (default: `:core`)
     * `:prelude` - prelude source to prepend (default: nil)
     * `:source_roots` - list of `{path_prefix, module_prefix}` tuples
 
@@ -83,7 +81,6 @@ defmodule Vaisto.Build do
 
   ## Options
 
-    * `:backend` - `:core` or `:elixir` (default: `:core`)
     * `:prelude` - prelude source to prepend (default: nil)
 
   ## Returns
@@ -214,7 +211,6 @@ defmodule Vaisto.Build do
   ## Options
 
     * `:output_dir` - where to write .beam and .vsi files (default: same as source)
-    * `:backend` - `:core` or `:elixir` (default: `:core`)
     * `:prelude` - prelude source to prepend (default: nil)
     * `:search_paths` - directories to search for .vsi interfaces
     * `:auto_import` - automatically load .vsi files for imports (default: true)
@@ -265,47 +261,21 @@ defmodule Vaisto.Build do
   end
 
   defp compile_in_order(order, output_dir, opts) do
-    backend = Keyword.get(opts, :backend, :core)
-    prelude = Keyword.get(opts, :prelude)
-    source_roots = Keyword.get(opts, :source_roots, ModuleNaming.default_source_roots())
-
-    {results, _final_env} =
-      Enum.reduce(order, {[], %{}}, fn info, {acc, env} ->
-        # Load interfaces for imports
-        import_env = Compiler.load_import_env(info.imports, output_dir)
-        merged_env = Map.merge(env, import_env)
-
-        compile_opts = [
-          output_dir: output_dir,
-          backend: backend,
-          prelude: prelude,
-          source_roots: source_roots
-        ]
-
-        case Compiler.compile(info.file, merged_env, compile_opts) do
-          {:ok, result} ->
-            # Add this module's exports to env for next modules
-            case Interface.load(info.module, [output_dir]) do
-              {:ok, interface} ->
-                module_env = Interface.build_env([interface])
-                {[{:ok, result} | acc], Map.merge(env, module_env)}
-
-              {:error, _} ->
-                {[{:ok, result} | acc], env}
-            end
-
-          {:error, _} = err ->
-            {[err | acc], env}
-        end
-      end)
-
-    errors = Enum.filter(results, &match?({:error, _}, &1))
-
-    if errors == [] do
-      {:ok, results |> Enum.reverse() |> Enum.map(fn {:ok, r} -> r end)}
-    else
-      error_msgs = Enum.map(errors, fn {:error, msg} -> msg end)
-      {:error, Enum.join(error_msgs, "\n\n")}
+    Enum.reduce_while(order, {:ok, [], %{}}, fn info, {:ok, results, interfaces} ->
+      compile_opts = opts
+        |> Keyword.put(:output_dir, output_dir)
+        |> Keyword.put_new(:search_paths, [output_dir])
+      case Compiler.compile(info.file, interfaces, compile_opts) do
+        {:ok, result} ->
+          source_name = result.module |> Atom.to_string() |> String.replace_prefix("Elixir.", "") |> String.to_atom()
+          interfaces = Map.put(interfaces, source_name, result.interface.tree)
+          {:cont, {:ok, results ++ [result], interfaces}}
+        {:error, error} -> {:halt, {:error, error}}
+      end
+    end)
+    |> case do
+      {:ok, results, _} -> {:ok, results}
+      error -> error
     end
   end
 end

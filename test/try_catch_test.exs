@@ -83,27 +83,27 @@ defmodule Vaisto.TryCatchTest do
 
   describe "type checker: try/catch" do
     test "body and handler types unify" do
-      assert {:ok, :int} = check_type("(try 1 [catch [:error e 2]])")
+      assert {:ok, :Int} = check_type("(try 1 [catch [:error e 2]])")
     end
 
     test "body and handler type mismatch" do
       assert {:error, _} = check_type(~s|(try 1 [catch [:error e "oops"]])|)
     end
 
-    test "exception var binds as :any" do
-      assert {:ok, :int} = check_type("(try 1 [catch [:error e 42]])")
+    test "an ignored exception does not alter the result type" do
+      assert {:ok, :Int} = check_type("(try 1 [catch [:error e 42]])")
     end
 
     test "after type is ignored" do
-      assert {:ok, :int} = check_type(~s|(try 1 [catch [:error e 2]] [after "cleanup"])|)
+      assert {:ok, :Int} = check_type(~s|(try 1 [catch [:error e 2]] [after "cleanup"])|)
     end
 
     test "try-only-after: result type = body type" do
-      assert {:ok, :int} = check_type(~s|(try 42 [after "cleanup"])|)
+      assert {:ok, :Int} = check_type(~s|(try 42 [after "cleanup"])|)
     end
 
     test "multiple catch clauses all unify" do
-      assert {:ok, :int} = check_type("(try 1 [catch [:error e 2] [:throw v 3]])")
+      assert {:ok, :Int} = check_type("(try 1 [catch [:error e 2] [:throw v 3]])")
     end
 
     test "multiple catch clauses type mismatch" do
@@ -115,17 +115,17 @@ defmodule Vaisto.TryCatchTest do
   # End-to-end Tests
   # ============================================================================
 
-  describe "e2e: try/catch (elixir backend)" do
+  describe "e2e: native try/catch" do
     test "catch error" do
-      assert {:ok, :caught} = Runner.run(~s|(try (erlang:error :boom) [catch [:error e :caught]])|)
+      assert {:ok, :caught} = Runner.run("(extern erlang:error [:atom] :atom) (try (erlang:error :boom) [catch [:error e :caught]])")
     end
 
     test "catch throw" do
-      assert {:ok, 42} = Runner.run(~s|(try (erlang:throw 42) [catch [:throw v v]])|)
+      assert {:ok, 42} = Runner.run("(extern erlang:throw [:int] :int) (try (erlang:throw 42) [catch [:throw v (match (decode (Tuple :atom :atom :int) (up :Reason v)) [(Core.Ok {_ _ n}) n] [_ (crash :bad_decode)])]])")
     end
 
     test "catch exit" do
-      assert {:ok, :exited} = Runner.run(~s|(try (erlang:exit :bye) [catch [:exit r :exited]])|)
+      assert {:ok, :exited} = Runner.run("(extern erlang:exit [:atom] :atom) (try (erlang:exit :bye) [catch [:exit r :exited]])")
     end
 
     test "no exception: body value passes through" do
@@ -133,56 +133,62 @@ defmodule Vaisto.TryCatchTest do
     end
 
     test "after runs on success" do
-      code = "(do (erlang:put :after_ran false) (try 42 [catch [:error e 0]] [after (erlang:put :after_ran true)]) (erlang:get :after_ran))"
+      code = "(extern erlang:put [:atom :bool] :dyn) (extern erlang:get [:atom] :bool) (extern erlang:error [:atom] :atom) (do (erlang:put :after_ran false) (try 42 [catch [:error e 0]] [after (erlang:put :after_ran true)]) (erlang:get :after_ran))"
       assert {:ok, true} = Runner.run(code)
     end
 
     test "after runs on exception" do
-      code = "(do (erlang:put :after_ran false) (try (erlang:error :boom) [catch [:error e :caught]] [after (erlang:put :after_ran true)]) (erlang:get :after_ran))"
+      code = "(extern erlang:put [:atom :bool] :dyn) (extern erlang:get [:atom] :bool) (extern erlang:error [:atom] :atom) (do (erlang:put :after_ran false) (try (erlang:error :boom) [catch [:error e :caught]] [after (erlang:put :after_ran true)]) (erlang:get :after_ran))"
       assert {:ok, true} = Runner.run(code)
     end
 
     test "after-only: exception propagates" do
-      code = "(do (erlang:put :after_ran false) (try (try (erlang:error :boom) [after (erlang:put :after_ran true)]) [catch [:error e (erlang:get :after_ran)]]))"
+      code = "(extern erlang:put [:atom :bool] :dyn) (extern erlang:get [:atom] :bool) (extern erlang:error [:atom] :bool) (do (erlang:put :after_ran false) (try (try (erlang:error :boom) [after (erlang:put :after_ran true)]) [catch [:error e (erlang:get :after_ran)]]))"
       assert {:ok, true} = Runner.run(code)
     end
 
     test "nested try/catch" do
-      code = "(try (try (erlang:error :inner) [catch [:error e :inner_caught]]) [catch [:error e :outer_caught]])"
+      code = "(extern erlang:error [:atom] :atom) (try (try (erlang:error :inner) [catch [:error e :inner_caught]]) [catch [:error e :outer_caught]])"
       assert {:ok, :inner_caught} = Runner.run(code)
     end
 
     test "try in function body" do
-      code = "(try (erlang:div 10 0) [catch [:error e 0]])"
+      code = "(extern erlang:div [:int :int] :int) (try (erlang:div 10 0) [catch [:error e 0]])"
       assert {:ok, 0} = Runner.run(code)
     end
 
     test "catch clause var binding" do
-      assert {:ok, 100} = Runner.run(~s|(try (erlang:throw 99) [catch [:throw v (+ v 1)]])|)
+      assert {:ok, 100} = Runner.run("(extern erlang:throw [:int] :int) (try (erlang:throw 99) [catch [:throw v (match (decode (Tuple :atom :atom :int) (up :Reason v)) [(Core.Ok {_ _ n}) (+ n 1)] [_ (crash :bad_decode)])]])")
     end
   end
 
-  describe "e2e: try/catch (core backend)" do
+  describe "e2e: reference evaluator try/catch" do
     test "catch error" do
-      assert {:ok, :caught} = Runner.run(~s|(try (erlang:error :boom) [catch [:error e :caught]])|, backend: :core)
+      assert {:ok, :caught} = run_reference("(extern erlang:error [:atom] :atom) (try (erlang:error :boom) [catch [:error e :caught]])", [{:external, [:erlang, :error, [:boom]], {:raised, :error, :boom}}])
     end
 
     test "catch throw" do
-      assert {:ok, 42} = Runner.run(~s|(try (erlang:throw 42) [catch [:throw v v]])|, backend: :core)
+      assert {:ok, 42} = run_reference("(extern erlang:throw [:int] :int) (try (erlang:throw 42) [catch [:throw v (match (decode (Tuple :atom :atom :int) (up :Reason v)) [(Core.Ok {_ _ n}) n] [_ (crash :bad_decode)])]])", [{:external, [:erlang, :throw, [42]], {:raised, :throw, 42}}])
     end
 
     test "no exception passes through" do
-      assert {:ok, 42} = Runner.run(~s|(try 42 [catch [:error e 0]])|, backend: :core)
+      assert {:ok, 42} = run_reference(~s|(try 42 [catch [:error e 0]])|)
     end
 
     test "after runs on success (core)" do
-      code = "(do (erlang:put :after_ran false) (try 42 [catch [:error e 0]] [after (erlang:put :after_ran true)]) (erlang:get :after_ran))"
-      assert {:ok, true} = Runner.run(code, backend: :core)
+      code = "(extern erlang:put [:atom :bool] :dyn) (extern erlang:get [:atom] :bool) (extern erlang:error [:atom] :atom) (do (erlang:put :after_ran false) (try 42 [catch [:error e 0]] [after (erlang:put :after_ran true)]) (erlang:get :after_ran))"
+      assert {:ok, true} = run_reference(code, [{:external, [:erlang, :put, [:after_ran, false]], {:ok, :undefined}}, {:external, [:erlang, :put, [:after_ran, true]], {:ok, false}}, {:external, [:erlang, :get, [:after_ran]], {:ok, true}}])
     end
 
     test "after runs on exception (core)" do
-      code = "(do (erlang:put :after_ran false) (try (erlang:error :boom) [catch [:error e :caught]] [after (erlang:put :after_ran true)]) (erlang:get :after_ran))"
-      assert {:ok, true} = Runner.run(code, backend: :core)
+      code = "(extern erlang:put [:atom :bool] :dyn) (extern erlang:get [:atom] :bool) (extern erlang:error [:atom] :atom) (do (erlang:put :after_ran false) (try (erlang:error :boom) [catch [:error e :caught]] [after (erlang:put :after_ran true)]) (erlang:get :after_ran))"
+      assert {:ok, true} = run_reference(code, [{:external, [:erlang, :put, [:after_ran, false]], {:ok, :undefined}}, {:external, [:erlang, :error, [:boom]], {:raised, :error, :boom}}, {:external, [:erlang, :put, [:after_ran, true]], {:ok, false}}, {:external, [:erlang, :get, [:after_ran]], {:ok, true}}])
+    end
+  end
+
+  defp run_reference(source, steps \\ []) do
+    with {:ok, core} <- Vaisto.Compilation.check_liquid(source) do
+      Vaisto.Liquid.Eval.run(core, :main, [], handler: {:script, steps})
     end
   end
 end

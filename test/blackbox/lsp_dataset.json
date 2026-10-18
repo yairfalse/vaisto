@@ -446,7 +446,7 @@
       "messages": [
         {"method": "initialize", "id": 1, "params": {"processId": null, "rootUri": "file:///tmp/lsp_test", "capabilities": {}}},
         {"method": "initialized", "params": {}},
-        {"method": "textDocument/didOpen", "params": {"textDocument": {"uri": "file:///tmp/adt.va", "languageId": "vaisto", "version": 1, "text": "(deftype Maybe (Just v) (Nothing))\n(defn unwrap [m :Maybe] :int\n  (match m\n    [(Just v) v]\n    [(Nothing) 0]))"}}}
+        {"method": "textDocument/didOpen", "params": {"textDocument": {"uri": "file:///tmp/adt.va", "languageId": "vaisto", "version": 1, "text": "(deftype Maybe (Just v) (Nothing))\n(defn unwrap [m (Maybe :int)] :int\n  (match m\n    [(Just v) v]\n    [(Nothing) 0]))"}}}
       ],
       "expect_notification": "textDocument/publishDiagnostics",
       "expect_diagnostics_count": 0,

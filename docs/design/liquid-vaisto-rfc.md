@@ -750,7 +750,7 @@ So opaque and sealed values can cross process boundaries inside messages, while 
 1. **Selection** is a selective receive on the message **tag**, plus whatever `down_M` can check as BEAM guards (scalars, tuple shapes). The receive ends with a tag-level catch-all only for tags outside `M`, so it never eats a valid message meant for a later `receive`.
 2. **Decoding** happens after consumption, for what guards cannot express: lists, opaque components (decoded by their own module), sealed authenticators (which ask the issuer). A message that fails is *stray*.
 
-So "consumed only if it decodes" holds for everything guards can check and becomes "consumed, then rejected as stray" for the rest. A timed receive that rejects a stray re-enters with the remaining timeout. The evaluator models exactly this, and the first-match validity rule of §4.5 applies to the tag-level selection. Every process has a stray policy (log and drop, crash, or an explicit `Stray Dyn` clause), with the default an open question (Q26).
+So "consumed only if it decodes" holds for everything guards can check and becomes "consumed, then rejected as stray" for the rest. A timed receive that rejects a stray re-enters with the remaining timeout. The evaluator models exactly this, and the first-match validity rule of §4.5 applies to the tag-level selection. The default stray policy is **drop** (owner decision, 2026-10-17, Q26). Strict crash handling or an explicit `Stray Dyn` clause remain future options.
 
 - **Sending** is statically typed: `send` takes a `(Pid N)` and an `N`, so Vaisto code cannot send an ill-typed message.
 - **Receiving** never *assumes* the mailbox is well-typed. It projects.
@@ -2291,7 +2291,7 @@ For every mechanism: soundness assumption, trusted component, runtime representa
 | Q23 | Derived facts: a fourth origin, or premise sets | **resolved**: premise sets (§4.7) | — |
 | Q24 | Is `observe` a separate effect or a privileged use of `external`? | **resolved**: separate (§4.5), so privilege is visible in the effect row | — |
 | Q25 | Evaluator implementation: Elixir now; later extracted from the Lean model? | open | Elixir now; revisit after Phase 8 |
-| Q26 | Default stray-message policy (§4.6) | open | log and drop; crash as an opt-in for strict processes |
+| Q26 | Default stray-message policy (§4.6) | **decided** (2026-10-17): drop unexpected messages | implemented in the native process runtime; strict opt-in remains future work |
 | Q27 | Does instantiating the semilattice laws on the ground terms of a VC suffice for completeness (§16.2)? | open, to verify in Phase 3 | if not, `unknown` is reported, never a false proof |
 | Q28 | Eager or lazy decoding of large message payloads (§4.6) | open | eager for tags and scalars; measure before optimizing lists |
 | Q29 | `Pid` variance: an explicit restriction coercion, or invariance only (§4.1) | open | invariance first |

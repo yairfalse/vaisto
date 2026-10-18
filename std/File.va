@@ -8,13 +8,13 @@
 ; --- Erlang FFI ---
 
 ; Read entire file as binary/string
-(extern file/read_file [:string] :any)
+(extern file/read_file [:string] (Core.TaskResult :string))
 
 ; Write binary/string to file
-(extern file/write_file [:string :string] :any)
+(extern file/write_file [:string :string] :dyn)
 
 ; Delete a file
-(extern file/delete [:string] :any)
+(extern file/delete [:string] :dyn)
 
 ; Get file info
 (extern filelib/is_regular [:string] :bool)
@@ -22,68 +22,70 @@
 (extern filelib/file_size [:string] :int)
 
 ; Directory operations
-(extern file/list_dir [:string] :any)
-(extern file/make_dir [:string] :any)
-(extern file/del_dir [:string] :any)
+(extern file/list_dir [:string] (Core.TaskResult (List (List :int))))
+(extern file/make_dir [:string] :dyn)
+(extern file/del_dir [:string] :dyn)
 
 ; Get current working directory
-(extern file/get_cwd [] :any)
+(extern file/get_cwd [] (Core.TaskResult (List :int)))
+(extern unicode/characters_to_binary [(List :int)] :string)
 
 ; --- High-Level API ---
 
 ; Read a file and return Result
 ; (read-file "path") -> (Ok "contents") | (Err reason)
-(defn read-file [path]
-  (from-erlang-result (file/read_file path)))
+(defn read-file [path :string] (Result :string :dyn)
+  (from-task-result (file/read_file path)))
 
 ; Write contents to a file
 ; (write-file "path" "contents") -> (Ok :ok) | (Err reason)
-(defn write-file [path contents]
-  (from-erlang-result (file/write_file path contents)))
+(defn write-file [path :string contents :string] (Result :atom :dyn)
+  (from-erlang-status (file/write_file path contents)))
 
 ; Check if a path is a regular file
 ; (file? "path") -> true | false
-(defn file? [path] :bool
+(defn file? [path :string] :bool
   (filelib/is_regular path))
 
 ; Check if a path is a directory
 ; (dir? "path") -> true | false
-(defn dir? [path] :bool
+(defn dir? [path :string] :bool
   (filelib/is_dir path))
 
 ; Get file size in bytes
 ; (file-size "path") -> Int
-(defn file-size [path] :int
+(defn file-size [path :string] :int
   (filelib/file_size path))
 
 ; List files in a directory
 ; (list-dir "path") -> (Ok [filenames]) | (Err reason)
-(defn list-dir [path]
-  (from-erlang-result (file/list_dir path)))
+(defn list-dir [path :string] (Result (List :string) :dyn)
+  (result-map (from-task-result (file/list_dir path))
+    (fn [names] (map (fn [name] (unicode/characters_to_binary name)) names))))
 
 ; Create a directory
 ; (mkdir "path") -> (Ok :ok) | (Err reason)
-(defn mkdir [path]
-  (from-erlang-result (file/make_dir path)))
+(defn mkdir [path :string] (Result :atom :dyn)
+  (from-erlang-status (file/make_dir path)))
 
 ; Delete a file
 ; (delete "path") -> (Ok :ok) | (Err reason)
-(defn delete [path]
-  (from-erlang-result (file/delete path)))
+(defn delete [path :string] (Result :atom :dyn)
+  (from-erlang-status (file/delete path)))
 
 ; Delete an empty directory
 ; (rmdir "path") -> (Ok :ok) | (Err reason)
-(defn rmdir [path]
-  (from-erlang-result (file/del_dir path)))
+(defn rmdir [path :string] (Result :atom :dyn)
+  (from-erlang-status (file/del_dir path)))
 
 ; Get current working directory
 ; (cwd) -> (Ok "path") | (Err reason)
-(defn cwd []
-  (from-erlang-result (file/get_cwd)))
+(defn cwd [] (Result :string :dyn)
+  (result-map (from-task-result (file/get_cwd)) (fn [path] (unicode/characters_to_binary path))))
 
 ; Check if a file exists (file or directory)
 ; (exists? "path") -> true | false
-(defn exists? [path] :bool
+(defn exists? [path :string] :bool
   (if (file? path)
     true
     (dir? path)))
@@ -91,44 +93,42 @@
 ; --- Additional Operations ---
 
 ; Append to file (creates if doesn't exist)
-(extern file/write_file [:string :string (List :atom)] :any)
+(extern file/write_file [:string :string (List :atom)] :dyn)
 
 ; Append contents to a file
 ; (append "path" "contents") -> (Ok :ok) | (Err reason)
-(defn append [path contents]
-  (from-erlang-result (file/write_file path contents (list :append))))
+(defn append [path :string contents :string] (Result :atom :dyn)
+  (from-erlang-status (file/write_file path contents (list :append))))
 
 ; Copy a file
-(extern file/copy [:string :string] :any)
+(extern file/copy [:string :string] (Core.TaskResult :int))
 
 ; Copy a file to a new location
 ; (copy "src" "dest") -> (Ok bytes-copied) | (Err reason)
-(defn copy [src dest]
-  (from-erlang-result (file/copy src dest)))
+(defn copy [src :string dest :string] (Result :int :dyn)
+  (from-task-result (file/copy src dest)))
 
 ; Rename/move a file
-(extern file/rename [:string :string] :any)
+(extern file/rename [:string :string] :dyn)
 
 ; Rename or move a file
 ; (rename "old" "new") -> (Ok :ok) | (Err reason)
-(defn rename [old-path new-path]
-  (from-erlang-result (file/rename old-path new-path)))
+(defn rename [old-path :string new-path :string] (Result :atom :dyn)
+  (from-erlang-status (file/rename old-path new-path)))
 
 ; Alias for rename
-(defn move [src dest]
+(defn move [src :string dest :string] (Result :atom :dyn)
   (rename src dest))
 
 ; Ensure directory exists (creates parent dirs if needed)
-(extern filelib/ensure_dir [:string] :any)
+(extern filelib/ensure_dir [:string] :dyn)
 
 ; Create directory and all parent directories
 ; (mkdir-p "path/to/dir") -> (Ok :ok) | (Err reason)
 ; Note: ensure_dir expects a FILE path, creates parent dirs
-(defn mkdir-p [path]
+(defn mkdir-p [path :string] (Result :atom :dyn)
   ; Add trailing slash to treat as dir, then ensure parent exists
-  (match (from-erlang-result (filelib/ensure_dir (path-join path ".")))
-    [(Ok _) (mkdir path)]
-    [(Err e) (Err e)]))
+  (from-erlang-status (filelib/ensure_dir (path-join path "."))))
 
 ; --- Path Operations ---
 
@@ -140,32 +140,32 @@
 
 ; Join path segments
 ; (path-join "foo" "bar" "baz") -> "foo/bar/baz"
-(defn path-join [a b]
+(defn path-join [a :string b :string] :string
   (filename/join (list a b)))
 
 ; Join list of path segments
 ; (path-join-all ["foo" "bar" "baz"]) -> "foo/bar/baz"
-(defn path-join-all [parts]
+(defn path-join-all [parts (List :string)] :string
   (filename/join parts))
 
 ; Get directory part of path
 ; (dirname "/foo/bar/baz.txt") -> "/foo/bar"
-(defn dirname [path]
+(defn dirname [path :string] :string
   (filename/dirname path))
 
 ; Get filename part of path
 ; (basename "/foo/bar/baz.txt") -> "baz.txt"
-(defn basename [path]
+(defn basename [path :string] :string
   (filename/basename path))
 
 ; Get file extension (includes dot)
 ; (extension "/foo/bar.txt") -> ".txt"
-(defn extension [path]
+(defn extension [path :string] :string
   (filename/extension path))
 
 ; Get path without extension
 ; (rootname "/foo/bar.txt") -> "/foo/bar"
-(defn rootname [path]
+(defn rootname [path :string] :string
   (filename/rootname path))
 
 ; --- Reading Variants ---
@@ -177,20 +177,20 @@
 (extern binary/split [:string :string (List :atom)] (List :string))
 
 ; (read-lines "path") -> (Ok ["line1" "line2" ...]) | (Err reason)
-(defn read-lines [path]
+(defn read-lines [path :string] (Result (List :string) :dyn)
   (match (read-file path)
     [(Ok contents) (Ok (binary/split contents "\n" (list :global)))]
     [(Err e) (Err e)]))
 
 ; --- Temporary Files ---
 
-(extern filelib/safe_relative_path [:string :string] :any)
+(extern filelib/safe_relative_path [:string :string] :dyn)
 
 ; Create a temp directory path (doesn't create the dir)
 (extern filename/basedir [:atom :string] :string)
 
 ; Get system temp directory
-(defn tmp-dir []
+(defn tmp-dir [] :string
   "/tmp")
 
 ; Generate a unique temp file path
@@ -198,6 +198,6 @@
 (extern erlang/integer_to_list [:int] (List :int))
 (extern erlang/list_to_binary [(List :int)] :string)
 
-(defn tmp-path [prefix]
+(defn tmp-path [prefix :string] :string
   (let [unique (erlang/list_to_binary (erlang/integer_to_list (erlang/unique_integer)))]
     (path-join (tmp-dir) (str prefix unique))))

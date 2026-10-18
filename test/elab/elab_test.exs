@@ -171,12 +171,13 @@ defmodule Vaisto.ElabTest do
       assert error("(defn double [x :a] :a (* x 2))").note == "expected a, found Int"
     end
 
-    test "a suggested signature is verified, and one HM got wrong fails (§13)" do
+    test "only written signatures are accepted, not migration suggestions" do
       double = Vaisto.Liquid.Canonical.parse!("(forall ((t Type)) (-> ((tvar t)) (eff closed) Int))", atoms: :create)
       assert {:error, [_]} = elab("(defn double [x] (* x 2))", suggest: %{double: double})
 
       int_to_int = [:->, [:Int], [:eff, :closed], :Int]
-      assert {:ok, _} = elab("(defn double [x] (* x 2))", suggest: %{double: int_to_int})
+      assert {:error, [_]} = elab("(defn double [x] (* x 2))", suggest: %{double: int_to_int})
+      assert {:ok, _} = elab("(defn double [x :int] :int (* x 2))")
     end
   end
 
@@ -209,10 +210,9 @@ defmodule Vaisto.ElabTest do
     assert e.primary_span.line == 2
   end
 
-  test "a program outside slice 1 says so instead of guessing" do
-    assert {:outside, reason} = elab("(process counter 0 :inc (+ state 1))")
-    assert reason =~ "process"
-    assert {:outside, _} = elab("(defn f [] :string (str 1))")
+  test "an unknown AST form is outside rather than compiled by guessing" do
+    assert {:outside, reason} = Elab.module({:future_form, :payload, %Parser.Loc{}})
+    assert reason =~ "future_form"
   end
 
   # Each from a program an adversarial review found accepted with Core that

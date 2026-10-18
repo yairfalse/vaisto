@@ -13,7 +13,7 @@ defmodule Vaisto.RunnerTest do
     test "compiles and loads function definition with expression" do
       # Note: defn alone doesn't create main, need an expression too
       source = """
-      (defn double [x] (* x 2))
+      (defn double [x :int] :int (* x 2))
       (double 21)
       """
       assert {:ok, :DoubleMod} = Runner.compile_and_load(source, :DoubleMod)
@@ -23,8 +23,8 @@ defmodule Vaisto.RunnerTest do
 
     test "compiles multiple functions" do
       source = """
-      (defn square [x] (* x x))
-      (defn cube [x] (* x (square x)))
+      (defn square [x :int] :int (* x x))
+      (defn cube [x :int] :int (* x (square x)))
       (cube 3)
       """
       assert {:ok, :MathMod} = Runner.compile_and_load(source, :MathMod)
@@ -77,7 +77,7 @@ defmodule Vaisto.RunnerTest do
   describe "call/3" do
     test "calls function with arguments" do
       source = """
-      (defn add [x y] (+ x y))
+      (defn add [x :int y :int] :int (+ x y))
       (add 1 1)
       """
       {:ok, :AddMod} = Runner.compile_and_load(source, :AddMod)
@@ -142,7 +142,7 @@ defmodule Vaisto.RunnerTest do
   describe "polymorphic functions" do
     test "identity function works with integers" do
       source = """
-      (defn id [x] x)
+      (defn id [x :a] :a x)
       (id 42)
       """
       {:ok, :IdIntMod} = Runner.compile_and_load(source, :IdIntMod)
@@ -151,7 +151,7 @@ defmodule Vaisto.RunnerTest do
 
     test "identity used multiple times in let" do
       source = """
-      (defn id [x] x)
+      (defn id [x :a] :a x)
       (let [a (id 1)
             b (id 2)]
         (+ a b))
@@ -201,7 +201,7 @@ defmodule Vaisto.RunnerTest do
   describe "recursive functions" do
     test "factorial" do
       source = """
-      (defn fact [n]
+      (defn fact [n :int] :int
         (if (== n 0)
           1
           (* n (fact (- n 1)))))
@@ -213,7 +213,7 @@ defmodule Vaisto.RunnerTest do
 
     test "fibonacci" do
       source = """
-      (defn fib [n]
+      (defn fib [n :int] :int
         (if (< n 2)
           n
           (+ (fib (- n 1)) (fib (- n 2)))))
@@ -228,7 +228,7 @@ defmodule Vaisto.RunnerTest do
     test "record construction and pattern matching" do
       source = """
       (deftype point [x :int y :int])
-      (defn get-x [p]
+      (defn get-x [p :point] :int
         (match p
           [(point x y) x]))
       (get-x (point 10 20))

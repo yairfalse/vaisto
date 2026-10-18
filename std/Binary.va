@@ -23,7 +23,7 @@
 (extern erlang/bit_size [:binary] :int)
 
 ; Concatenate binaries (using iolist)
-(extern erlang/iolist_to_binary [(List :any)] :binary)
+(extern erlang/iolist_to_binary [(List :binary)] :binary)
 
 ; Extract part of binary (start, length)
 (extern binary/part [:binary :int :int] :binary)
@@ -32,62 +32,62 @@
 (extern binary/at [:binary :int] :int)
 
 ; Convert term to binary (serialization)
-(extern erlang/term_to_binary [:any] :binary)
+(extern erlang/term_to_binary [:dyn] :binary)
 
 ; Convert binary to term (deserialization)
-(extern erlang/binary_to_term [:binary] :any)
+(extern erlang/binary_to_term [:binary] :dyn)
 
 ; --- BEAM file operations ---
 ; These are critical for self-hosting
 
 ; Compile forms to beam (returns {:ok, ModName, Binary})
-(extern compile/forms [(List :any)] :any)
+(extern compile/forms [(List :dyn) (List :atom)] :dyn)
 
 ; Load a beam binary into the VM
-(extern code/load_binary [:atom :string :binary] :any)
+(extern code/load_binary [:atom (List :int) :binary] :dyn)
 
 ; Get object code for a module (returns {:ok, Beam} or error)
-(extern code/get_object_code [:atom] :any)
+(extern code/get_object_code [:atom] :dyn)
 
 ; --- High-level API ---
 
 ; Create a binary from a list of byte values (0-255)
 ; (from-bytes [72 101 108 108 111]) -> <<"Hello">>
-(defn from-bytes [bytes]
+(defn from-bytes [bytes (List :int)] :binary
   (erlang/list_to_binary bytes))
 
 ; Convert a binary to a list of byte values
 ; (to-bytes <<"Hello">>) -> [72 101 108 108 111]
-(defn to-bytes [bin]
+(defn to-bytes [bin :binary] (List :int)
   (erlang/binary_to_list bin))
 
 ; Get the size of a binary in bytes
 ; (size <<"Hello">>) -> 5
-(defn size [bin] :int
+(defn size [bin :binary] :int
   (erlang/byte_size bin))
 
 ; Concatenate multiple binaries
 ; (concat [bin1 bin2 bin3]) -> combined binary
-(defn concat [bins]
+(defn concat [bins (List :binary)] :binary
   (erlang/iolist_to_binary bins))
 
 ; Get a slice of a binary
 ; (slice bin 1 3) -> 3 bytes starting at index 1
-(defn slice [bin start len]
+(defn slice [bin :binary start :int len :int] :binary
   (binary/part bin start len))
 
 ; Get byte at position
 ; (byte-at <<"Hello">> 0) -> 72
-(defn byte-at [bin pos] :int
+(defn byte-at [bin :binary pos :int] :int
   (binary/at bin pos))
 
 ; Serialize any Vaisto term to binary
 ; Useful for caching compiled forms
-(defn serialize [term]
+(defn serialize [term :dyn] :binary
   (erlang/term_to_binary term))
 
 ; Deserialize binary back to term
-(defn deserialize [bin]
+(defn deserialize [bin :binary] :dyn
   (erlang/binary_to_term bin))
 
 ; --- BEAM generation helpers ---
@@ -99,31 +99,47 @@
 ; [{:attribute, 1, :module, :my_mod},
 ;  {:attribute, 2, :export, [{:main, 0}]},
 ;  {:function, 3, :main, 0, [{:clause, 3, [], [], [{:atom, 3, :ok}]}]}]
-(defn compile-forms [forms]
-  (match (compile/forms forms)
-    [{:ok mod beam} (Ok #{ :module mod :bytecode beam })]
-    [{:ok mod beam _warnings} (Ok #{ :module mod :bytecode beam })]
-    [{:error errors _warnings} (Err errors)]
-    [error (Err error)]))
+(defn compile-forms [forms (List :dyn)] (Result (Record [module :atom bytecode :binary]) :dyn)
+  (let [raw (compile/forms forms (list :binary :return_errors :return_warnings))]
+    (match (decode (Tuple :atom :atom :binary :dyn) raw)
+      [(Core.Ok {:ok mod beam _}) (Ok #{:module mod :bytecode beam})]
+      [(Core.Ok _) (Err raw)]
+      [(Core.Err _)
+        (match (decode (Tuple :atom :atom :binary) raw)
+          [(Core.Ok {:ok mod beam}) (Ok #{:module mod :bytecode beam})]
+          [(Core.Ok _) (Err raw)]
+          [(Core.Err _)
+            (match (decode (Tuple :atom :dyn :dyn) raw)
+              [(Core.Ok {:error errors _}) (Err errors)]
+              [_ (Err raw)])])])))
 
 ; Load compiled bytecode into the running VM
 ; (load-module :my_mod "my_mod.beam" bytecode)
-(defn load-module [name filename bytecode]
-  (match (code/load_binary name filename bytecode)
-    [{:module mod} (Ok mod)]
-    [{:error reason} (Err reason)]
-    [other (Err other)]))
+(defn load-module [name :atom filename :string bytecode :binary] (Result :atom :dyn)
+  (let [raw (code/load_binary name (erlang/binary_to_list filename) bytecode)]
+    (match (decode (Tuple :atom :atom) raw)
+      [(Core.Ok {:module mod}) (Ok mod)]
+      [_ (match (decode (Tuple :atom :dyn) raw)
+        [(Core.Ok {:error reason}) (Err reason)]
+        [_ (Err raw)])])))
 
 ; --- File I/O for BEAM files ---
 
-(extern file/write_file [:string :binary] :any)
-(extern file/read_file [:string] :any)
+(extern file/write_file [:string :binary] :dyn)
+(extern file/read_file [:string] (Core.TaskResult :binary))
 
 ; Write a .beam file to disk
 ; Combines binary writing with proper extension
-(defn write-beam [path bytecode]
-  (from-erlang-result (file/write_file path bytecode)))
+(defn write-beam [path :string bytecode :binary] (Result :atom :dyn)
+  (let [raw (file/write_file path bytecode)]
+    (match (decode :atom raw)
+      [(Core.Ok :ok) (Ok :ok)]
+      [_ (match (decode (Tuple :atom :dyn) raw)
+        [(Core.Ok {:error reason}) (Err reason)]
+        [_ (Err raw)])])))
 
 ; Read a .beam file from disk
-(defn read-beam [path]
-  (from-erlang-result (file/read_file path)))
+(defn read-beam [path :string] (Result :binary :dyn)
+  (match (file/read_file path)
+    [{:ok bytes} (Ok bytes)]
+    [{:error reason} (Err reason)]))

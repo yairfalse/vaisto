@@ -10,7 +10,7 @@ defmodule Vaisto.UnsafeSendTest do
       (process counter 0
         :inc (+ state 1))
 
-      (defn main []
+      (defn main [] :unit
         (!! (spawn counter 0) :totally-invalid-message))
       """
       assert {:ok, _} = Runner.compile_and_load(code, :UnsafeSendAnyMsg)
@@ -21,7 +21,7 @@ defmodule Vaisto.UnsafeSendTest do
       (process counter 0
         :inc (+ state 1))
 
-      (defn main []
+      (defn main [] :unit
         (!! (spawn counter 0) :inc))
       """
       assert {:ok, _} = Runner.compile_and_load(code, :UnsafeSendValidMsg)
@@ -29,7 +29,7 @@ defmodule Vaisto.UnsafeSendTest do
 
     test "!! rejects non-PID first argument" do
       code = """
-      (defn main []
+      (defn main [] :unit
         (!! 42 :message))
       """
       result = Runner.compile_and_load(code, :UnsafeSendNonPid)
@@ -37,17 +37,15 @@ defmodule Vaisto.UnsafeSendTest do
       assert msg =~ "non-pid" or msg =~ "PID"
     end
 
-    test "!! accepts untyped PID parameter" do
-      # When a PID comes from a parameter (untyped), !! should allow it
-      # The function takes a PID as a parameter - its type is :any
+    test "!! accepts a PID parameter with an explicit protocol" do
       code = """
       (process echo 0
         :ping state)
 
-      (defn send_msg [pid]
+      (defn send_msg [pid (Pid :Process.echo.Message)] :unit
         (!! pid :ping))
 
-      (defn main []
+      (defn main [] :unit
         (send_msg (spawn echo 0)))
       """
       assert {:ok, _} = Runner.compile_and_load(code, :UnsafeSendUntypedPid)
@@ -59,12 +57,12 @@ defmodule Vaisto.UnsafeSendTest do
       (process counter 0
         :inc (+ state 1))
 
-      (defn main []
+      (defn main [] :unit
         (! (spawn counter 0) :invalid))
       """
       result = Runner.compile_and_load(code, :SafeSendInvalid)
-      assert {:error, %Vaisto.Error{note: note}} = result
-      assert note =~ "does not accept"
+      assert {:error, %Vaisto.Error{message: message}} = result
+      assert message =~ "does not accept"
     end
   end
 end

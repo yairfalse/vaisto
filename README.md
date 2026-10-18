@@ -6,7 +6,7 @@ structurally accountable LLM systems.
 Vaisto has three layers, each built on the one below:
 
 1. **A statically typed Scheme-like language** that compiles to BEAM bytecode:
-   S-expression syntax, Hindley-Milner type inference, algebraic data types,
+   S-expression syntax, signatures at definitions with local inference, algebraic data types,
    type classes, typed processes, and Erlang interop.
 2. **Task contracts**: prompts and LLM pipelines as typed artifacts. A
    pipeline that extracts a type the prompt does not promise does not compile.
@@ -17,9 +17,9 @@ Vaisto has three layers, each built on the one below:
 
 > Prompts are prose. Vaisto makes them structurally accountable.
 
-Vaisto is early. The language, both backends, the LSP server and the prompt
-checks work today; the semantic core has its foundation and its first
-refinement types in place. Every known gap is listed under
+Vaisto is early. The native compiler, LSP server, prompt checks and first
+refinement types work today. HM and the two old compiler backends have been
+removed; every compilation goes through verified Liquid Core. Every known gap is listed under
 [Status and known gaps](#status-and-known-gaps).
 
 ## Contents
@@ -85,10 +85,10 @@ A prompt is not an anonymous string. It declares the input it may reference and
 the output it promises:
 
 ```scheme
-(deftype DocId [value :String])
-(deftype Question [text :String])
-(deftype CitedAnswer [text :String evidence (List DocId)])
-(deftype Answer [text :String evidence (List DocId)])
+(deftype DocId [value :string])
+(deftype Question [text :string])
+(deftype CitedAnswer [text :string evidence (List DocId)])
+(deftype Answer [text :string evidence (List DocId)])
 
 (defprompt answer-with-citations
   :input  Question
@@ -107,49 +107,46 @@ the output it promises:
 If someone changes the prompt's output type and drops `evidence`:
 
 ```scheme
-(deftype CitedAnswer [text :String])
+(deftype CitedAnswer [text :string])
 ```
 
 the pipeline no longer compiles:
 
 ```text
 $ vaistoc qa.va
-error: prompt output type mismatch
-  at line 17
-      (generate :prompt answer-with-citations :extract Answer))
-      ^ expected `Answer`, found `CitedAnswer`
-  note: prompt `answer-with-citations` output CitedAnswer does not satisfy extract target Answer
-  note: missing field: evidence : List(:DocId)
+error: task projection is missing field `evidence`
 ```
 
 A silent prompt/schema failure has become a compile-time error.
 
 ## The language
 
-Vaisto is a Lisp in syntax and an ML in its types. Programs are S-expressions,
-types are inferred, and the output is ordinary BEAM bytecode. There are no
+Vaisto has Lisp syntax, explicit polymorphic signatures and local inference.
+Programs are S-expressions; the output is ordinary BEAM bytecode. There are no
 macros: the syntax stays small enough that types, tools and the editor can see
-everything. Every example below compiles and runs on both backends unless it
-says otherwise.
+everything. The examples below target the native compiler; examples marked
+as errors or future design are intentionally not runnable.
 
 ### Functions and inference
 
 ```scheme
 (defn square [x :int] :int (* x x))
-(defn twice [f x] (f (f x)))
+(defn twice [f (Fn :a :a :effects :fx) x :a] :a :effects :fx (f (f x)))
 
 (defn main [] :int (twice square 3))   ; 81
 ```
 
-Annotations are optional and can be mixed: `twice` is inferred as
-`(a -> a) -> a -> a`.
+Signatures are required on definitions; calls and local expressions infer
+their types. `:a` is universally quantified in the signature and rigid in its
+body. `:fx` carries the callback's effects. Local `let` bindings are not
+generalized. Int and Float are distinct; use `(int-to-float n)` explicitly.
 
 ### Algebraic data types and pattern matching
 
 ```scheme
 (deftype Shape (Circle :float) (Rect :float :float))
 
-(defn area [s]
+(defn area [s :Shape] :float
   (match s
     [(Circle r) (* 3.0 (* r r))]
     [(Rect w h) (* w h)]))
@@ -160,12 +157,7 @@ Annotations are optional and can be mixed: `twice` is inferred as
 A `match` on a sum type must cover every constructor:
 
 ```text
-error: non-exhaustive pattern match
-  at line 4
-      (match (Circle s)
-      ^
-  note: match on `Shape` does not cover all variants
-  help: missing variants: Rect
+error: this match is not exhaustive
 ```
 
 ### Records
@@ -186,7 +178,7 @@ Fields can also be read with `(. p :x)`.
 (defn main [] :int
   (fold + 0 (map (fn [x] (* x x)) (filter (fn [x] (> x 2)) [1 2 3 4]))))   ; 25
 
-(defn len
+(defn len (Fn (List :a) :int)
   [[] 0]
   [[h | t] (+ 1 (len t))])
 ```
@@ -228,18 +220,14 @@ compile error:
   :increment (+ state 1)
   :get state)
 
-(defn bump []
+(defn bump [] :unit
   (let [pid (spawn counter 0)]
     (! pid :log)))
 ```
 
 ```text
-error: invalid message type
-  at line 7
-        (! pid :log)))
-        ^
-  note: process `counter` does not accept `:log`
-  help: accepted messages: :increment, :get
+error: process does not accept `:log`
+  note: accepted messages: :increment, :get
 ```
 
 `!!` sends without the check. Supervision is syntax as well:
@@ -266,7 +254,7 @@ Vaisto.Runner.send_msg(pid, :increment)   # 1
 (ns Geometry)                 ; optional; checked against the file path
 (import Std.List)
 (import Std.List :as L)
-(Std.List/fold xs 0 +)        ; a qualified call
+(Std.List/fold + 0 [1 2 3])        ; a qualified call
 ```
 
 Module names come from file paths (`src/Vaisto/Lexer.va` is
@@ -300,7 +288,8 @@ What is implemented today:
   System.put_env("OPENAI_API_KEY", "sk-...")
   ```
 
-Task-contract forms compile on the Elixir backend only.
+Task-contract forms compile through checked Core to native BEAM. Foreign and
+model responses are decoded before being exposed as typed values.
 
 The design goes further, and none of what follows is implemented yet.
 Contracts become first-class, and several pipelines can satisfy one contract
@@ -351,164 +340,110 @@ operators and the `Ctx` type are specified in the
 
 ## Liquid Vaisto: a semantic core
 
-Today the meaning of a Vaisto program is whatever its two backends do with it,
-and they do not always agree. Liquid Vaisto turns that around: Vaisto has a
-semantics, and BEAM implements it.
+Every production entry point uses the same pipeline:
 
-The semantics is **Liquid Core**, a small typed language with four primitives:
-- values;
-- refinements (types with predicates, such as "a non-zero integer");
-- algebraic effects (sending, receiving and crashing are operations a handler
-  interprets);
-- evidence origin (where each fact a checker relies on came from).
+```text
+Source → Parser → bidirectional elaborator → Liquid Core
+       → independent Core Lint → refinement verification
+       → Erlang abstract forms → OTP compiler → native BEAM
+```
 
-Everything else is library code over those four, among it type classes, rows,
-processes, contracts and authority. A program elaborates to Core:
-- a reference evaluator defines what it means;
-- a trusted checker, Core Lint, re-checks every elaboration;
-- a differential harness holds BEAM to the evaluator.
+HM, its contexts, the Phase 0 adapter and the old emitters are deleted. There
+is no fallback for unsigned definitions or unsupported constructs.
 
-The design, its algebra and its roadmap are in the
-[Liquid Vaisto RFC](docs/design/liquid-vaisto-rfc.md).
+| Piece | Purpose |
+|---|---|
+| `Vaisto.Elab`, `Elab.Types`, `Elab.Classes` | Required signatures, local unification, kinded rows and explicit dictionaries |
+| `Vaisto.Liquid.Lint` | Independently checks types, effects, guards, exhaustiveness, ground data and binder uniqueness |
+| `Vaisto.Liquid.Lower`, `Runtime` | Native functions, closures, recursion, processes, supervision, decoding and checked effect boundaries |
+| `Vaisto.Liquid.Eval`, `Harness` | Independent reference execution, bounded native comparison, generated terms and mutation tests |
+| `Vaisto.Interface`, `Build` | Canonical `.vsi` signatures, types, effects and class dictionaries, compiled in dependency order |
+| `Vaisto.Compilation`, `Runner`, `REPL`, `LSP` | Shared verified pipeline; transactional REPL definitions and scoped editor type queries |
 
-### What exists
-
-Phase 0, the foundation, is in place:
-
-| Piece | Where | What it does |
-|---|---|---|
-| The Core specification | [`docs/design/liquid-core.md`](docs/design/liquid-core.md) | Normative: types, terms, evaluation, primitives, representations on BEAM, and the typing rules |
-| Canonical trees | `Vaisto.Liquid.Canonical` | Canonical S-expression bytes, SHA-256 digests that ignore metadata, and a readable form |
-| Reference evaluator | `Vaisto.Liquid.Eval` | The executable form of the specification |
-| Core Lint | `Vaisto.Liquid.Lint` | Checks Core and infers nothing: kinds, rows, exhaustiveness, guards, ground equality, unique binders |
-| Soundness tests | `test/liquid/soundness_test.exs` | On every run: 1,000 generated well-typed terms and 20,000 mutants. If Lint gives a term a type, it never goes wrong when evaluated |
-| Adapter | `Vaisto.Liquid.Adapter` | Today's typed AST to Core. Where HM left a type unknown it writes `Dyn`, so Lint names the place |
-| Differential harness | `Vaisto.Liquid.Harness` | Runs a program through the evaluator and both backends and compares outcomes |
-
-Run over the 135 programs in the test suite, the harness gave these verdicts
-when this was written:
-
-| Verdict | Programs | What it means |
-|---|---|---|
-| agree | 84 | the evaluator and both backends give the same result |
-| disagree | 0 | a backend differs from the evaluator: a backend bug |
-| Lint rejects | 25 | programs HM accepted but left ill-typed, such as arithmetic on an unannotated parameter. This is the to-do list for the type checker |
-| outside the core so far | 20 | processes, `str`, and calls across modules |
-| rejected by HM | 6 | tests that expect a type error |
+The corpus tests reject any evaluator/native disagreement. Scripted handlers
+check effect ordering; observer handlers stop before the first effect without
+executing it. Generation and mutation tests exercise the independent checker.
+These tests are evidence, not a formal proof of the compiler.
 
 ### Refinement types
 
-A refined type is a type with a predicate, written in the type slot of a
-parameter or a result:
-
 ```scheme
 (defn safe-div [x :int y {d :int | (!= d 0)}] :int (div x y))
-(defn clamp0 [x :int] {r :int | (>= r 0)} (if (< x 0) 0 x))
-
 (defn avg [total :int n :int] :int
-  (if (> n 0) (safe-div total n) 0))      ; compiles: n > 0 here
-(defn avg-bad [total :int n :int] :int
-  (safe-div total n))                     ; does not compile
+  (if (> n 0) (safe-div total n) 0))
 ```
 
-```text
-error: requirement not met
-  at line 7
-      (safe-div total n))                     ; does not compile
-                      ^ `safe-div` requires (!= n 0) for its argument `y`
-  note: nothing is known about `n` here
-```
+Z3 verifies requirements at calls and guarantees at returns, using path,
+guard and list-length facts. A call `(safe-div 1 0)` fails compilation.
+Refinements currently cover Int, Bool and List on single-clause functions;
+unsupported verification fails closed. A program without refinements never
+starts Z3. Imported refined functions remain refused rather than silently
+erasing their requirements.
 
-The compiler proves, with the Z3 solver, that every call to a refined function
-meets its requirements and that every refined function returns what it
-promises. Inside a refined function it also proves that `div`, `rem`, `head`
-and `tail` cannot crash. Branch conditions, `and`/`or`, guards, `let`
-bindings, list patterns and the results of other refined functions all count
-as facts. Calls are checked in every function, refined or not. A program
-without refinements never starts the solver.
-
-The modules are `Vaisto.Refine` (the check and its diagnostics),
-`Vaisto.Refine.VCGen` (verification conditions over Core),
-`Vaisto.Refine.Predicate` (predicates to the solver's logic) and
-`Vaisto.Refine.SMTLIB` and `Vaisto.Refine.Solver.Z3` (the solver, reached over
-a port). The conformance programs of RFC §14 are in `test/refine/conformance/`.
-
-This is the RFC's Phase 2.1, and it is deliberately narrow:
-- refinements over `Int`, `Bool` and `List` (with `len`), on the parameters and
-  results of single-clause functions;
-- predicates use comparisons, `+ - *`, `and or not => iff`, `if` and `len`,
-  but not `div` or function calls;
-- the program still runs on today's backends, through the gated bridge of RFC
-  §21.1. Every definition that has or uses refinements must be in the Core
-  fragment and avoid constructs the backends disagree on, and every definition
-  in a module with refinements must pass Core Lint. Until the elaborator of
-  Phase 1a, that rejects some of HM's imprecise types, such as an empty list
-  literal `[]`, typed `(List Any)`. Otherwise the build fails; it never runs
-  unchecked;
-- refinements are checked within one module. A call to a refined function in
-  another module is refused until interfaces carry refinements (RFC C12).
-
-### The elaborator that replaces HM (Phase 1a, in progress)
-
-`Vaisto.Elab` turns the parser's output directly into Liquid Core, following
-[`docs/design/liquid-types.md`](docs/design/liquid-types.md):
-- introductions are checked against the expected type, and eliminations
-  synthesize one;
-- inference is local unification inside one definition;
-- every top-level definition carries a signature, and there is no `:any`;
-- nothing is implicit: no type is chosen by default, Int and Float never mix,
-  every `match` is exhaustive and every `let` pattern irrefutable.
+### Explicit dynamic and effect boundaries
 
 ```scheme
-(defn twice [f (Fn :a :a) x :a] :a (f (f x)))     ; :a is a type variable
-(defn main [] :int (twice (fn [n] (+ n 1)) 5))   ; n is an Int: no annotation needed
+(extern erlang:abs [:int] :int)
+(defn absolute [x :int] :int (erlang:abs x))
 
-(let [r (the (Result :int :string) (Ok 42))] ...) ; (the τ e) states a type
+(defn decoded [] :int
+  (match (decode :int (up :int 42))
+    [(Core.Ok n) n]
+    [(Core.Err _) 0]))
+
+(defn apply [f (Fn :a :b :effects :fx) x :a] :b :effects :fx (f x))
 ```
 
-It removes D1, D17, D20 and D22 by construction, and its errors point at the
-source. It runs in shadow mode for now: HM still compiles programs. Over the
-test suite's programs, with HM's inferred types suggested as signatures where
-one is missing, the elaborator agrees with both backends on 75. Core Lint
-accepts everything it produces. The rest are:
-- HM's mistakes, which it rejects;
-- programs that relied on an implicit coercion, default or partial match;
-- forms it does not cover yet: processes, type classes, `str` and imports.
+`:dyn` is explicit dynamic data, not an implicit cast. Extern results are
+deep-decoded against their declared ground data type; a false declaration
+crashes with `bad_decode`. Pure `(Fn …)` callbacks cannot conceal effects.
+Use `:effects [external]` for a closed row, `:effects :fx` for a quantified
+row, or `:effects (Effects [external] :fx)` for a prefix and open tail.
 
-### What comes next
+Anonymous records can quantify their remaining fields:
 
-The rest of Phase 1a: type classes, processes and externs in the elaborator,
-`Dyn` with `decode`, brands and row evidence, then the switch from HM, with a
-tool that writes HM's inferred signatures into existing code. After that,
-refinements over records, sums and measures (Phases 2.2 and 2.3). Later phases
-bring effect rows and deterministic replay, sealed types and capabilities, and
-contracts as a library. The RFC's §21 has the order and the dependencies.
+```scheme
+(defn name [p (Record [name :string] :r)] :string (. p :name))
+```
+
+Named records keep their own representation; there is no implicit conversion
+between a tagged record and an anonymous map.
+
+### Processes, classes and imports
+
+```scheme
+(process counter 0 :inc (+ state 1) :get state)
+(defn start [] (Pid :Process.counter.Message) (spawn counter 0))
+(defn bump [p (Pid :Process.counter.Message)] :unit (! p :inc))
+```
+
+Typed sends return Unit (`nil`). Actors drop unexpected messages and expose
+OTP `start_link`/GenServer interoperability. Selective `receive` retains
+unmatched messages and decodes selected data. Supervision supports
+one-for-one, one-for-all and rest-for-one restart ordering.
+
+Classes, defaults, constrained instances and deriving become ordinary typed
+Core dictionaries. Canonical imports carry quantified signatures, exact
+digests and those dictionaries, including transitive imports. Legacy HM
+interfaces are rejected. Digests identify content; they do not authenticate
+an arbitrary interface/BEAM pair or establish module sealing.
+
+Top-level values use `(def answer :int 42)` and remain recomputed accessors.
+Expression programs such as `(+ 40 2)` infer their generated `main/0`.
 
 ## Architecture
 
-```text
-Source (.va) -> Parser -> AST -> TypeChecker (HM) -> typed AST -+-> CoreEmitter -> Core Erlang -> BEAM  (default)
-                                                                +-> Emitter     -> Elixir AST  -> BEAM
-                                                                |
-                                                                +-> Liquid Adapter -> Liquid Core
-                                                                       -> Core Lint (checks)
-                                                                       -> reference evaluator (means)
-                                                                       -> harness: evaluator vs both backends
-```
-
-| Path | What lives there |
+| Path | Responsibility |
 |---|---|
-| `lib/vaisto/parser.ex` | S-expression parser; every AST node carries its location |
-| `lib/vaisto/type_checker.ex`, `type_system/` | Bidirectional HM checker, unification with row polymorphism, and an Algorithm W engine for lambdas |
-| `lib/vaisto/core_emitter.ex` | The Core Erlang backend, the default for the CLI and builds |
-| `lib/vaisto/emitter.ex` | The Elixir backend, the only one that compiles task contracts |
-| `lib/vaisto/errors.ex`, `error_formatter.ex` | Structured errors with spans and hints, rendered in Rust's style |
-| `lib/vaisto/build/`, `package/` | Multi-file builds, dependency order, `.vsi` interfaces, `vaisto.toml` |
-| `lib/vaisto/lsp/` | The language server |
-| `lib/vaisto/llm/` | LLM providers |
-| `lib/vaisto/liquid/` | Liquid Core: codec, evaluator, Lint, adapter, harness |
-| `std/` | The standard library, in Vaisto |
-| `src/Vaisto/` | A proof-of-concept compiler written in Vaisto ([ADR-002](docs/adr/002-compiler-implementation.md)); not the production compiler, and out of date |
+| `lib/vaisto/parser.ex`, `elab.ex`, `elab/` | Located syntax, bidirectional checking and local unification |
+| `lib/vaisto/liquid/` | Core codec, independent Lint/evaluator, native lowering/runtime and differential harness |
+| `lib/vaisto/refine/` | Verification conditions, predicates and Z3 protocol |
+| `lib/vaisto/compilation.ex`, `build/`, `interface.ex` | Verified compilation, package builds and canonical interfaces |
+| `lib/vaisto/repl.ex`, `lsp/` | Interactive execution and editor tooling on checked Core |
+| `lib/vaisto/errors.ex`, `error_formatter.ex` | Structured, located diagnostics |
+| `lib/vaisto/llm/` | Model providers and schema conversion |
+| `std/`, `examples/` | Vaisto source with explicit contracts |
+| `src/Vaisto/` | Historical, non-building self-hosting prototype; outside this migration ([ADR-002](docs/adr/002-compiler-implementation.md)) |
 
 ## Getting started
 
@@ -528,9 +463,8 @@ mix escript.build        # builds ./vaistoc
 The CLI:
 
 ```bash
-./vaistoc file.va                     # compile to BEAM (Core Erlang backend)
+./vaistoc file.va                     # compile verified Core to native BEAM
 ./vaistoc file.va -o build/File.beam  # choose the output
-./vaistoc file.va --backend elixir    # use the Elixir backend
 ./vaistoc --eval "(+ 1 2)"            # evaluate an expression
 ./vaistoc build src/ -o build/        # build a directory
 ./vaistoc init my-lib                 # start a package
@@ -538,8 +472,8 @@ The CLI:
 ./vaistoc lsp                         # language server on stdio
 ```
 
-From Elixir, `Vaisto.Runner.run(source)` compiles and runs a program's `main`;
-pass `backend: :core` or `backend: :elixir`.
+From Elixir, `Vaisto.Runner.run(source)` compiles and runs a program's `main`.
+There is one native compiler; the old `--backend` option is removed.
 
 ## Editor support
 
@@ -583,7 +517,7 @@ mix run -e 'IO.inspect(Vaisto.Liquid.Harness.run(File.read!("program.va")).verdi
 ```
 
 `test/liquid/harness_test.exs` runs it over every program in the test suite on
-each `mix test`, and fails on any disagreement that is not a known defect.
+each `mix test`, and fails on any evaluator/native disagreement.
 
 `AGENTS.md` is the working contract for contributors, human or AI: the
 conventions, the constraints and the expected workflow. `CLAUDE.md` is the
@@ -592,38 +526,23 @@ planned on [SYKLI](#related-work).
 
 ## Status and known gaps
 
-Each gap below has been reproduced against the current code. The numbers are
-the defect IDs of the [Liquid Vaisto RFC](docs/design/liquid-vaisto-rfc.md)
-(§1.12, with reproductions in Appendix A) and of
-[`liquid-core.md`](docs/design/liquid-core.md) §12.
+The language, standard library, builds, REPL, diagnostics, hover and inlay
+types use checked native Core. Process messages, imported types and class
+dictionaries are checked rather than typed `Any`.
 
-**The backends disagree** on some programs:
-- `==` is exact equality on one backend and numeric equality on the other
-  (D25);
-- a failed match crashes with a different reason on each backend (D26).
+Not implemented: receive timeouts, binary syntax, higher-rank signatures,
+module sealing/brands, row evidence, refined decode targets and refinements
+over records, sums or user measures. Imported refinements remain a compile
+error. General deterministic replay, capabilities and the full task-contract
+operator library remain design work. There is no CI configuration yet.
 
-**The type checker accepts some ill-typed programs.** Among them:
-- a function declared `:int` can return a float or a string (D4, D16);
-- arithmetic on an unannotated parameter is generalized to any type (D17);
-- a `match` on an unannotated parameter is not tied to its patterns' type
-  (D22);
-- `:any` unifies with everything;
-- unknown qualified calls are typed `Any`;
-- multi-clause functions are typed `Any -> Any`.
+Match/receive clause guards remain unsupported; guarded function clauses
+are supported. Top-level signatures are mandatory, locals monomorphic, and
+Int/Float conversion explicit. These are language rules, not HM fallbacks.
 
-**Modules.** Cross-module calls are not type-checked yet. `.vsi` interfaces are
-written but not used for typing imports (D9).
-
-**Records.** A function parameter annotated with a record or sum type does not
-match values of that type at call sites (D1, D2). Row-polymorphic field access
-on a record crashes at run time (D24).
-
-**Guards.** `match` and `receive` clauses have no guards; `[x :when g body]`
-there is a parse error (D27). Multi-clause functions take guards.
-
-**Not there yet:** receive with a timeout, binary syntax, decoding values
-from `Dyn`, refinements beyond `Int`, `Bool` and `List` on single-clause
-functions, effect rows, CI.
+The design and roadmap are in [liquid-types.md](docs/design/liquid-types.md)
+and the [Liquid Vaisto RFC](docs/design/liquid-vaisto-rfc.md). Historical
+defect reproductions there describe the retired compiler, not current APIs.
 
 ## Documentation
 

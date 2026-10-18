@@ -11,15 +11,17 @@ defmodule Vaisto.UnifiedMatchTest do
   No more match-tuple. One construct to rule them all.
   """
   use ExUnit.Case
-  alias Vaisto.{Parser, TypeChecker, CoreEmitter, Error}
+  alias Vaisto.Compilation
 
   # Helper to compile and run code, returning the result
   defp run(code, mod_name) do
-    ast = Parser.parse(code)
-    {:ok, _type, typed} = TypeChecker.check(ast)
-    {:ok, mod, binary} = CoreEmitter.compile(typed, mod_name)
-    :code.load_binary(mod, ~c"test", binary)
-    apply(mod, :main, [])
+    assert {:ok, mod, _binary} = Compilation.compile(code, mod_name)
+    try do
+      apply(mod, :main, [])
+    after
+      :code.purge(mod)
+      :code.delete(mod)
+    end
   end
 
   describe "unified match: Erlang tuples with brace syntax" do
@@ -28,7 +30,8 @@ defmodule Vaisto.UnifiedMatchTest do
       code = """
       (match {:ok 42}
         [{:ok v} v]
-        [{:error _} 0])
+        [{:error _} 0]
+        [_ 0])
       """
       assert run(code, UnifiedOk1) == 42
     end
@@ -38,7 +41,8 @@ defmodule Vaisto.UnifiedMatchTest do
       code = """
       (match {:error "failed"}
         [{:ok _} 0]
-        [{:error e} 1])
+        [{:error e} 1]
+        [_ 0])
       """
       assert run(code, UnifiedErr1) == 1
     end
@@ -47,7 +51,8 @@ defmodule Vaisto.UnifiedMatchTest do
     test "matches 3-element tuple" do
       code = """
       (match {:point 10 20}
-        [{:point x y} (+ x y)])
+        [{:point x y} (+ x y)]
+        [_ 0])
       """
       assert run(code, UnifiedPoint1) == 30
     end
@@ -55,10 +60,11 @@ defmodule Vaisto.UnifiedMatchTest do
     @tag :unified_match
     test "matches tuple in function" do
       code = """
-      (defn unwrap [result]
+      (defn unwrap [result (Tuple :atom :int)] :int
         (match result
           [{:ok v} v]
-          [{:error _} 0]))
+          [{:error _} 0]
+        [_ 0]))
       (unwrap {:ok 99})
       """
       assert run(code, UnifiedUnwrap1) == 99
@@ -68,7 +74,8 @@ defmodule Vaisto.UnifiedMatchTest do
     test "matches nested tuples" do
       code = """
       (match {:outer {:inner 42}}
-        [{:outer {:inner v}} v])
+        [{:outer {:inner v}} v]
+        [_ 0])
       """
       assert run(code, UnifiedNested1) == 42
     end
@@ -78,7 +85,7 @@ defmodule Vaisto.UnifiedMatchTest do
     @tag :unified_match
     test "matches Ok variant" do
       code = """
-      (deftype Result (Ok v) (Err e))
+      (deftype Result (Ok :int) (Err :string))
       (match (Ok 42)
         [(Ok v) v]
         [(Err _) 0])
@@ -89,7 +96,7 @@ defmodule Vaisto.UnifiedMatchTest do
     @tag :unified_match
     test "matches Err variant" do
       code = """
-      (deftype Result (Ok v) (Err e))
+      (deftype Result (Ok :int) (Err :string))
       (match (Err "bad")
         [(Ok _) 0]
         [(Err e) 1])
@@ -101,7 +108,7 @@ defmodule Vaisto.UnifiedMatchTest do
     test "matches variant with no fields" do
       code = """
       (deftype Option (Some v) (None))
-      (match (None)
+      (match (the (Option :int) (None))
         [(Some _) 1]
         [(None) 0])
       """
@@ -113,14 +120,15 @@ defmodule Vaisto.UnifiedMatchTest do
     @tag :unified_match
     test "can use Vaisto Result and return Erlang tuple" do
       code = """
-      (deftype Result (Ok v) (Err e))
-      (defn to-erlang [r]
+      (deftype Result (Ok :int) (Err :string))
+      (defn to-erlang [r :Result] (Tuple :atom :int)
         (match r
           [(Ok v) {:ok v}]
-          [(Err e) {:error e}]))
+          [(Err e) {:error 0}]))
       (match (to-erlang (Ok 42))
         [{:ok v} v]
-        [{:error _} 0])
+        [{:error _} 0]
+        [_ 0])
       """
       assert run(code, UnifiedMixed1) == 42
     end
@@ -128,11 +136,12 @@ defmodule Vaisto.UnifiedMatchTest do
     @tag :unified_match
     test "can convert Erlang tuple to Vaisto Result" do
       code = """
-      (deftype Result (Ok v) (Err e))
-      (defn from-erlang [t]
+      (deftype Result (Ok :int) (Err :string))
+      (defn from-erlang [t (Tuple :atom :int)] :Result
         (match t
           [{:ok v} (Ok v)]
-          [{:error e} (Err e)]))
+          [{:error e} (Err (str e))]
+          [_ (crash :bad_decode)]))
       (match (from-erlang {:ok 77})
         [(Ok v) v]
         [(Err _) 0])
@@ -202,7 +211,8 @@ defmodule Vaisto.UnifiedMatchTest do
       code = """
       (match {:items (list 10 20)}
         [{:items []} 0]
-        [{:items [h | _]} h])
+        [{:items [h | _]} h]
+        [_ 0])
       """
       assert run(code, UnifiedListTuple1) == 10
     end
@@ -216,11 +226,8 @@ defmodule Vaisto.UnifiedMatchTest do
         [{:ok v} v])
       """
       # Should error: {:ok ...} without {:error ...} pattern
-      ast = Parser.parse(code)
-      assert {:error, err} = TypeChecker.check(ast)
-      text = Error.to_string(err)
-      assert text =~ "non-exhaustive" or text =~ "Non-exhaustive"
-      assert text =~ ":error"
+      assert {:error, [error]} = Compilation.check_liquid(code, :PartialTuple, format_errors: false)
+      assert error.message == "this match is not exhaustive"
     end
 
     @tag :unified_match
@@ -228,19 +235,21 @@ defmodule Vaisto.UnifiedMatchTest do
       code = """
       (match {:ok 42}
         [{:ok v} v]
-        [{:error _} 0])
+        [{:error _} 0]
+        [_ 0])
       """
       # Covers both :ok and :error - should compile
       assert run(code, UnifiedExhaust2) == 42
     end
 
     @tag :unified_match
-    test "allows non-result tuple match without catch-all" do
+    test "raw tuple exhaustiveness does not depend on result-like tag names" do
       code = """
       (match {:point 10 20}
-        [{:point x y} (+ x y)])
+        [{:point x y} (+ x y)]
+        [_ 0])
       """
-      # :point is not a result-like tag, so no :error required
+      # The wildcard covers the other Atom tags; no result-tag heuristic.
       assert run(code, UnifiedExhaust3) == 30
     end
 
@@ -262,7 +271,8 @@ defmodule Vaisto.UnifiedMatchTest do
       code = """
       (let [t {:point 1 2}]
         (match t
-          [{:point x y} (+ x y)]))
+          [{:point x y} (+ x y)]
+        [_ 0]))
       """
       assert run(code, UnifiedInfer1) == 3
     end
@@ -270,11 +280,12 @@ defmodule Vaisto.UnifiedMatchTest do
     @tag :unified_match
     test "infers return type from all branches" do
       code = """
-      (defn get-val [t]
+      (defn get-val [t (Tuple :atom :int)] :int
         (match t
           [{:ok v} v]
-          [{:error _} 0]))
-      (+ (get-val {:ok 10}) (get-val {:error "x"}))
+          [{:error _} 0]
+        [_ 0]))
+      (+ (get-val {:ok 10}) (get-val {:error 0}))
       """
       assert run(code, UnifiedInfer2) == 10
     end

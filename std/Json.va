@@ -4,33 +4,33 @@
 
 ; --- Erlang/Elixir FFI ---
 ; Jason is an Elixir library, so we call it as 'Elixir.Jason'
-(extern Elixir.Jason/encode [:any] :any)
-(extern Elixir.Jason/encode [:any :any] :any)
-(extern Elixir.Jason/decode [:string] :any)
-(extern Elixir.Jason/decode [:string :any] :any)
+(extern Elixir.Jason/encode [:dyn] (Core.TaskResult :string))
+(extern Elixir.Jason/encode [:dyn (List (Tuple :atom :bool))] (Core.TaskResult :string))
+(extern Elixir.Jason/decode [:string] (Core.TaskResult :dyn))
+(extern Elixir.Jason/decode [:string (List (Tuple :atom :atom))] (Core.TaskResult :dyn))
 
 ; --- Encoding ---
 
 ; encode: Encode a value to JSON string
 ; Returns (Ok json-string) or (Err reason)
-(defn encode [value]
-  (from-erlang-result (Elixir.Jason/encode value)))
+(defn encode [value :dyn] (Result :string :dyn)
+  (from-task-result (Elixir.Jason/encode value)))
 
 ; encode-pretty: Encode with indentation for readability
 ; Returns (Ok json-string) or (Err reason)
-(defn encode-pretty [value]
-  (from-erlang-result (Elixir.Jason/encode value #{:pretty true})))
+(defn encode-pretty [value :dyn] (Result :string :dyn)
+  (from-task-result (Elixir.Jason/encode value (list {:pretty true}))))
 
 ; --- Decoding ---
 
 ; decode: Decode a JSON string to a value
 ; Returns (Ok value) or (Err reason)
 ; Note: Objects become maps with string keys
-(defn decode [json-string]
-  (from-erlang-result (Elixir.Jason/decode json-string)))
+(defn decode [json-string :string] (Result :dyn :dyn)
+  (from-task-result (Elixir.Jason/decode json-string)))
 
 ; decode-atoms: Decode with atom keys for objects
 ; Warning: Only use with trusted input (atoms are not garbage collected)
 ; Returns (Ok value) or (Err reason)
-(defn decode-atoms [json-string]
-  (from-erlang-result (Elixir.Jason/decode json-string #{:keys :atoms})))
+(defn decode-atoms [json-string :string] (Result :dyn :dyn)
+  (from-task-result (Elixir.Jason/decode json-string (list {:keys :atoms}))))

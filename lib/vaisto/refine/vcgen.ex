@@ -526,7 +526,7 @@ defmodule Vaisto.Refine.VCGen do
   end
 
   defp prim_value(op, [a, b], _args, env, st) when op in [:eq, :ne] do
-    st = if Float in [kind(a.ty), kind(b.ty)], do: gate(env, st, "`==` on Float, where the backends disagree (D25)"), else: st
+    st = if Float in [kind(a.ty), kind(b.ty)], do: gate(env, st, "`==` on Float is not supported by refinement verification"), else: st
 
     case {a, b} do
       {%{t: ta, s: s}, %{t: tb, s: s}} when ta != nil and tb != nil and s != nil ->

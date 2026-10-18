@@ -7,9 +7,9 @@ defmodule Vaisto.Liquid.HarnessTest do
   alias Vaisto.Liquid.Harness
 
   describe "verdicts" do
-    test "agree: the evaluator and both backends give the same outcome" do
+    test "agree: evaluator and native BEAM give the same outcome" do
       assert %{verdict: :agree, eval: {:ok, 3}} = Harness.run("(defn add [x :int y :int] :int (+ x y))\n(defn main [] :int (add 1 2))")
-      assert %{verdict: :agree, eval: {:crash, :no_match}} = Harness.run("(defn f [n :int] :int (match n [0 1]))\n(defn main [] :int (f 5))")
+      assert %{verdict: {:elab_rejects, _}} = Harness.run("(defn f [n :int] :int (match n [0 1]))\n(defn main [] :int (f 5))")
     end
 
     # P0-4 (D5): and/or short-circuit on both backends (liquid-core.md §4.3)
@@ -31,10 +31,10 @@ defmodule Vaisto.Liquid.HarnessTest do
                Harness.run("(defn chk [x :int y :int] :bool (or (!= y 0) (> (div x y) 1)))\n(defn main [] :bool (chk 10 0))")
     end
 
-    test "D25: the Elixir backend's == is not exact equality" do
+    test "D25 fixed: native equality preserves exact floating-point equality" do
       result = Harness.run("(defn main [] :bool (== 0.0 -0.0))")
-      assert %{verdict: {:disagree, [:elixir]}, eval: {:ok, false}} = result
-      assert result.beam.elixir == {:ok, true}
+      assert %{verdict: :agree, eval: {:ok, false}} = result
+      assert result.beam.native == {:ok, false}
     end
 
     # P0-10 (D11): guarded defn on the Core Erlang backend
@@ -85,18 +85,18 @@ defmodule Vaisto.Liquid.HarnessTest do
       assert %{verdict: :agree, eval: {:ok, 1}} = result
     end
 
-    test "D15 fixed: HM rejects a use of the outer binding at the leaked type" do
-      assert %{verdict: {:hm_rejects, _}} =
+    test "D15 fixed: elaboration rejects the outer binding at the leaked type" do
+      assert %{verdict: {:elab_rejects, _}} =
                Harness.run("(defn f [x :string] :int (do (let [x 1] x) (+ x 1)))\n(defn main [] :int (f \"hi\"))")
     end
 
-    test "Lint rejects what HM accepted but left ill-typed (D17)" do
-      assert %{verdict: {:lint_rejects, [%{in: :double}]}} = Harness.run("(defn double [x] (* x 2))\n(defn main [] (double 21))")
+    test "D17 fixed: unsigned top-level functions are rejected before Core" do
+      assert %{verdict: {:elab_rejects, _}} = Harness.run("(defn double [x] (* x 2))\n(defn main [] (double 21))")
     end
 
-    test "outside the fragment, rejected by HM, or nothing to run" do
-      assert %{verdict: {:outside_fragment, "the builtin :str"}} = Harness.run("(defn main [] :string (str 1))")
-      assert %{verdict: {:hm_rejects, _}} = Harness.run("(defn main [] :int \"no\")")
+    test "ground string conversion, rejection, or nothing to run" do
+      assert %{verdict: :agree, eval: {:ok, "1"}} = Harness.run("(defn main [] :string (str 1))")
+      assert %{verdict: {:elab_rejects, _}} = Harness.run("(defn main [] :int \"no\")")
       assert %{verdict: :no_main} = Harness.run("(defn f [] :int 1)")
     end
 
@@ -107,12 +107,7 @@ defmodule Vaisto.Liquid.HarnessTest do
   end
 
   describe "the corpus of every program in the test suite (RFC §6.3)" do
-    # The disagreements the harness is known to find there, each a defect
-    # this repository has recorded. A new disagreement fails this test; so
-    # does fixing one of these without removing it here.
-    @known []
-
-    test "no program makes the harness raise, and every disagreement is a known defect" do
+    test "no program makes the harness raise or disagrees with native BEAM" do
       # The test suite as it was before Liquid Core: the tests under test/liquid
       # reproduce defects on purpose, and assert on them themselves.
       corpus = Harness.corpus(Path.wildcard("test/**/*_test.exs") -- Path.wildcard("test/liquid/*_test.exs"))
@@ -121,12 +116,7 @@ defmodule Vaisto.Liquid.HarnessTest do
       results = for {file, source} <- corpus, do: {file, source, Harness.run(source)}
       disagreeing = for {file, source, %{verdict: {:disagree, _}}} <- results, do: {file, source}
 
-      unknown = for {file, source} <- disagreeing, not Enum.any?(@known, fn {_, p} -> String.contains?(source, p) end), do: {file, source}
-      assert unknown == [], "disagreements that are not known defects:\n#{inspect(unknown, pretty: true)}"
-
-      for {defect, program} <- @known do
-        assert Enum.any?(disagreeing, fn {_, s} -> String.contains?(s, program) end), "#{defect} no longer disagrees: remove it from @known"
-      end
+      assert disagreeing == [], "native/evaluator disagreements:\n#{inspect(disagreeing, pretty: true)}"
 
       agreeing = Enum.count(results, &match?({_, _, %{verdict: :agree}}, &1))
       assert agreeing >= 80, "only #{agreeing} programs agree"

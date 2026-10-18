@@ -24,9 +24,8 @@ defmodule Vaisto.ADTTest do
     test "type checks sum type definition" do
       code = "(deftype Option (Some v) (None))"
       ast = Vaisto.Parser.parse(code)
-      {:ok, type, _typed_ast} = Vaisto.TypeChecker.check(ast)
-      # Type parameters are now represented as type variables {:tvar, n}
-      assert {:sum, :Option, [{:Some, [{:tvar, 0}]}, {:None, []}]} = type
+      assert {:ok, [:module, _, _ | items]} = Vaisto.Elab.module(ast)
+      assert [:type, :Option, [:v], [:sum, [:Some, [:tvar, :v]], [:None]]] in items
     end
   end
 
@@ -34,7 +33,7 @@ defmodule Vaisto.ADTTest do
     test "constructs Ok variant" do
       code = """
       (deftype Result (Ok v) (Error msg))
-      (Ok 42)
+      (the (Result :int :string) (Ok 42))
       """
       {:ok, mod} = Runner.compile_and_load(code, :OkCtor)
       assert {:Ok, 42} = Runner.call(mod, :main)
@@ -43,7 +42,7 @@ defmodule Vaisto.ADTTest do
     test "constructs Error variant" do
       code = """
       (deftype Result (Ok v) (Error msg))
-      (Error "boom")
+      (the (Result :int :string) (Error "boom"))
       """
       {:ok, mod} = Runner.compile_and_load(code, :ErrCtor)
       assert {:Error, "boom"} = Runner.call(mod, :main)
@@ -52,7 +51,7 @@ defmodule Vaisto.ADTTest do
     test "constructs None variant (no fields)" do
       code = """
       (deftype Option (Some v) (None))
-      (None)
+      (the (Option :int) (None))
       """
       {:ok, mod} = Runner.compile_and_load(code, :NoneCtor)
       assert {:None} = Runner.call(mod, :main)
@@ -72,7 +71,7 @@ defmodule Vaisto.ADTTest do
     test "matches Ok and extracts value" do
       code = """
       (deftype Result (Ok v) (Error msg))
-      (match (Ok 42)
+      (match (the (Result :int :string) (Ok 42))
         [(Ok v) v]
         [(Error _) 0])
       """
@@ -83,7 +82,7 @@ defmodule Vaisto.ADTTest do
     test "matches Error and extracts message" do
       code = """
       (deftype Result (Ok v) (Error msg))
-      (match (Error "failed")
+      (match (the (Result :int :string) (Error "failed"))
         [(Ok _) 0]
         [(Error msg) 1])
       """
@@ -94,11 +93,11 @@ defmodule Vaisto.ADTTest do
     test "unwrap function using match" do
       code = """
       (deftype Result (Ok v) (Error msg))
-      (defn unwrap [r default]
+      (defn unwrap [r (Result :a :e) default :a] :a
         (match r
           [(Ok v) v]
           [(Error _) default]))
-      (+ (unwrap (Ok 10) 0) (unwrap (Error "x") 5))
+      (+ (unwrap (the (Result :int :string) (Ok 10)) 0) (unwrap (Error "x") 5))
       """
       {:ok, mod} = Runner.compile_and_load(code, :UnwrapFn)
       assert 15 = Runner.call(mod, :main)
@@ -107,7 +106,7 @@ defmodule Vaisto.ADTTest do
     test "nested variant matching" do
       code = """
       (deftype Option (Some v) (None))
-      (defn get-or [opt default]
+      (defn get-or [opt (Option :a) default :a] :a
         (match opt
           [(Some v) v]
           [(None) default]))
@@ -122,20 +121,20 @@ defmodule Vaisto.ADTTest do
     test "rejects non-exhaustive match" do
       code = """
       (deftype Result (Ok v) (Error msg))
-      (match (Ok 1)
+      (match (the (Result :int :string) (Ok 1))
         [(Ok v) v])
       """
       result = Runner.compile_and_load(code, :NonExhaustive)
       assert {:error, err} = result
       text = error_text(err)
-      assert text =~ "non-exhaustive" or text =~ "Non-exhaustive"
+      assert text =~ "not exhaustive"
       assert text =~ "Error"
     end
 
     test "accepts exhaustive match" do
       code = """
       (deftype Result (Ok v) (Error msg))
-      (match (Ok 1)
+      (match (the (Result :int :string) (Ok 1))
         [(Ok v) v]
         [(Error _) 0])
       """
@@ -145,7 +144,7 @@ defmodule Vaisto.ADTTest do
     test "accepts catch-all pattern" do
       code = """
       (deftype Result (Ok v) (Error msg))
-      (match (Error "x")
+      (match (the (Result :int :string) (Error "x"))
         [(Ok v) v]
         [_ 0])
       """
@@ -173,7 +172,7 @@ defmodule Vaisto.ADTTest do
       result = Runner.compile_and_load(code, :MissingMultiple)
       assert {:error, err} = result
       text = error_text(err)
-      assert text =~ "non-exhaustive" or text =~ "Non-exhaustive"
+      assert text =~ "not exhaustive"
       # Should mention both missing variants
       assert text =~ "Green" or text =~ "Blue"
     end
@@ -184,7 +183,7 @@ defmodule Vaisto.ADTTest do
       # Simplified version - direct pattern match without higher-order map
       code = """
       (deftype Maybe (Just v) (Nothing))
-      (defn double-maybe [m]
+      (defn double-maybe [m (Maybe :int)] (Maybe :int)
         (match m
           [(Just v) (Just (* v 2))]
           [(Nothing) (Nothing)]))
@@ -198,8 +197,8 @@ defmodule Vaisto.ADTTest do
 
     test "binary tree" do
       code = """
-      (deftype Tree (Leaf v) (Node left right))
-      (defn tree-sum [t]
+      (deftype Tree (Leaf :int) (Node Tree Tree))
+      (defn tree-sum [t :Tree] :int
         (match t
           [(Leaf v) v]
           [(Node l r) (+ (tree-sum l) (tree-sum r))]))
@@ -211,8 +210,8 @@ defmodule Vaisto.ADTTest do
 
     test "list as ADT" do
       code = """
-      (deftype List (Cons head tail) (Nil))
-      (defn my-length [lst]
+      (deftype Chain (Cons :int Chain) (Nil))
+      (defn my-length [lst :Chain] :int
         (match lst
           [(Nil) 0]
           [(Cons _ t) (+ 1 (my-length t))]))
@@ -227,7 +226,7 @@ defmodule Vaisto.ADTTest do
     test "sum and product types coexist" do
       code = """
       (deftype Point [x :int y :int])
-      (deftype Shape (Circle center radius) (Rectangle p1 p2))
+      (deftype Shape (Circle Point :int) (Rectangle Point Point))
       (match (Circle (Point 0 0) 10)
         [(Circle c r) r]
         [(Rectangle _ _) 0])
@@ -252,8 +251,8 @@ defmodule Vaisto.ADTTest do
     test "fresh tvars per call site — Just with int and string in same module" do
       code = """
       (deftype Maybe (Just v) (Nothing))
-      (defn get-int [] (Just 42))
-      (defn get-str [] (Just "hello"))
+      (defn get-int [] (Maybe :int) (Just 42))
+      (defn get-str [] (Maybe :string) (Just "hello"))
       (match (get-int)
         [(Just v) v]
         [(Nothing) 0])
@@ -284,18 +283,18 @@ defmodule Vaisto.ADTTest do
       result = Runner.compile_and_load(code, :PolyExhaustive)
       assert {:error, err} = result
       text = error_text(err)
-      assert text =~ "non-exhaustive" or text =~ "Non-exhaustive"
+      assert text =~ "not exhaustive"
       assert text =~ "Nothing"
     end
 
     test "two-param ADT — Result with Ok and Err" do
       code = """
       (deftype Result (Ok v) (Err e))
-      (defn unwrap-or [r default]
+      (defn unwrap-or [r (Result :a :e) default :a] :a
         (match r
           [(Ok v) v]
           [(Err _) default]))
-      (+ (unwrap-or (Ok 10) 0) (unwrap-or (Err "fail") 5))
+      (+ (unwrap-or (the (Result :int :string) (Ok 10)) 0) (unwrap-or (Err "fail") 5))
       """
       {:ok, mod} = Runner.compile_and_load(code, :TwoParamADT)
       assert 15 = Runner.call(mod, :main)
@@ -304,7 +303,7 @@ defmodule Vaisto.ADTTest do
     test "branch type mismatch is detected" do
       code = """
       (deftype Maybe (Just v) (Nothing))
-      (defn bad [m :Maybe]
+      (defn bad [m (Maybe :int)] :int
         (match m
           [(Just v) "hello"]
           [(Nothing) 42]))

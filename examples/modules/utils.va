@@ -1,10 +1,10 @@
 ; Utility functions
 (ns Utils)
 
-(defn safe-div [x y]
+(defn safe-div [x :int y :int] (Result :float :string)
   (if (== y 0)
     (Err "division by zero")
-    (Ok (/ x y))))
+    (Ok (/ (int-to-float x) (int-to-float y)))))
 
-(defn apply-twice [f x]
+(defn apply-twice [f (Fn :a :a :effects :fx) x :a] :a :effects :fx
   (f (f x)))

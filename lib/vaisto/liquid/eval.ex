@@ -33,14 +33,17 @@ defmodule Vaisto.Liquid.Eval do
   @builtin_types %{
     Bool: {:sum, [], [true: [], false: []]},
     List: {:sum, [:a], [Nil: [], Cons: [[:tvar, :a], [:List, [:tvar, :a]]]]},
+    "Core.DecodeError": {:sum, [], [{:"Core.BadDecode", []}]},
+    "Core.Result": {:sum, [:e, :a], [{:"Core.Err", [[:tvar, :e]]}, {:"Core.Ok", [[:tvar, :a]]}]},
+    "Core.TaskResult": {:sum, [:a], [{:ok, [[:tvar, :a]]}, {:error, [:Dyn]}]},
     Reason:
       {:sum, [],
        [badarith: [], badarg: [], no_match: [], bad_decode: [], user: [:Dyn], raised: [:Atom, :Dyn]]}
   }
 
-  @typedoc "`:pure`, or `{:script, [{op, args, outcome}]}` with outcome `{:ok, v}` or `{:raised, class, reason}` (§8)."
-  @type handler :: :pure | {:script, [{atom(), [term()], term()}]}
-  @type outcome :: {:ok, term()} | {:crash, term()}
+  @typedoc "`:pure`, `:observe` (suspend before the first request), or a strict effect script (§8)."
+  @type handler :: :pure | :observe | {:script, [{atom(), [term()], term()}]}
+  @type outcome :: {:ok, term()} | {:crash, term()} | {:effect, atom(), [term()]}
 
   @doc """
   Run function `entry` of a module (§4.3) on argument values.
@@ -169,6 +172,7 @@ defmodule Vaisto.Liquid.Eval do
   defp ev(n, _env, _types) when is_integer(n) or is_float(n) or is_binary(n), do: n
   defp ev([:atom, a], _env, _types) when is_atom(a), do: a
   defp ev([:unit], _env, _types), do: nil
+  defp ev([:remote, m, f], _env, _types), do: {:remote, m, f}
 
   defp ev([:fn, params, body], env, _types), do: %Closure{params: Enum.map(params, &hd/1), body: body, env: env}
 
@@ -182,9 +186,20 @@ defmodule Vaisto.Liquid.Eval do
   defp ev([:letrec, group, body], env, types), do: ev(body, bind_group(env, group), types)
   defp ev([:inst, e | _tys], env, types), do: ev(e, env, types)
   defp ev([:up, _ty, e], env, types), do: ev(e, env, types)
-  defp ev([:decode, _ty, _e], _env, _types), do: stuck("decode is not in Liquid Core version 0")
+  defp ev([:decode, ty, e], env, types) do
+    value = ev(e, env, types)
+    if has_type?(value, ty, types), do: {:"Core.Ok", value}, else: {:"Core.Err", {:"Core.BadDecode"}}
+  end
 
   defp ev([:tuple | es], env, types) when es != [], do: es |> Enum.map(&ev(&1, env, types)) |> List.to_tuple()
+
+  defp ev([:map, _, _ | entries], env, types) do
+    Enum.reduce(entries, %{}, fn [key, value], map ->
+      key = ev(key, env, types)
+      value = ev(value, env, types)
+      Map.put(map, key, value)
+    end)
+  end
 
   defp ev([:record, [:Record, _row] | fields], env, types), do: Map.new(fields, fn [l, e] -> {l, ev(e, env, types)} end)
 
@@ -212,6 +227,42 @@ defmodule Vaisto.Liquid.Eval do
   defp ev([:match, e | clauses], env, types), do: match_clauses(ev(e, env, types), clauses, env, types)
   defp ev([:prim, op | es], env, types), do: prim(op, Enum.map(es, &ev(&1, env, types)))
   defp ev([:perform, :crash, e], env, types), do: crash(ev(e, env, types))
+  defp ev([:perform, :generate, input, output, template, payload], env, types) do
+    value = perform(:generate, [input, output, template, ev(payload, env, types)])
+    if has_type?(value, [:"Core.TaskResult", output], types), do: value, else: crash(:bad_decode)
+  end
+  defp ev([:receive | clauses], env, types) do
+    selectors = Enum.map(clauses, fn [type, p, _] -> [type, p] end)
+    value = perform(:receive, [selectors])
+    selected = Enum.find_value(clauses, fn [type, p, body] ->
+      case match(p, value, types) do
+        {:ok, binds} ->
+          if receive_selected?(value, type, types, MapSet.new()) do
+            unless has_type?(value, type, types), do: stuck("scripted receive selected malformed data")
+            {binds, body}
+          end
+        :no -> nil
+      end
+    end)
+    case selected do
+      {binds, body} -> ev(body, Map.merge(env, binds), types)
+      nil -> stuck("scripted receive did not select a valid message")
+    end
+  end
+
+  defp ev([:perform, :spawn, protocol, state, tags, step, initial], env, types) do
+    perform(:spawn, [protocol, state, tags, ev(step, env, types), ev(initial, env, types)])
+  end
+  defp ev([:perform, :supervise, strategy | children], env, types) do
+    children = Enum.map(children, fn [id, protocol, state, tags, step, initial] ->
+      [id, protocol, state, tags, ev(step, env, types), ev(initial, env, types)]
+    end)
+    perform(:supervise, [strategy, children])
+  end
+  defp ev([:perform, :send, _protocol, pid, message], env, types) do
+    perform(:send, [ev(pid, env, types), ev(message, env, types)])
+  end
+  defp ev([:perform, :link, _protocol, pid], env, types), do: perform(:link, [ev(pid, env, types)])
   defp ev([:perform, op | es], env, types), do: perform(op, Enum.map(es, &ev(&1, env, types)))
 
   defp ev([:"handle-crash", e, [[x, _reason_ty], handler]], env, types) do
@@ -224,6 +275,40 @@ defmodule Vaisto.Liquid.Eval do
 
   defp ev(term, _env, _types), do: stuck("not a Core term: #{inspect(term, limit: 8)}")
 
+  # Model the finite, guard-safe selector separately from deep value typing.
+  defp receive_selected?(v, [:List, _], _types, _seen), do: is_list(v)
+  defp receive_selected?(v, [:Map, _, _], _types, _seen), do: is_map(v)
+  defp receive_selected?(v, [:Tuple | ts], types, seen) do
+    is_tuple(v) and tuple_size(v) == length(ts) and
+      Enum.zip(Tuple.to_list(v), ts) |> Enum.all?(fn {v, t} -> receive_selected?(v, t, types, seen) end)
+  end
+  defp receive_selected?(v, [:Record, [:row | items]], types, seen) do
+    fields = for [l, t] <- items, do: {l, t}
+    is_map(v) and map_size(v) == length(fields) and
+      Enum.all?(fields, fn {l, t} -> Map.has_key?(v, l) and receive_selected?(Map.fetch!(v, l), t, types, seen) end)
+  end
+  defp receive_selected?(v, [:Reason], types, _seen), do: has_type?(v, [:Reason], types)
+  defp receive_selected?(v, [name | args] = type, types, seen) when name not in [:Bool, :Pid] do
+    if MapSet.member?(seen, name) do
+      true
+    else
+      case Map.get(types, name) do
+        {kind, params, members} ->
+          fields = case kind do
+            :record -> [{name, Enum.map(members, &elem(&1, 1))}]
+            :sum -> members
+          end
+          is_tuple(v) and tuple_size(v) > 0 and
+            Enum.any?(fields, fn {tag, ts} ->
+              elem(v, 0) === tag and tuple_size(v) == length(ts) + 1 and
+                Enum.zip(tl(Tuple.to_list(v)), ts) |> Enum.all?(fn {value, t} -> receive_selected?(value, with_args(t, params, args), types, MapSet.put(seen, name)) end)
+            end)
+        nil -> has_type?(v, type, types)
+      end
+    end
+  end
+  defp receive_selected?(v, t, types, _seen), do: has_type?(v, t, types)
+
   # --- §6.3 Functions ------------------------------------------------------------
 
   defp apply_closure(%Closure{params: params, body: body, env: env, group: group}, args, types)
@@ -232,6 +317,14 @@ defmodule Vaisto.Liquid.Eval do
     ev(body, env, types)
   end
 
+  defp apply_closure({:remote, m, f}, args, _types) do
+    module = Map.get(Process.get(:vaisto_liquid_imports, %{}), m) || stuck("no reference Core for imported module #{m}")
+    [:module, ^m, [:"core-version", 0] | items] = Canonical.strip(module)
+    types = Map.merge(@builtin_types, for([:type, t, ps, body] <- items, into: %{}, do: {t, decl(ps, body)}))
+    defs = for [:def, name, ty, fun] <- items, do: [name, ty, fun]
+    env = bind_group(%{}, defs)
+    apply_closure(Map.get(env, f) || stuck("no imported definition #{m}/#{f}"), args, types)
+  end
   defp apply_closure(other, args, _types), do: stuck("cannot apply #{inspect(other, limit: 4)} to #{length(args)} arguments")
 
   # Every function of a letrec group sees the whole group (§6.3). The closures are
@@ -406,6 +499,36 @@ defmodule Vaisto.Liquid.Eval do
   defp prim(:ne, [x, y]), do: x !== y
   defp prim(:not, [x]) when is_boolean(x), do: not x
   defp prim(:concat, [x, y]) when is_binary(x) and is_binary(y), do: x <> y
+  defp prim(:"float-round", [x]) when is_float(x), do: :erlang.round(x)
+  defp prim(:"float-trunc", [x]) when is_float(x), do: :erlang.trunc(x)
+  defp prim(:"map-get", [map, key]) do
+    case Map.fetch(map, key) do
+      {:ok, value} -> value
+      :error -> crash(:badarg)
+    end
+  end
+  defp prim(:"map-put", [map, key, value]), do: Map.put(map, key, value)
+  defp prim(:"map-delete", [map, key]), do: Map.delete(map, key)
+  defp prim(:"map-has?", [map, key]), do: Map.has_key?(map, key)
+  defp prim(:"map-keys", [map]), do: Map.keys(map)
+  defp prim(:"map-values", [map]), do: Map.values(map)
+  defp prim(:"map-size", [map]), do: map_size(map)
+  defp prim(:"map-merge", [a, b]), do: Map.merge(a, b)
+  defp prim(:"map-to-list", [map]), do: Map.to_list(map)
+  defp prim(:"map-from-list", [pairs]), do: Map.new(pairs)
+
+  defp prim(:str, values) do
+    Enum.reduce(values, "", fn value, text ->
+      suffix = cond do
+        is_binary(value) -> value
+        is_integer(value) -> :erlang.integer_to_binary(value)
+        is_float(value) -> :erlang.float_to_binary(value, [:short])
+        is_atom(value) -> :erlang.atom_to_binary(value, :utf8)
+        true -> :erlang.iolist_to_binary(:io_lib.format(~c"~p", [value]))
+      end
+      text <> suffix
+    end)
+  end
 
   defp prim(:length, [xs]) when is_list(xs), do: len(xs, 0)
   defp prim(:empty?, [[]]), do: true
@@ -454,6 +577,9 @@ defmodule Vaisto.Liquid.Eval do
 
   defp perform(op, args) do
     case Process.get(:vaisto_liquid_handler) do
+      :observe ->
+        throw({:liquid_suspended, op, args})
+
       :pure ->
         stuck("perform #{op} under the pure handler")
 
@@ -471,6 +597,7 @@ defmodule Vaisto.Liquid.Eval do
 
   defp with_handler(opts, fun) do
     previous = Process.put(:vaisto_liquid_handler, Keyword.get(opts, :handler, :pure))
+    previous_imports = Process.put(:vaisto_liquid_imports, Keyword.get(opts, :imports, %{}))
 
     try do
       outcome =
@@ -478,6 +605,7 @@ defmodule Vaisto.Liquid.Eval do
           {:ok, fun.()}
         catch
           {:liquid_crash, reason} -> {:crash, reason}
+          {:liquid_suspended, op, args} -> {:effect, op, args}
         end
 
       case Process.get(:vaisto_liquid_handler) do
@@ -486,6 +614,7 @@ defmodule Vaisto.Liquid.Eval do
       end
     after
       if previous, do: Process.put(:vaisto_liquid_handler, previous), else: Process.delete(:vaisto_liquid_handler)
+      if previous_imports, do: Process.put(:vaisto_liquid_imports, previous_imports), else: Process.delete(:vaisto_liquid_imports)
     end
   end
 

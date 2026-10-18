@@ -16,14 +16,16 @@ with refinements start it. No CI, no formatter config, no Credo, no Dialyzer.
 
 - AST nodes are tuples with `%Loc{}` as the **final** element
   (e.g. `{:defn, name, params, body, ret_type, %Loc{}}`).
-- Typed AST nodes carry types instead of locations.
+- Elaborated output is canonical, typed Liquid Core (Elixir lists), not a
+  second surface AST. Core metadata may retain source information.
 - The parser **raises** on syntax errors. Wrap with
   `Vaisto.Compilation.parse/2` for `{:error, ...}` returns.
-- Type checking uses the ctx-threaded `check_s` / `check_impl_s` form,
-  not the legacy `check`. `TcCtx` threads substitution and tvar counter.
-- Use `Vaisto.TypeSystem.Unify` for unification; do not write bespoke
-  field comparison.
-- Errors are `Vaisto.Errors` constructors carrying `%Span{}`; rendered
+- Type checking uses `Vaisto.Elab` with explicit definition signatures and
+  local inference. Thread its context; do not reintroduce HM or a fallback.
+- Use `Vaisto.Elab.Types.unify/4` for unification; thread both its
+  substitution and fresh counter. Do not write bespoke field comparison.
+- Every elaborated module must pass independent Core Lint before emission.
+- Errors use `Vaisto.Errors`/`Vaisto.Error` with source spans and filenames; rendered
   by `Vaisto.ErrorFormatter` (Rust-style with source context).
 - "Did you mean?" hints use Jaro distance — see
   `Vaisto.Errors.undefined_variable` for the pattern.
@@ -53,7 +55,7 @@ For any non-trivial task:
 ## Verification commands
 
 - `mix deps.get` — install dependencies (one-time).
-- `mix test` — run the full suite (~1,560 tests). The refinement tests
+- `mix test` — run the full suite. The refinement tests
   (`test/refine/`) need `z3` on PATH and fail without it.
 - `mix test path/to/file_test.exs` — run one file.
 - `mix test path/to/file_test.exs:LINE` — run one test.

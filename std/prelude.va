@@ -6,25 +6,25 @@
 (deftype Result (Ok v) (Err e))
 
 ; Unwrap a Result, returning the value or a default
-(defn result-unwrap [r default]
+(defn result-unwrap [r (Result :a :err) default :a] :a
   (match r
     [(Ok v) v]
     [(Err _) default]))
 
 ; Map over a successful Result
-(defn result-map [r f]
+(defn result-map [r (Result :a :err) f (Fn :a :b :effects :fx)] (Result :b :err) :effects :fx
   (match r
     [(Ok v) (Ok (f v))]
     [(Err e) (Err e)]))
 
 ; Chain Result-returning operations (flatMap/bind)
-(defn result-then [r f]
+(defn result-then [r (Result :a :err) f (Fn :a (Result :b :err) :effects :fx)] (Result :b :err) :effects :fx
   (match r
     [(Ok v) (f v)]
     [(Err e) (Err e)]))
 
 ; Check if Result is Ok
-(defn result-ok? [r]
+(defn result-ok? [r (Result :a :err)] :bool
   (match r
     [(Ok _) true]
     [(Err _) false]))
@@ -34,39 +34,55 @@
 (deftype Option (Some v) (None))
 
 ; Unwrap an Option, returning the value or a default
-(defn option-unwrap [o default]
+(defn option-unwrap [o (Option :a) default :a] :a
   (match o
     [(Some v) v]
     [(None) default]))
 
 ; Map over a present Option
-(defn option-map [o f]
+(defn option-map [o (Option :a) f (Fn :a :b :effects :fx)] (Option :b) :effects :fx
   (match o
     [(Some v) (Some (f v))]
     [(None) (None)]))
 
 ; Chain Option-returning operations (flatMap/bind)
-(defn option-then [o f]
+(defn option-then [o (Option :a) f (Fn :a (Option :b) :effects :fx)] (Option :b) :effects :fx
   (match o
     [(Some v) (f v)]
     [(None) (None)]))
 
 ; Check if Option has a value
-(defn option-some? [o]
+(defn option-some? [o (Option :a)] :bool
   (match o
     [(Some _) true]
     [(None) false]))
 
 ; --- Erlang Interop Helpers ---
 ; Convert Erlang {:ok, v} / {:error, e} / :ok to Result
-(defn from-erlang-result [tuple]
-  (match tuple
-    [:ok (Ok :ok)]
+(defn from-erlang-result [raw :dyn] (Result :dyn :dyn)
+  (match (decode :atom raw)
+    [(Core.Ok :ok) (Ok raw)]
+    [_ (match (decode (Tuple :atom :dyn) raw)
+      [(Core.Ok {:ok v}) (Ok v)]
+      [(Core.Ok {:error e}) (Err e)]
+      [_ (crash :bad_decode)])]))
+
+; Convert an already checked foreign result without erasing its payload type
+(defn from-task-result [r (Core.TaskResult :a)] (Result :a :dyn)
+  (match r
     [{:ok v} (Ok v)]
     [{:error e} (Err e)]))
 
+; Status-returning Erlang calls use :ok, not {:ok, value}
+(defn from-erlang-status [raw :dyn] (Result :atom :dyn)
+  (match (decode :atom raw)
+    [(Core.Ok :ok) (Ok :ok)]
+    [_ (match (decode (Tuple :atom :dyn) raw)
+      [(Core.Ok {:error e}) (Err e)]
+      [_ (crash :bad_decode)])]))
+
 ; Convert Result to Erlang tuple
-(defn to-erlang-result [r]
+(defn to-erlang-result [r (Result :dyn :dyn)] (Tuple :atom :dyn)
   (match r
     [(Ok v) {:ok v}]
     [(Err e) {:error e}]))
@@ -74,21 +90,21 @@
 ; --- Boolean Helpers ---
 
 ; Boolean negation
-(defn not [b]
+(defn not [b :bool] :bool
   (if b false true))
 
 ; --- IO Helpers ---
 
-(extern io/format [:string (List :any)] :atom)
+(extern io/format [:string (List :dyn)] :atom)
 
 ; Print a string with newline
-(defn println [s]
-  (io/format "~s~n" (list s)))
+(defn println [s :string] :atom
+  (io/format "~s~n" (list (up :string s))))
 
 ; Print a string without newline
-(defn print [s]
-  (io/format "~s" (list s)))
+(defn print [s :string] :atom
+  (io/format "~s" (list (up :string s))))
 
 ; Print any value (for debugging) - shows Erlang term representation
-(defn inspect [x]
+(defn inspect [x :dyn] :atom
   (io/format "~p" (list x)))

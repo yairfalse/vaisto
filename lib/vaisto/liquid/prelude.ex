@@ -11,28 +11,28 @@ defmodule Vaisto.Liquid.Prelude do
   @prelude Vaisto.Liquid.Canonical.parse!(
              """
              ((def prelude.map
-                (forall ((a Type) (b Type)) (-> ((-> ((tvar a)) (eff closed) (tvar b)) (List (tvar a))) (eff closed) (List (tvar b))))
-                (fn ((f (-> ((tvar a)) (eff closed) (tvar b))) (xs (List (tvar a))))
+                (forall ((a Type) (b Type) (e Eff)) (-> ((-> ((tvar a)) (eff (evar e)) (tvar b)) (List (tvar a))) (eff (evar e)) (List (tvar b))))
+                (fn ((f (-> ((tvar a)) (eff (evar e)) (tvar b))) (xs (List (tvar a))))
                   (match xs
                     ((inj (List (tvar a)) Nil) (inj (List (tvar b)) Nil))
                     ((inj (List (tvar a)) Cons h t)
                      (let ((y (tvar b) (app f h)))
-                       (inj (List (tvar b)) Cons y (app (inst prelude.map (tvar a) (tvar b)) f t)))))))
+                       (inj (List (tvar b)) Cons y (app (inst prelude.map (tvar a) (tvar b) (eff (evar e))) f t)))))))
               (def prelude.filter
-                (forall ((a Type)) (-> ((-> ((tvar a)) (eff closed) (Bool)) (List (tvar a))) (eff closed) (List (tvar a))))
-                (fn ((p (-> ((tvar a)) (eff closed) (Bool))) (xs (List (tvar a))))
+                (forall ((a Type) (e Eff)) (-> ((-> ((tvar a)) (eff (evar e)) (Bool)) (List (tvar a))) (eff (evar e)) (List (tvar a))))
+                (fn ((p (-> ((tvar a)) (eff (evar e)) (Bool))) (xs (List (tvar a))))
                   (match xs
                     ((inj (List (tvar a)) Nil) (inj (List (tvar a)) Nil))
                     ((inj (List (tvar a)) Cons h t)
                      (if (app p h)
-                         (inj (List (tvar a)) Cons h (app (inst prelude.filter (tvar a)) p t))
-                         (app (inst prelude.filter (tvar a)) p t))))))
+                         (inj (List (tvar a)) Cons h (app (inst prelude.filter (tvar a) (eff (evar e))) p t))
+                         (app (inst prelude.filter (tvar a) (eff (evar e))) p t))))))
               (def prelude.fold
-                (forall ((a Type) (b Type)) (-> ((-> ((tvar b) (tvar a)) (eff closed) (tvar b)) (tvar b) (List (tvar a))) (eff closed) (tvar b)))
-                (fn ((f (-> ((tvar b) (tvar a)) (eff closed) (tvar b))) (acc (tvar b)) (xs (List (tvar a))))
+                (forall ((a Type) (b Type) (e Eff)) (-> ((-> ((tvar b) (tvar a)) (eff (evar e)) (tvar b)) (tvar b) (List (tvar a))) (eff (evar e)) (tvar b)))
+                (fn ((f (-> ((tvar b) (tvar a)) (eff (evar e)) (tvar b))) (acc (tvar b)) (xs (List (tvar a))))
                   (match xs
                     ((inj (List (tvar a)) Nil) acc)
-                    ((inj (List (tvar a)) Cons h t) (app (inst prelude.fold (tvar a) (tvar b)) f (app f acc h) t)))))
+                    ((inj (List (tvar a)) Cons h t) (app (inst prelude.fold (tvar a) (tvar b) (eff (evar e))) f (app f acc h) t)))))
               (def prelude.append
                 (forall ((a Type)) (-> ((List (tvar a)) (List (tvar a))) (eff closed) (List (tvar a))))
                 (fn ((xs (List (tvar a))) (ys (List (tvar a))))
@@ -40,13 +40,13 @@ defmodule Vaisto.Liquid.Prelude do
                     ((inj (List (tvar a)) Nil) ys)
                     ((inj (List (tvar a)) Cons h t) (inj (List (tvar a)) Cons h (app (inst prelude.append (tvar a)) t ys))))))
               (def prelude.flat_map
-                (forall ((a Type) (b Type)) (-> ((-> ((tvar a)) (eff closed) (List (tvar b))) (List (tvar a))) (eff closed) (List (tvar b))))
-                (fn ((f (-> ((tvar a)) (eff closed) (List (tvar b)))) (xs (List (tvar a))))
+                (forall ((a Type) (b Type) (e Eff)) (-> ((-> ((tvar a)) (eff (evar e)) (List (tvar b))) (List (tvar a))) (eff (evar e)) (List (tvar b))))
+                (fn ((f (-> ((tvar a)) (eff (evar e)) (List (tvar b)))) (xs (List (tvar a))))
                   (match xs
                     ((inj (List (tvar a)) Nil) (inj (List (tvar b)) Nil))
                     ((inj (List (tvar a)) Cons h t)
                      (let ((ys (List (tvar b)) (app f h)))
-                       (app (inst prelude.append (tvar b)) ys (app (inst prelude.flat_map (tvar a) (tvar b)) f t))))))))
+                       (app (inst prelude.append (tvar b)) ys (app (inst prelude.flat_map (tvar a) (tvar b) (eff (evar e))) f t))))))))
              """,
              atoms: :create
            )

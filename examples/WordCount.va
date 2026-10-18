@@ -8,15 +8,15 @@
 ; Erlang string split with global option
 (extern binary/split [:string :string (List :atom)] (List :string))
 
-(defn split-all [text delim]
+(defn split-all [text :string delim :string] (List :string)
   (binary/split text delim (list :global)))
 
 ; Count words in a string (split by spaces)
-(defn count-words [text]
+(defn count-words [text :string] :int
   (Std.List/length (split-all text " ")))
 
 ; Main
-(defn main []
+(defn main [] :atom
   (match (Std.File/read-file "examples/WordCount.va")
     [(Ok contents)
       (let [lines (Std.List/length (split-all contents "\n"))

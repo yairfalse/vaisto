@@ -358,7 +358,7 @@ defmodule Vaisto.Liquid.EvalTest do
       assert_raise Stuck, fn -> ev("unbound") end
       assert_raise Stuck, fn -> ev("(prim add 1 1.0)") end
       assert_raise Stuck, fn -> ev("(app (fn ((x Int)) x) 1 2)") end
-      assert_raise Stuck, fn -> ev("(decode Int 1)") end
+      assert_raise Stuck, fn -> ev("(decode Int)") end
     end
   end
 end

@@ -211,8 +211,12 @@ defmodule Vaisto.Liquid.LintTest do
       rejects("(up (-> (Int) (eff closed) Int) (fn ((x Int)) x))", "not ground data")
     end
 
-    test "decode is not in version 0" do
-      rejects("(decode Int (up Int 1))", "decode is not in")
+    test "decode checks Dyn and synthesizes a typed result" do
+      accepts("(decode Int (up Int 1))", "(Core.Result (Core.DecodeError) Int)")
+      rejects("(decode Int 1)", "expected Dyn, found Int")
+      rejects("(decode (-> (Int) (eff closed) Int) (up Int 1))", "not decodable")
+      rejects("(decode (Pid Int) (up Int 1))", "not decodable")
+      accepts("(decode (Pid Dyn) (up Int 1))", "(Core.Result (Core.DecodeError) (Pid Dyn))")
     end
   end
 

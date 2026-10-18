@@ -3,28 +3,28 @@
 
 ; fold/reduce: (fold fn init list)
 ; Folds a list from the left, applying fn(acc, elem) for each element
-(defn fold [f init xs]
+(defn fold [f (Fn :b :a :b :effects :fx) init :b xs (List :a)] :b :effects :fx
   (if (empty? xs)
     init
     (fold f (f init (head xs)) (tail xs))))
 
 ; fold-right: (fold-right fn init list)
 ; Folds a list from the right
-(defn fold-right [f init xs]
+(defn fold-right [f (Fn :a :b :b :effects :fx) init :b xs (List :a)] :b :effects :fx
   (if (empty? xs)
     init
     (f (head xs) (fold-right f init (tail xs)))))
 
 ; map: (map fn list)
 ; Applies fn to each element, returns new list
-(defn map [f xs]
+(defn map [f (Fn :a :b :effects :fx) xs (List :a)] (List :b) :effects :fx
   (if (empty? xs)
     (list)
     (cons (f (head xs)) (map f (tail xs)))))
 
 ; filter: (filter pred list)
 ; Returns list of elements where (pred elem) is true
-(defn filter [pred xs]
+(defn filter [pred (Fn :a :bool :effects :fx) xs (List :a)] (List :a) :effects :fx
   (if (empty? xs)
     (list)
     (if (pred (head xs))
@@ -33,22 +33,22 @@
 
 ; length: (length list)
 ; Returns the number of elements
-(defn length [xs] :int
+(defn length [xs (List :a)] :int
   (fold (fn [acc _] (+ acc 1)) 0 xs))
 
 ; reverse: (reverse list)
 ; Returns a new list with elements in reverse order
-(defn reverse [xs]
+(defn reverse [xs (List :a)] (List :a)
   (fold (fn [acc x] (cons x acc)) (list) xs))
 
 ; append: (append list1 list2)
 ; Concatenates two lists
-(defn append [xs ys]
+(defn append [xs (List :a) ys (List :a)] (List :a)
   (fold-right cons ys xs))
 
 ; take: (take n list)
 ; Returns first n elements
-(defn take [n :int xs]
+(defn take [n :int xs (List :a)] (List :a)
   (if (== n 0)
     (list)
     (if (empty? xs)
@@ -57,7 +57,7 @@
 
 ; drop: (drop n list)
 ; Returns list without first n elements
-(defn drop [n :int xs]
+(defn drop [n :int xs (List :a)] (List :a)
   (if (== n 0)
     xs
     (if (empty? xs)
@@ -66,7 +66,7 @@
 
 ; nth: (nth n list)
 ; Returns element at index n (0-based), or (None) if out of bounds
-(defn nth [n :int xs]
+(defn nth [n :int xs (List :a)] (Option :a)
   (if (empty? xs)
     (None)
     (if (== n 0)
@@ -75,7 +75,7 @@
 
 ; find: (find pred list)
 ; Returns first element matching predicate, or (None)
-(defn find [pred xs]
+(defn find [pred (Fn :a :bool :effects :fx) xs (List :a)] (Option :a) :effects :fx
   (if (empty? xs)
     (None)
     (if (pred (head xs))
@@ -84,7 +84,7 @@
 
 ; any?: (any? pred list)
 ; Returns true if any element satisfies predicate
-(defn any? [pred xs] :bool
+(defn any? [pred (Fn :a :bool :effects :fx) xs (List :a)] :bool :effects :fx
   (if (empty? xs)
     false
     (if (pred (head xs))
@@ -93,7 +93,7 @@
 
 ; all?: (all? pred list)
 ; Returns true if all elements satisfy predicate
-(defn all? [pred xs] :bool
+(defn all? [pred (Fn :a :bool :effects :fx) xs (List :a)] :bool :effects :fx
   (if (empty? xs)
     true
     (if (pred (head xs))
@@ -102,7 +102,7 @@
 
 ; zip: (zip list1 list2)
 ; Combines two lists into list of tuples
-(defn zip [xs ys]
+(defn zip [xs (List :a) ys (List :b)] (List (Tuple :atom :a :b))
   (if (empty? xs)
     (list)
     (if (empty? ys)
@@ -111,58 +111,68 @@
 
 ; range: (range start end)
 ; Creates a list of integers from start to end-1
-(defn range [start :int end :int]
+(defn range [start :int end :int] (List :int)
   (if (>= start end)
     (list)
     (cons start (range (+ start 1) end))))
 
 ; sum: (sum list)
 ; Returns sum of all elements
-(defn sum [xs] :int
-  (fold (fn [a b] (+ a b)) 0 xs))
+(defn sum [xs (List :a)] :a where [(Num a)]
+  (fold (fn [a b] (+ a b)) (the :a 0) xs))
 
 ; product: (product list)
 ; Returns product of all elements
-(defn product [xs] :int
-  (fold (fn [a b] (* a b)) 1 xs))
+(defn product [xs (List :a)] :a where [(Num a)]
+  (fold (fn [a b] (* a b)) (the :a 1) xs))
 
 ; max: (max list)
 ; Returns maximum element, or (None) for empty list
-(defn max [xs]
+(defn max [xs (List :a)] (Option :a) where [(Ord a)]
   (if (empty? xs)
     (None)
     (Some (fold (fn [acc x] (if (> x acc) x acc)) (head xs) (tail xs)))))
 
 ; min: (min list)
 ; Returns minimum element, or (None) for empty list
-(defn min [xs]
+(defn min [xs (List :a)] (Option :a) where [(Ord a)]
   (if (empty? xs)
     (None)
     (Some (fold (fn [acc x] (if (< x acc) x acc)) (head xs) (tail xs)))))
 
 ; --- Sorting ---
 
-; Erlang FFI for sorting
-(extern lists/sort [(List :any)] (List :any))
-(extern lists/sort [:any (List :any)] (List :any))
+; Typed merge sort keeps callbacks in Core rather than erasing them through FFI.
+(defn merge-sorted [cmp (Fn :a :a :bool :effects :fx) xs (List :a) ys (List :a)] (List :a) :effects :fx
+  (if (empty? xs) ys
+    (if (empty? ys) xs
+      (if (cmp (head xs) (head ys))
+        (cons (head xs) (merge-sorted cmp (tail xs) ys))
+        (cons (head ys) (merge-sorted cmp xs (tail ys)))))))
 
 ; sort: (sort list)
 ; Returns list sorted in ascending order
-(defn sort [xs]
-  (lists/sort xs))
+(defn sort [xs (List :a)] (List :a) where [(Ord a)]
+  (sort-with (fn [a b] (<= a b)) xs))
 
 ; sort-desc: (sort-desc list)
 ; Returns list sorted in descending order
-(defn sort-desc [xs]
-  (lists/sort (fn [a b] (> a b)) xs))
+(defn sort-desc [xs (List :a)] (List :a) where [(Ord a)]
+  (sort-with (fn [a b] (>= a b)) xs))
 
 ; sort-by: (sort-by key-fn list)
 ; Sorts list by the result of applying key-fn to each element
-(defn sort-by [key-fn xs]
-  (lists/sort (fn [a b] (< (key-fn a) (key-fn b))) xs))
+(defn sort-by [key-fn (Fn :a :k :effects :fx) xs (List :a)] (List :a) :effects :fx where [(Ord k)]
+  (sort-with (the (Fn :a :a :bool :effects :fx)
+    (fn [a b] (<= (key-fn a) (key-fn b)))) xs))
 
 ; sort-with: (sort-with compare-fn list)
 ; Sorts list using custom comparison function
-; compare-fn should return true if first arg should come before second
-(defn sort-with [cmp xs]
-  (lists/sort cmp xs))
+; compare-fn should return true if the first arg belongs before or alongside the second
+(defn sort-with [cmp (Fn :a :a :bool :effects :fx) xs (List :a)] (List :a) :effects :fx
+  (if (empty? xs) xs
+    (if (empty? (tail xs)) xs
+      (let [half (div (length xs) 2)]
+        (merge-sorted cmp
+          (sort-with cmp (take half xs))
+          (sort-with cmp (drop half xs)))))))

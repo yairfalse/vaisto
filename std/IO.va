@@ -1,22 +1,21 @@
 ; Std.IO - Input/Output operations
 (ns Std.IO)
 
-; Print to stdout with format string and args
-(extern io/format [:string (List :any)] :atom)
+; io/format's checked declaration is supplied by the prelude.
 
 ; Read a line from stdin
-(extern io/get_line [:string] :string)
+(extern io/get_line [:string] :dyn)
 
 ; File operations
 
 ; Read entire file contents
-(extern file/read_file [:string] :any)
+(extern file/read_file [:string] (Core.TaskResult :string))
 
 ; Write string to file (overwrites)
-(extern file/write_file [:string :string] :any)
+(extern file/write_file [:string :string] :dyn)
 
 ; Append string to file
-(extern file/write_file_append [:string :string (List :atom)] :any)
+(extern file/write_file [:string :string (List :atom)] :dyn)
 
 ; Check if file exists
 (extern filelib/is_file [:string] :bool)
@@ -25,30 +24,30 @@
 (extern filelib/is_dir [:string] :bool)
 
 ; List files in directory
-(extern file/list_dir [:string] :any)
+(extern file/list_dir [:string] (Core.TaskResult (List (List :int))))
 
 ; Delete a file
-(extern file/delete [:string] :any)
+(extern file/delete [:string] :dyn)
 
 ; Create a directory
-(extern file/make_dir [:string] :any)
+(extern file/make_dir [:string] :dyn)
 
 ; Higher-level helpers
 ; Note: println and print are defined in prelude for convenience
 
 ; Read file, returning Result
-(defn read-file [path]
-  (from-erlang-result (file/read_file path)))
+(defn read-file [path :string] (Result :string :dyn)
+  (from-task-result (file/read_file path)))
 
 ; Write file, returning Result
-(defn write-file [path content]
-  (from-erlang-result (file/write_file path content)))
+(defn write-file [path :string content :string] (Result :atom :dyn)
+  (from-erlang-status (file/write_file path content)))
 
 ; Print formatted string (like printf)
-(defn printf [format-str args]
+(defn printf [format-str :string args (List :dyn)] :atom
   (io/format format-str args))
 
 ; Print value for debugging with label
-(defn debug [label value]
-  (let [_ (io/format "~s: ~p~n" (list label value))]
+(defn debug [label :string value :a] :a where [(Show a)]
+  (let [_ (io/format "~s: ~s~n" (list (up :string label) (up :string (show value))))]
     value))

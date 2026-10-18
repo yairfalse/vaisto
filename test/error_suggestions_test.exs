@@ -1,10 +1,10 @@
 defmodule Vaisto.ErrorSuggestionsTest do
   use ExUnit.Case
-  alias Vaisto.{Parser, TypeChecker, Error}
+  alias Vaisto.{Elab, Parser, Error}
 
   defp check(code) do
     ast = Parser.parse(code)
-    TypeChecker.check(ast)
+    Elab.module(ast)
   end
 
   defp error_hint({:error, %Error{hint: hint}}), do: hint

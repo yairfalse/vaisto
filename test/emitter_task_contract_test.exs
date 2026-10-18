@@ -1,7 +1,7 @@
 defmodule Vaisto.EmitterTaskContractTest do
   use ExUnit.Case, async: false
 
-  alias Vaisto.{Emitter, Error, Parser, TypeChecker}
+  alias Vaisto.{Compilation, Error}
 
   setup do
     prev_llm = Application.get_env(:vaisto, :llm)
@@ -43,9 +43,7 @@ defmodule Vaisto.EmitterTaskContractTest do
       (generate :prompt summarize :extract Answer))
     """
 
-    ast = Parser.parse(code)
-    assert {:ok, :module, typed_ast} = TypeChecker.check(ast)
-    assert {:ok, EmitTaskContractE2E, _} = Emitter.compile(typed_ast, EmitTaskContractE2E)
+    assert {:ok, EmitTaskContractE2E, _} = Compilation.compile(code, EmitTaskContractE2E)
 
     assert {:ok, {:Answer, "Short answer"}} ==
              apply(EmitTaskContractE2E, :"summarize-question", [{:Question, "A long passage"}])
@@ -65,10 +63,8 @@ defmodule Vaisto.EmitterTaskContractTest do
       (generate :prompt summarize :extract Answer))
     """
 
-    ast = Parser.parse(code)
-    assert {:ok, :module, typed_ast} = TypeChecker.check(ast)
 
-    assert {:error, %Error{} = error} = Emitter.compile(typed_ast, EmitTaskContractMissingTemplate)
+    assert {:error, [%Error{} = error]} = Compilation.compile(code, EmitTaskContractMissingTemplate, format_errors: false)
     assert error.message == "prompt missing template"
     assert error.note =~ "prompt `summarize` requires a :template clause"
   end
